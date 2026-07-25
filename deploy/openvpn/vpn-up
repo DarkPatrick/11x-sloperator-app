@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+index=1
+while eval "option=\${foreign_option_${index}:-}"; [ -n "$option" ]; do
+    case "$option" in
+        "dhcp-option DNS "*)
+            dns_server=${option##* }
+            printf 'nameserver %s\n' "$dns_server" > /etc/resolv.conf
+            exit 0
+            ;;
+    esac
+    index=$((index + 1))
+done

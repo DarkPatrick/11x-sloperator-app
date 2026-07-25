@@ -56,6 +56,7 @@ activity from each supported conversation type.
 - `help`
 - `stop` / `cancel` / `стоп` / `отмена` — cancel the active agent turn in that thread
 - `next: <request>` — queue a separate turn instead of steering the active one
+- `vpn` / `vpn status` / `vpn stop` — manage the isolated corporate VPN
 
 Messages from users other than `SLACK_USER_ID` are ignored.
 Replies are posted into the same Slack thread so they remain visible in the active Chat.
@@ -80,6 +81,22 @@ interrupted and immediately resumed in the same durable session with the additio
 guidance, because its print-mode protocol does not guarantee same-turn steering.
 Sloperator acknowledges accepted guidance in the thread. Prefix a message with
 `next:` when it should wait and run as a distinct follow-up turn.
+
+## Isolated corporate VPN
+
+When LDAP credentials and a VPN profile are configured, Sloperator starts a
+resource-limited OpenVPN container automatically. It completes the LDAP form itself.
+If Keycloak requests an OTP, the bot sends the owner a DM; a bare 6-8 digit reply
+completes that pending login. OTP messages are redacted before local event archival.
+
+The container publishes an HTTP CONNECT proxy on localhost only. When VPN is
+connected, Claude and Codex inherit that proxy, so their HTTP/HTTPS tools can reach
+corporate services without changing host routes or risking the server's SSH session.
+Build the pinned local image after cloning or whenever its definition changes:
+
+```bash
+sudo docker build -t local/openvpn-agent:24.04 deploy/openvpn
+```
 
 Claude Opus is the default. Select the provider and model in the first message:
 

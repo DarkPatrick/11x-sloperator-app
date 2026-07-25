@@ -20,6 +20,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sloperator.codex_app_server import CodexAppServer
 from sloperator.config import Settings
 from sloperator.store import AgentSession, EventStore
+from sloperator.vpn import VpnManager, VpnState
 
 LOGGER = logging.getLogger(__name__)
 DIRECTIVE_RE = re.compile(
@@ -184,6 +185,7 @@ async def _run_process(
     cwd: str,
     timeout_seconds: int,
     control: ActiveAgentRun | None = None,
+    environment_overrides: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     environment = {
         key: value
@@ -191,6 +193,7 @@ async def _run_process(
         if not key.startswith(("SLACK_", "SLOPERATOR_"))
     }
     environment["UG_SKIP_PREFLIGHT"] = "0"
+    environment.update(environment_overrides or {})
     process = await asyncio.create_subprocess_exec(
         *command,
         cwd=cwd,
@@ -244,6 +247,7 @@ async def run_claude(
     control: ActiveAgentRun,
     *,
     force_resume: bool = False,
+    environment_overrides: dict[str, str] | None = None,
 ) -> AgentRunResult:
     """Run or resume one Claude Code turn."""
     new_session = (
@@ -275,6 +279,7 @@ async def run_claude(
         cwd=str(settings.agent_workspace),
         timeout_seconds=settings.agent_timeout_seconds,
         control=control,
+        environment_overrides=environment_overrides,
     )
     try:
         payload = json.loads(stdout)
@@ -299,6 +304,7 @@ async def run_codex(
     prompt: str,
     control: ActiveAgentRun,
     store: EventStore,
+    environment_overrides: dict[str, str] | None = None,
 ) -> AgentRunResult:
     """Run or resume one steerable Codex App Server turn."""
     server = CodexAppServer(
@@ -306,6 +312,7 @@ async def run_codex(
         settings.agent_workspace,
         session.model,
         settings.agent_timeout_seconds,
+        environment_overrides,
     )
     control.codex = server
     try:
@@ -336,9 +343,15 @@ async def run_codex(
 class AgentOrchestrator:
     """Queue agent turns and serialize messages belonging to the same thread."""
 
-    def __init__(self, settings: Settings, store: EventStore) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        store: EventStore,
+        vpn: VpnManager | None = None,
+    ) -> None:
         self.settings = settings
         self.store = store
+        self.vpn = vpn
         self._semaphore = asyncio.Semaphore(settings.agent_max_concurrency)
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
@@ -528,6 +541,12 @@ class AgentOrchestrator:
                 )
                 control = ActiveAgentRun(session.provider)
                 self._active_runs[key] = control
+                environment_overrides = (
+                    self.vpn.agent_environment()
+                    if self.vpn is not None
+                    and await self.vpn.state() is VpnState.CONNECTED
+                    else None
+                )
                 try:
                     if session.provider == "claude":
                         prompt = parsed.prompt
@@ -540,6 +559,7 @@ class AgentOrchestrator:
                                     prompt,
                                     control,
                                     force_resume=force_resume,
+                                    environment_overrides=environment_overrides,
                                 )
                             except AgentSteeringInterrupt:
                                 additions = control.take_claude_steering()
@@ -566,6 +586,7 @@ class AgentOrchestrator:
                             parsed.prompt,
                             control,
                             self.store,
+                            environment_overrides,
                         )
                 finally:
                     if self._active_runs.get(key) is control:

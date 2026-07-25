@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -115,3 +116,31 @@ def test_store_tracks_agent_sessions_and_deduplicates_requests(tmp_path: Path) -
 
     assert recovered is not None
     assert recovered.status == "cancelled"
+
+
+def test_store_redacts_vpn_otp_from_event_and_message(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "archive.sqlite3")
+    store.initialize()
+    body = {
+        "event_id": "EvOtp",
+        "event": {
+            "type": "message",
+            "channel": "D123",
+            "user": "U123",
+            "ts": "123.456",
+            "text": "vpn otp 123456",
+        },
+    }
+
+    store.record_event(body, body["event"])
+
+    with sqlite3.connect(store.path) as connection:
+        payload = connection.execute(
+            "SELECT payload_json FROM events WHERE event_id = 'EvOtp'"
+        ).fetchone()[0]
+        text, raw = connection.execute(
+            "SELECT text, raw_json FROM messages WHERE message_ts = '123.456'"
+        ).fetchone()
+    assert "123456" not in payload
+    assert "123456" not in text
+    assert "123456" not in raw

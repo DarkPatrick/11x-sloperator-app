@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+mkdir -p /run/tinyproxy
+/usr/bin/tinyproxy -c /etc/tinyproxy/tinyproxy.conf
+
+exec /usr/sbin/openvpn \
+    --script-security 2 \
+    --up /usr/local/bin/vpn-up \
+    "$@"

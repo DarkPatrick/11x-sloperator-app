@@ -42,6 +42,12 @@ class Settings:
     codex_cli: Path = Path("/usr/bin/codex")
     agent_timeout_seconds: int = 1_800
     agent_max_concurrency: int = 2
+    ldap_username: str | None = None
+    ldap_password: str | None = None
+    vpn_profile: Path = Path("/home/egor/hz config 2fa.ovpn")
+    vpn_image: str = "local/openvpn-agent:24.04"
+    vpn_container: str = "sloperator-vpn"
+    vpn_proxy_port: int = 18_888
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -49,7 +55,7 @@ class Settings:
         # Production systemd loads EnvironmentFile before making the secret
         # file inaccessible to this process and all spawned agent CLIs.
         with suppress(PermissionError):
-            load_dotenv()
+            load_dotenv(interpolate=False)
 
         user_id = _required("SLACK_USER_ID")
         bot_token = _required("SLOPERATOR_SLACK_BOT_TOKEN")
@@ -72,6 +78,17 @@ class Settings:
             os.environ.get("SLOPERATOR_CLAUDE_CLI", "/home/egor/.local/bin/claude")
         ).expanduser()
         codex_cli = Path(os.environ.get("SLOPERATOR_CODEX_CLI", "/usr/bin/codex")).expanduser()
+        ldap_username = os.environ.get("LDAP_USERNAME")
+        ldap_password = os.environ.get("LDAP_PASSWORD")
+        vpn_profile = Path(
+            os.environ.get("SLOPERATOR_VPN_PROFILE", "/home/egor/hz config 2fa.ovpn")
+        ).expanduser()
+        vpn_image = os.environ.get(
+            "SLOPERATOR_VPN_IMAGE", "local/openvpn-agent:24.04"
+        ).strip()
+        vpn_container = os.environ.get(
+            "SLOPERATOR_VPN_CONTAINER", "sloperator-vpn"
+        ).strip()
 
         try:
             port = int(os.environ.get("SLOPERATOR_PORT", "8080"))
@@ -79,6 +96,7 @@ class Settings:
             sync_interval_seconds = int(os.environ.get("SLOPERATOR_SYNC_INTERVAL_SECONDS", "300"))
             agent_timeout_seconds = int(os.environ.get("SLOPERATOR_AGENT_TIMEOUT_SECONDS", "1800"))
             agent_max_concurrency = int(os.environ.get("SLOPERATOR_AGENT_MAX_CONCURRENCY", "2"))
+            vpn_proxy_port = int(os.environ.get("SLOPERATOR_VPN_PROXY_PORT", "18888"))
         except ValueError as error:
             raise ConfigurationError(
                 "Port, archive limits, and agent limits must be integers"
@@ -110,6 +128,14 @@ class Settings:
             )
         if not 1 <= agent_max_concurrency <= 8:
             raise ConfigurationError("SLOPERATOR_AGENT_MAX_CONCURRENCY must be between 1 and 8")
+        if not 1 <= vpn_proxy_port <= 65_535:
+            raise ConfigurationError("SLOPERATOR_VPN_PROXY_PORT must be between 1 and 65535")
+        if bool(ldap_username) != bool(ldap_password):
+            raise ConfigurationError("LDAP_USERNAME and LDAP_PASSWORD must be set together")
+        if ldap_username and any(character in ldap_username for character in "\r\n"):
+            raise ConfigurationError("LDAP_USERNAME must not contain line breaks")
+        if ldap_password and any(character in ldap_password for character in "\r\n"):
+            raise ConfigurationError("LDAP_PASSWORD must not contain line breaks")
         if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ConfigurationError("SLOPERATOR_LOG_LEVEL is invalid")
 
@@ -131,4 +157,10 @@ class Settings:
             codex_cli=codex_cli,
             agent_timeout_seconds=agent_timeout_seconds,
             agent_max_concurrency=agent_max_concurrency,
+            ldap_username=ldap_username,
+            ldap_password=ldap_password,
+            vpn_profile=vpn_profile,
+            vpn_image=vpn_image,
+            vpn_container=vpn_container,
+            vpn_proxy_port=vpn_proxy_port,
         )

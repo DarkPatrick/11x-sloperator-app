@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -107,10 +108,28 @@ CREATE TABLE IF NOT EXISTS agent_requests (
     PRIMARY KEY (channel_id, message_ts)
 ) STRICT;
 """
+OTP_MESSAGE_RE = re.compile(r"^\s*(?:vpn\s+otp\s+)?\d{6,8}\s*$", re.IGNORECASE)
+REDACTED_OTP = "[redacted one-time code]"
 
 
 def _json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _redact_otp_message(event: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Remove ephemeral VPN codes before any local persistence."""
+    channel = event.get("channel")
+    text = event.get("text")
+    if (
+        isinstance(channel, str)
+        and channel.startswith("D")
+        and isinstance(text, str)
+        and OTP_MESSAGE_RE.fullmatch(text)
+    ):
+        redacted = dict(event)
+        redacted["text"] = REDACTED_OTP
+        return redacted
+    return event
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +219,9 @@ class EventStore:
 
     def record_event(self, body: Mapping[str, Any], event: Mapping[str, Any]) -> None:
         """Persist an Events API envelope and its normalized message."""
+        event = _redact_otp_message(event)
+        if body.get("event") is not event:
+            body = {**body, "event": event}
         event_id = body.get("event_id")
         if not isinstance(event_id, str):
             event_id = (
@@ -231,7 +253,11 @@ class EventStore:
     ) -> None:
         with self._connect() as connection:
             for message in messages:
-                self._upsert_message(connection, message, channel_id)
+                self._upsert_message(
+                    connection,
+                    _redact_otp_message({**message, "channel": channel_id}),
+                    channel_id,
+                )
 
     def _upsert_message(
         self,

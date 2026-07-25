@@ -14,6 +14,7 @@ from sloperator.agents import AgentOrchestrator, SubmitResult, thread_key
 from sloperator.archive import ArchiveMiddleware
 from sloperator.config import Settings
 from sloperator.store import EventStore
+from sloperator.vpn import VpnError, VpnManager, VpnState
 
 LOGGER = logging.getLogger(__name__)
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
@@ -36,6 +37,7 @@ def response_for(command: str) -> str:
                 "• `status` — bot status\n"
                 "• `stop` / `отмена` — остановить агента в этом треде\n"
                 "• `next: запрос` — поставить отдельный следующий ход\n"
+                "• `vpn` / `vpn status` / `vpn stop` — корпоративный VPN\n"
                 "• `help` — this message\n\n"
                 "Сообщение во время работы уточняет текущий ход агента.\n"
                 "Любой другой текст запускает или продолжает сессию в этом треде.\n"
@@ -62,6 +64,7 @@ def create_app(
     settings: Settings,
     store: EventStore,
     orchestrator: AgentOrchestrator,
+    vpn: VpnManager,
 ) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
@@ -91,8 +94,46 @@ def create_app(
             return
 
         command = normalize_command(text)
-        if command in CANCEL_COMMANDS:
-            active_thread_ts = reply_thread_ts(event)
+        active_thread_ts = reply_thread_ts(event)
+        if command in {"vpn", "vpn connect", "vpn start"}:
+            try:
+                state = await vpn.connect()
+                response = _vpn_state_response(state)
+            except VpnError as error:
+                response = f"VPN не запущен: {error}"
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_key(message_ts, active_thread_ts),
+                text=response,
+            )
+        elif command == "vpn status":
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_key(message_ts, active_thread_ts),
+                text=_vpn_state_response(await vpn.state()),
+            )
+        elif command == "vpn stop":
+            await vpn.stop()
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_key(message_ts, active_thread_ts),
+                text="VPN остановлен.",
+            )
+        elif (
+            (otp_match := re.fullmatch(r"(?:vpn otp\s+)?(\d{6,8})", command))
+            and await vpn.state() is VpnState.WAITING_OTP
+        ):
+            try:
+                state = await vpn.submit_otp(otp_match.group(1))
+                response = _vpn_state_response(state)
+            except VpnError as error:
+                response = f"VPN: {error}"
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_key(message_ts, active_thread_ts),
+                text=response,
+            )
+        elif command in CANCEL_COMMANDS:
             if active_thread_ts is None:
                 response = "Команда остановки работает внутри треда активной сессии."
             elif await orchestrator.cancel(channel, active_thread_ts):
@@ -127,3 +168,20 @@ def create_app(
                 )
 
     return app
+
+
+def _vpn_state_response(state: VpnState) -> str:
+    match state:
+        case VpnState.CONNECTED:
+            return "VPN подключён; агентский HTTP/HTTPS-трафик идёт через VPN proxy."
+        case VpnState.WAITING_OTP:
+            return (
+                "LDAP принят. VPN ожидает одноразовый код - пришлите сюда "
+                "6-8 цифр отдельным сообщением."
+            )
+        case VpnState.CONNECTING:
+            return "VPN подключается…"
+        case VpnState.STOPPED:
+            return "VPN остановлен."
+        case VpnState.FAILED:
+            return "VPN connection failed."

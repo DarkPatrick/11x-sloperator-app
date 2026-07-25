@@ -28,11 +28,13 @@ class CodexAppServer:
         workspace: Path,
         model: str,
         timeout_seconds: int,
+        environment_overrides: Mapping[str, str] | None = None,
     ) -> None:
         self.executable = executable
         self.workspace = workspace
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.environment_overrides = dict(environment_overrides or {})
         self.process: asyncio.subprocess.Process | None = None
         self.thread_id: str | None = None
         self.turn_id: str | None = None
@@ -43,14 +45,14 @@ class CodexAppServer:
         self._request_id = 0
         self._write_lock = asyncio.Lock()
 
-    @staticmethod
-    def _environment() -> dict[str, str]:
+    def _environment(self) -> dict[str, str]:
         environment = {
             key: value
             for key, value in os.environ.items()
             if not key.startswith(("SLACK_", "SLOPERATOR_"))
         }
         environment["UG_SKIP_PREFLIGHT"] = "0"
+        environment.update(self.environment_overrides)
         return environment
 
     async def start(self, existing_thread_id: str | None) -> str:

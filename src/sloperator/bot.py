@@ -10,7 +10,9 @@ from typing import Any
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.archive import ArchiveMiddleware
 from sloperator.config import Settings
+from sloperator.store import EventStore
 
 LOGGER = logging.getLogger(__name__)
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
@@ -45,12 +47,16 @@ def reply_thread_ts(event: Mapping[str, Any]) -> str | None:
     return thread_ts if isinstance(thread_ts, str) else None
 
 
-def create_app(settings: Settings) -> AsyncApp:
+def create_app(settings: Settings, store: EventStore) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
+    app.use(ArchiveMiddleware(store))
 
     @app.event("message")
-    async def handle_message(event: Mapping[str, Any], client: AsyncWebClient) -> None:
+    async def handle_message(
+        event: Mapping[str, Any],
+        client: AsyncWebClient,
+    ) -> None:
         if event.get("subtype") is not None or event.get("bot_id") is not None:
             return
 

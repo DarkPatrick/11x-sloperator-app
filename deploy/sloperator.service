@@ -19,6 +19,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=/home/egor/projects/11x-sloperator-app/data
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

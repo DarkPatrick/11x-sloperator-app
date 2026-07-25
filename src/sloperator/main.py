@@ -10,9 +10,11 @@ from contextlib import suppress
 from aiohttp import web
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
+from sloperator.archive import periodically_synchronize_archive, synchronize_archive
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
 from sloperator.health import create_health_app
+from sloperator.store import EventStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,9 +29,13 @@ def configure_logging(level: str) -> None:
 
 async def serve(settings: Settings) -> None:
     """Run Socket Mode and the health endpoint until termination."""
-    slack_handler = AsyncSocketModeHandler(create_app(settings), settings.app_token)
+    store = EventStore(settings.database_path)
+    await asyncio.to_thread(store.initialize)
+    app = create_app(settings, store)
+    slack_handler = AsyncSocketModeHandler(app, settings.app_token)
     runner = web.AppRunner(create_health_app(), access_log=None)
     stop_event = asyncio.Event()
+    archive_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -42,14 +48,29 @@ async def serve(settings: Settings) -> None:
     try:
         await site.start()
         await slack_handler.connect_async()  # type: ignore[no-untyped-call]
+        await synchronize_archive(app.client, store, settings.backfill_limit)
+        archive_task = asyncio.create_task(
+            periodically_synchronize_archive(
+                app.client,
+                store,
+                settings.backfill_limit,
+                settings.sync_interval_seconds,
+            ),
+            name="slack-archive-sync",
+        )
         LOGGER.info(
-            "Sloperator started; health endpoint listening on http://%s:%d/healthz",
+            "Sloperator started; health endpoint http://%s:%d/healthz; archive %s",
             settings.host,
             settings.port,
+            store.path,
         )
         await stop_event.wait()
     finally:
         LOGGER.info("Sloperator is shutting down")
+        if archive_task is not None:
+            archive_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await archive_task
         await slack_handler.close_async()  # type: ignore[no-untyped-call]
         await runner.cleanup()
 

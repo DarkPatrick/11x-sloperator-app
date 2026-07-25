@@ -221,3 +221,11 @@ __marimo__/
 !.env.example
 .venv-*/
 .ruff_cache/
+
+# Local Slack archive (never commit message data)
+/data/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db

@@ -18,6 +18,7 @@ from sloperator.store import EventStore
 LOGGER = logging.getLogger(__name__)
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
 SUPPORTED_COMMANDS = {"", "help", "помощь", "ping", "status"}
+CANCEL_COMMANDS = {"stop", "cancel", "стоп", "отмена"}
 
 
 def normalize_command(text: str) -> str:
@@ -33,6 +34,7 @@ def response_for(command: str) -> str:
                 "*Sloperator is online.*\n"
                 "• `ping` — connectivity check\n"
                 "• `status` — bot status\n"
+                "• `stop` / `отмена` — остановить агента в этом треде\n"
                 "• `help` — this message\n\n"
                 "Любой другой текст запускает агентскую сессию в этом треде.\n"
                 "По умолчанию: Claude Opus. Выбор для нового Chat:\n"
@@ -87,7 +89,20 @@ def create_app(
             return
 
         command = normalize_command(text)
-        if command in SUPPORTED_COMMANDS:
+        if command in CANCEL_COMMANDS:
+            active_thread_ts = reply_thread_ts(event)
+            if active_thread_ts is None:
+                response = "Команда остановки работает внутри треда активной сессии."
+            elif await orchestrator.cancel(channel, active_thread_ts):
+                response = "Остановлено. Выполнение агента в этом треде отменено."
+            else:
+                response = "Сейчас в этом треде нет выполняющегося запроса."
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_key(message_ts, active_thread_ts),
+                text=response,
+            )
+        elif command in SUPPORTED_COMMANDS:
             response = response_for(command)
             await client.chat_postMessage(
                 channel=channel,

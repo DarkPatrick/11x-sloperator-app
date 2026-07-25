@@ -180,7 +180,7 @@ async def run_claude(
     prompt: str,
 ) -> AgentRunResult:
     """Run or resume one Claude Code turn."""
-    new_session = session.turn_count == 0 and session.status != "failed"
+    new_session = session.turn_count == 0 and session.status not in {"failed", "cancelled"}
     session_id = session.external_session_id or str(uuid.uuid4())
     command = [
         str(settings.claude_cli),
@@ -294,6 +294,7 @@ class AgentOrchestrator:
         self._semaphore = asyncio.Semaphore(settings.agent_max_concurrency)
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        self._thread_tasks: dict[tuple[str, str], set[asyncio.Task[None]]] = {}
 
     async def submit(
         self,
@@ -324,13 +325,29 @@ class AgentOrchestrator:
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
         self._tasks.add(task)
+        key = (channel_id, thread_ts)
+        self._thread_tasks.setdefault(key, set()).add(task)
         task.add_done_callback(self._task_done)
         return True
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
+        for key, tasks in tuple(self._thread_tasks.items()):
+            tasks.discard(task)
+            if not tasks:
+                self._thread_tasks.pop(key, None)
         if not task.cancelled() and (error := task.exception()) is not None:
             LOGGER.error("Unhandled agent task failure: %s", type(error).__name__)
+
+    async def cancel(self, channel_id: str, thread_ts: str) -> bool:
+        """Cancel all queued or running turns belonging to one Slack thread."""
+        tasks = tuple(self._thread_tasks.get((channel_id, thread_ts), ()))
+        if not tasks:
+            return False
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return True
 
     async def drain(self) -> None:
         """Wait until all currently queued turns finish."""
@@ -466,6 +483,12 @@ class AgentOrchestrator:
             await self._reply(client, channel_id, thread_ts, str(error))
             request_status = "rejected"
         except asyncio.CancelledError:
+            await asyncio.to_thread(
+                self.store.cancel_agent_turn,
+                channel_id,
+                thread_ts,
+            )
+            request_status = "cancelled"
             raise
         except Exception as error:
             await asyncio.to_thread(

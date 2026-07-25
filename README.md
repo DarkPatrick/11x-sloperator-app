@@ -54,6 +54,7 @@ activity from each supported conversation type.
 - `ping`
 - `status`
 - `help`
+- `stop` / `cancel` / `стоп` / `отмена` — cancel the active agent turn in that thread
 
 Messages from users other than `SLACK_USER_ID` are ignored.
 Replies are posted into the same Slack thread so they remain visible in the active Chat.
@@ -70,6 +71,7 @@ One Slack thread maps to exactly one durable CLI session:
 - messages in one thread execute serially;
 - different threads are bounded by `SLOPERATOR_AGENT_MAX_CONCURRENCY`;
 - Slack delivery retries are deduplicated before a paid agent turn starts.
+- a stop command in the thread terminates that turn's entire process group.
 
 Claude Opus is the default. Select the provider and model in the first message:
 

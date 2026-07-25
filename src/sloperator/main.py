@@ -33,6 +33,9 @@ async def serve(settings: Settings) -> None:
     validate_agent_runtime(settings)
     store = EventStore(settings.database_path)
     await asyncio.to_thread(store.initialize)
+    recovered = await asyncio.to_thread(store.recover_interrupted_agent_work)
+    if recovered:
+        LOGGER.warning("Recovered %d interrupted agent session(s)", recovered)
     orchestrator = AgentOrchestrator(settings, store)
     app = create_app(settings, store, orchestrator)
     slack_handler = AsyncSocketModeHandler(app, settings.app_token)

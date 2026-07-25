@@ -408,6 +408,37 @@ class EventStore:
                 (error[:4_000], channel_id, thread_ts),
             )
 
+    def cancel_agent_turn(self, channel_id: str, thread_ts: str) -> None:
+        """Record a user-requested cancellation without losing session identity."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_sessions
+                SET status = 'cancelled', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND thread_ts = ?
+                """,
+                (channel_id, thread_ts),
+            )
+
+    def recover_interrupted_agent_work(self) -> int:
+        """Mark nonterminal work left by a previous process as cancelled."""
+        with self._connect() as connection:
+            sessions = connection.execute(
+                """
+                UPDATE agent_sessions
+                SET status = 'cancelled', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'running'
+                """
+            ).rowcount
+            connection.execute(
+                """
+                UPDATE agent_requests
+                SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'queued'
+                """
+            )
+        return sessions
+
     def claim_agent_request(self, channel_id: str, message_ts: str, thread_ts: str) -> bool:
         """Deduplicate Slack retries before they can launch a paid agent turn."""
         with self._connect() as connection:

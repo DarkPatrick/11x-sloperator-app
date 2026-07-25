@@ -97,3 +97,21 @@ def test_store_tracks_agent_sessions_and_deduplicates_requests(tmp_path: Path) -
     assert finished is not None
     assert finished.status == "idle"
     assert finished.turn_count == 1
+
+    store.start_agent_turn("D123", "1.0")
+    store.cancel_agent_turn("D123", "1.0")
+    cancelled = store.get_agent_session("D123", "1.0")
+
+    assert cancelled is not None
+    assert cancelled.status == "cancelled"
+    assert cancelled.external_session_id == finished.external_session_id
+    assert cancelled.turn_count == 1
+
+    store.start_agent_turn("D123", "1.0")
+    assert store.claim_agent_request("D123", "3.0", "1.0")
+
+    assert store.recover_interrupted_agent_work() == 1
+    recovered = store.get_agent_session("D123", "1.0")
+
+    assert recovered is not None
+    assert recovered.status == "cancelled"

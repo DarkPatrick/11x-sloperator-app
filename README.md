@@ -85,9 +85,10 @@ Sloperator acknowledges accepted guidance in the thread. Prefix a message with
 ## Isolated corporate VPN
 
 When LDAP credentials and a VPN profile are configured, Sloperator starts a
-resource-limited OpenVPN container automatically. It completes the LDAP form itself.
-If Keycloak requests an OTP, the bot sends the owner a DM; a bare 6-8 digit reply
-completes that pending login. OTP messages are redacted before local event archival.
+resource-limited OpenVPN container only after the owner replies `vpn ready` or
+`готов` to its DM. It then completes the LDAP form itself and asks for the OTP;
+a bare 6-8 digit reply completes that pending login. OTP messages are redacted
+before local event archival.
 
 The container publishes an HTTP CONNECT proxy on localhost only. When VPN is
 connected, Claude and Codex inherit that proxy, so their HTTP/HTTPS tools can reach

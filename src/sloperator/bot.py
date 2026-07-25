@@ -37,7 +37,9 @@ def response_for(command: str) -> str:
                 "• `status` — bot status\n"
                 "• `stop` / `отмена` — остановить агента в этом треде\n"
                 "• `next: запрос` — поставить отдельный следующий ход\n"
-                "• `vpn` / `vpn status` / `vpn stop` — корпоративный VPN\n"
+                "• `vpn` / `vpn status` — статус корпоративного VPN\n"
+                "• `vpn ready` / `готов` — начать подключение и запросить OTP\n"
+                "• `vpn stop` — остановить VPN\n"
                 "• `help` — this message\n\n"
                 "Сообщение во время работы уточняет текущий ход агента.\n"
                 "Любой другой текст запускает или продолжает сессию в этом треде.\n"
@@ -95,7 +97,7 @@ def create_app(
 
         command = normalize_command(text)
         active_thread_ts = reply_thread_ts(event)
-        if command in {"vpn", "vpn connect", "vpn start"}:
+        if command in {"vpn ready", "vpn connect", "vpn start", "готов"}:
             try:
                 state = await vpn.connect()
                 response = _vpn_state_response(state)
@@ -106,7 +108,7 @@ def create_app(
                 thread_ts=thread_key(message_ts, active_thread_ts),
                 text=response,
             )
-        elif command == "vpn status":
+        elif command in {"vpn", "vpn status"}:
             await client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_key(message_ts, active_thread_ts),

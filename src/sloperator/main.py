@@ -100,18 +100,30 @@ async def _monitor_vpn(
     settings: Settings,
     vpn: VpnManager,
 ) -> None:
-    """Keep VPN available and ask the owner for OTP only when necessary."""
+    """Report unavailable VPN and wait for explicit owner readiness."""
     client = app.client
+    ready_notice_sent = False
     waiting_notice_sent = False
-    error_notice_sent = False
 
     while True:
         try:
             state = await vpn.state()
-            if state in {VpnState.STOPPED, VpnState.FAILED}:
-                state = await vpn.connect()
 
-            if state is VpnState.WAITING_OTP and not waiting_notice_sent:
+            if state in {VpnState.STOPPED, VpnState.FAILED} and not ready_notice_sent:
+                message = (
+                    "VPN сейчас не подключён. Когда будешь готов сразу прислать "
+                    "одноразовый код, напиши `vpn ready` или `готов`. "
+                    "Только после этого я начну подключение."
+                )
+                conversation = await client.conversations_open(
+                    users=settings.slack_user_id
+                )
+                await client.chat_postMessage(
+                    channel=conversation["channel"]["id"],
+                    text=message,
+                )
+                ready_notice_sent = True
+            elif state is VpnState.WAITING_OTP and not waiting_notice_sent:
                 message = (
                     "VPN запущен, LDAP принят. Нужен одноразовый код: "
                     "пришлите сюда 6-8 цифр отдельным сообщением."
@@ -125,20 +137,10 @@ async def _monitor_vpn(
                 )
                 waiting_notice_sent = True
             elif state is VpnState.CONNECTED:
+                ready_notice_sent = False
                 waiting_notice_sent = False
-
-            error_notice_sent = False
         except VpnError as error:
-            LOGGER.error("Automatic VPN connection failed: %s", type(error).__name__)
-            if not error_notice_sent:
-                conversation = await client.conversations_open(
-                    users=settings.slack_user_id
-                )
-                await client.chat_postMessage(
-                    channel=conversation["channel"]["id"],
-                    text=f"Automatic VPN connection failed: {error}",
-                )
-                error_notice_sent = True
+            LOGGER.error("VPN monitoring failed: %s", type(error).__name__)
 
         await asyncio.sleep(60)
 

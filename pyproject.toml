@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sloperator"
+version = "0.1.0"
+description = "A small, reliable private Slack operator bot."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.12,<4",
+    "python-dotenv>=1.1,<2",
+    "slack-bolt>=1.23,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.16,<2",
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.0,<2",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+sloperator = "sloperator.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sloperator"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["sloperator"]
+exclude = ["tests"]

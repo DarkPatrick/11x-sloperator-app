@@ -1,0 +1,35 @@
+[Unit]
+Description=Sloperator Slack bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=egor
+Group=egor
+WorkingDirectory=/home/egor/projects/11x-sloperator-app
+EnvironmentFile=/home/egor/projects/11x-sloperator-app/.env
+ExecStart=/home/egor/projects/11x-sloperator-app/.venv/bin/sloperator
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+SystemCallArchitectures=native
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

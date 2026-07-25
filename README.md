@@ -29,6 +29,7 @@ The liveness endpoint is available at `http://127.0.0.1:8080/healthz`.
 - `help`
 
 Messages from users other than `SLACK_USER_ID` are ignored.
+Replies are posted into the same Slack thread so they remain visible in the active Chat.
 
 ## Production
 

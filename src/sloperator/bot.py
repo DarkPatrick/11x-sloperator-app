@@ -39,6 +39,12 @@ def response_for(command: str) -> str:
             return "Unknown command. Send `help` to see the available commands."
 
 
+def reply_thread_ts(event: Mapping[str, Any]) -> str | None:
+    """Keep replies in the active Slack Chat thread when one is present."""
+    thread_ts = event.get("thread_ts")
+    return thread_ts if isinstance(thread_ts, str) else None
+
+
 def create_app(settings: Settings) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
@@ -58,9 +64,11 @@ def create_app(settings: Settings) -> AsyncApp:
             LOGGER.debug("Ignoring malformed Slack message event")
             return
 
-        await client.chat_postMessage(
-            channel=channel,
-            text=response_for(normalize_command(text)),
-        )
+        response = response_for(normalize_command(text))
+        thread_ts = reply_thread_ts(event)
+        if thread_ts is not None:
+            await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response)
+        else:
+            await client.chat_postMessage(channel=channel, text=response)
 
     return app

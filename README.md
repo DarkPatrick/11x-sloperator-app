@@ -28,6 +28,8 @@ On startup, Sloperator maps every conversation visible to its bot token and perf
 bounded history backfill for conversations it can actually read. New delivered Slack
 events are stored immediately. A bounded reconciliation runs every five minutes to
 recover messages missed because of event configuration or temporary disconnects.
+An event from a previously unknown DM, MPIM, or channel adds it to the map immediately.
+Membership and channel metadata events also trigger an immediate metadata refresh.
 
 The default path is `data/sloperator.sqlite3`. The entire `data/` directory and common
 SQLite database/WAL extensions are ignored by Git. The directory is mode `0700` and

@@ -50,7 +50,7 @@ def reply_thread_ts(event: Mapping[str, Any]) -> str | None:
 def create_app(settings: Settings, store: EventStore) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
-    app.use(ArchiveMiddleware(store))
+    app.use(ArchiveMiddleware(store, app.client))
 
     @app.event("message")
     async def handle_message(

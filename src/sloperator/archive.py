@@ -17,6 +17,14 @@ from slack_sdk.web.async_slack_response import AsyncSlackResponse
 from sloperator.store import EventStore
 
 LOGGER = logging.getLogger(__name__)
+CHANNEL_METADATA_EVENTS = {
+    "channel_archive",
+    "channel_created",
+    "channel_rename",
+    "channel_unarchive",
+    "member_joined_channel",
+    "member_left_channel",
+}
 
 
 def _response_data(response: AsyncSlackResponse) -> Mapping[str, Any]:
@@ -24,6 +32,51 @@ def _response_data(response: AsyncSlackResponse) -> Mapping[str, Any]:
     if not isinstance(data, dict):
         raise TypeError("Slack Web API returned a non-object response")
     return data
+
+
+def event_channel_id(event: Mapping[str, Any]) -> str | None:
+    """Extract a conversation ID from common Slack event shapes."""
+    channel = event.get("channel")
+    if isinstance(channel, str):
+        return channel
+    if isinstance(channel, Mapping):
+        channel_id = channel.get("id")
+        return channel_id if isinstance(channel_id, str) else None
+    item = event.get("item")
+    if isinstance(item, Mapping):
+        channel_id = item.get("channel")
+        return channel_id if isinstance(channel_id, str) else None
+    return None
+
+
+def conversation_kind(channel: Mapping[str, Any]) -> str:
+    """Classify a Slack conversation for the local map."""
+    return "direct" if channel.get("is_im") or channel.get("is_mpim") else "channel"
+
+
+async def refresh_conversation(
+    client: AsyncWebClient,
+    store: EventStore,
+    channel_id: str,
+) -> None:
+    """Fetch and persist the latest metadata for one conversation."""
+    try:
+        response = await client.conversations_info(channel=channel_id, include_num_members=True)
+    except SlackApiError as error:
+        LOGGER.warning(
+            "Could not refresh Slack conversation %s: %s",
+            channel_id,
+            error.response.get("error", "Slack API error"),
+        )
+        return
+    channel = _response_data(response).get("channel")
+    if isinstance(channel, Mapping):
+        await asyncio.to_thread(
+            store.upsert_channels,
+            [channel],
+            conversation_kind(channel),
+        )
+        LOGGER.info("Slack conversation map updated for %s", channel_id)
 
 
 async def _list_conversations(
@@ -159,8 +212,9 @@ async def persist_event(
 class ArchiveMiddleware(AsyncMiddleware):
     """Persist every delivered Events API callback before listener dispatch."""
 
-    def __init__(self, store: EventStore) -> None:
+    def __init__(self, store: EventStore, client: AsyncWebClient) -> None:
         self.store = store
+        self.client = client
 
     async def async_process(
         self,
@@ -173,4 +227,9 @@ class ArchiveMiddleware(AsyncMiddleware):
         event = body.get("event")
         if body.get("type") == "event_callback" and isinstance(event, Mapping):
             await persist_event(self.store, body, event)
+            channel_id = event_channel_id(event)
+            if channel_id is not None:
+                known = await asyncio.to_thread(self.store.contains_channel, channel_id)
+                if not known or event.get("type") in CHANNEL_METADATA_EVENTS:
+                    await refresh_conversation(self.client, self.store, channel_id)
         return await next()

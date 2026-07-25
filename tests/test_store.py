@@ -65,3 +65,5 @@ def test_store_tracks_channels_threads_and_deletions(tmp_path: Path) -> None:
     assert summary["channels"] == 1
     assert summary["member_channels"] == 1
     assert summary["threads"] == 1
+    assert store.contains_channel("C123")
+    assert not store.contains_channel("C999")

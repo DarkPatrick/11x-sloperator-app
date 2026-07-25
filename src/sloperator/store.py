@@ -274,6 +274,15 @@ class EventStore:
             ).fetchone()
         return row is not None
 
+    def contains_channel(self, channel_id: str) -> bool:
+        """Return whether a conversation is already present in the map."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM channels WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+        return row is not None
+
     def channel_map(self) -> list[tuple[str, str | None, str, bool]]:
         """Return channel identifiers and membership without message content."""
         with self._connect() as connection:

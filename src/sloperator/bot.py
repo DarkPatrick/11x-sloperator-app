@@ -81,19 +81,20 @@ def create_app(
             LOGGER.debug("Ignoring malformed Slack message event")
             return
 
+        message_ts = event.get("ts")
+        if not isinstance(message_ts, str):
+            LOGGER.debug("Ignoring Slack message without a timestamp")
+            return
+
         command = normalize_command(text)
         if command in SUPPORTED_COMMANDS:
             response = response_for(command)
-            thread_ts = reply_thread_ts(event)
-            if thread_ts is not None:
-                await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response)
-            else:
-                await client.chat_postMessage(channel=channel, text=response)
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_key(message_ts, reply_thread_ts(event)),
+                text=response,
+            )
         else:
-            message_ts = event.get("ts")
-            if not isinstance(message_ts, str):
-                LOGGER.debug("Ignoring Slack message without a timestamp")
-                return
             await orchestrator.submit(
                 client,
                 channel_id=channel,

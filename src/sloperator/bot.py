@@ -10,7 +10,7 @@ from typing import Any
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
-from sloperator.agents import AgentOrchestrator, thread_key
+from sloperator.agents import AgentOrchestrator, SubmitResult, thread_key
 from sloperator.archive import ArchiveMiddleware
 from sloperator.config import Settings
 from sloperator.store import EventStore
@@ -35,8 +35,10 @@ def response_for(command: str) -> str:
                 "• `ping` — connectivity check\n"
                 "• `status` — bot status\n"
                 "• `stop` / `отмена` — остановить агента в этом треде\n"
+                "• `next: запрос` — поставить отдельный следующий ход\n"
                 "• `help` — this message\n\n"
-                "Любой другой текст запускает агентскую сессию в этом треде.\n"
+                "Сообщение во время работы уточняет текущий ход агента.\n"
+                "Любой другой текст запускает или продолжает сессию в этом треде.\n"
                 "По умолчанию: Claude Opus. Выбор для нового Chat:\n"
                 "• `[claude] запрос`\n"
                 "• `[claude:opus] запрос`\n"
@@ -110,12 +112,18 @@ def create_app(
                 text=response,
             )
         else:
-            await orchestrator.submit(
+            result = await orchestrator.submit(
                 client,
                 channel_id=channel,
                 message_ts=message_ts,
                 thread_ts=thread_key(message_ts, reply_thread_ts(event)),
                 text=text,
             )
+            if result is SubmitResult.STEERED:
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_key(message_ts, reply_thread_ts(event)),
+                    text="Уточнение передано активному агенту.",
+                )
 
     return app

@@ -373,6 +373,23 @@ class EventStore:
                 (channel_id, thread_ts),
             )
 
+    def set_agent_external_session_id(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        external_session_id: str,
+    ) -> None:
+        """Persist a provider session ID as soon as the provider allocates it."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_sessions
+                SET external_session_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND thread_ts = ?
+                """,
+                (external_session_id, channel_id, thread_ts),
+            )
+
     def finish_agent_turn(
         self,
         channel_id: str,

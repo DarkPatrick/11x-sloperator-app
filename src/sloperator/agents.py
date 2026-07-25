@@ -11,11 +11,13 @@ import signal
 import uuid
 from collections.abc import Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import StrEnum
 
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.codex_app_server import CodexAppServer
 from sloperator.config import Settings
 from sloperator.store import AgentSession, EventStore
 
@@ -24,6 +26,7 @@ DIRECTIVE_RE = re.compile(
     r"^\[(?P<provider>claude|codex)(?::(?P<model>[A-Za-z0-9._:-]{1,100}))?\]\s*",
     re.IGNORECASE,
 )
+NEXT_RE = re.compile(r"^next:\s*", re.IGNORECASE)
 INITIAL_INSTRUCTION = """\
 You are serving the authorized user through a private Slack thread.
 Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
@@ -37,6 +40,18 @@ User request:
 
 class AgentExecutionError(RuntimeError):
     """Raised when an agent CLI turn cannot complete successfully."""
+
+
+class AgentSteeringInterrupt(RuntimeError):
+    """Raised after a Claude process was interrupted for new user guidance."""
+
+
+class SubmitResult(StrEnum):
+    """How an incoming Slack message was routed."""
+
+    QUEUED = "queued"
+    STEERED = "steered"
+    DUPLICATE = "duplicate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +69,36 @@ class AgentRunResult:
 
     session_id: str
     text: str
+
+
+class ActiveAgentRun:
+    """Mutable control surface for one running provider turn."""
+
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+        self.process: asyncio.subprocess.Process | None = None
+        self.codex: CodexAppServer | None = None
+        self._claude_steering: list[str] = []
+        self._lock = asyncio.Lock()
+
+    async def steer(self, text: str) -> bool:
+        """Steer Codex natively or interrupt Claude for an immediate resume."""
+        async with self._lock:
+            if self.provider == "codex":
+                return self.codex is not None and await self.codex.steer(text)
+            self._claude_steering.append(text)
+            if self.process is not None:
+                await _terminate_process(self.process)
+            return True
+
+    def take_claude_steering(self) -> list[str]:
+        """Consume guidance accumulated since the previous Claude launch."""
+        messages, self._claude_steering = self._claude_steering, []
+        return messages
+
+    @property
+    def has_claude_steering(self) -> bool:
+        return bool(self._claude_steering)
 
 
 def validate_agent_runtime(settings: Settings) -> None:
@@ -88,6 +133,16 @@ def parse_agent_request(text: str, settings: Settings) -> AgentRequest:
 def thread_key(message_ts: str, thread_ts: str | None) -> str:
     """Map a top-level Slack message or reply to one durable session key."""
     return thread_ts or message_ts
+
+
+def _claude_steering_prompt(messages: Sequence[str]) -> str:
+    guidance = "\n\n".join(messages)
+    return (
+        "The user sent the following additional guidance while the previous turn "
+        "was running. The previous process was interrupted intentionally. Inspect "
+        "the current workspace state, incorporate this guidance, and continue the task.\n\n"
+        f"{guidance}"
+    )
 
 
 def split_slack_message(text: str, limit: int = 3_000) -> list[str]:
@@ -128,6 +183,7 @@ async def _run_process(
     *,
     cwd: str,
     timeout_seconds: int,
+    control: ActiveAgentRun | None = None,
 ) -> tuple[int, str, str]:
     environment = {
         key: value
@@ -144,6 +200,8 @@ async def _run_process(
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
+    if control is not None:
+        control.process = process
     try:
         stdout, stderr = await asyncio.wait_for(
             process.communicate(),
@@ -157,6 +215,11 @@ async def _run_process(
     except asyncio.CancelledError:
         await _terminate_process(process)
         raise
+    finally:
+        if control is not None and control.process is process:
+            control.process = None
+    if control is not None and control.has_claude_steering:
+        raise AgentSteeringInterrupt
     return (
         process.returncode or 0,
         stdout.decode("utf-8", errors="replace"),
@@ -178,9 +241,16 @@ async def run_claude(
     settings: Settings,
     session: AgentSession,
     prompt: str,
+    control: ActiveAgentRun,
+    *,
+    force_resume: bool = False,
 ) -> AgentRunResult:
     """Run or resume one Claude Code turn."""
-    new_session = session.turn_count == 0 and session.status not in {"failed", "cancelled"}
+    new_session = (
+        not force_resume
+        and session.turn_count == 0
+        and session.status not in {"failed", "cancelled"}
+    )
     session_id = session.external_session_id or str(uuid.uuid4())
     command = [
         str(settings.claude_cli),
@@ -204,6 +274,7 @@ async def run_claude(
         _with_workspace_lock(settings, command),
         cwd=str(settings.agent_workspace),
         timeout_seconds=settings.agent_timeout_seconds,
+        control=control,
     )
     try:
         payload = json.loads(stdout)
@@ -226,63 +297,40 @@ async def run_codex(
     settings: Settings,
     session: AgentSession,
     prompt: str,
+    control: ActiveAgentRun,
+    store: EventStore,
 ) -> AgentRunResult:
-    """Run or resume one Codex CLI turn."""
-    common = [
-        "--model",
+    """Run or resume one steerable Codex App Server turn."""
+    server = CodexAppServer(
+        settings.codex_cli,
+        settings.agent_workspace,
         session.model,
-        "-c",
-        'approval_policy="never"',
-        "-c",
-        'sandbox_mode="workspace-write"',
-        "-c",
-        "sandbox_workspace_write.network_access=true",
-        "--json",
-    ]
-    if session.external_session_id is None:
-        command = [
-            str(settings.codex_cli),
-            "exec",
-            "-C",
-            str(settings.agent_workspace),
-            *common,
-            f"{INITIAL_INSTRUCTION}{prompt}",
-        ]
-    else:
-        command = [
-            str(settings.codex_cli),
-            "exec",
-            "resume",
-            *common,
-            session.external_session_id,
-            prompt,
-        ]
-
-    return_code, stdout, stderr = await _run_process(
-        _with_workspace_lock(settings, command),
-        cwd=str(settings.agent_workspace),
-        timeout_seconds=settings.agent_timeout_seconds,
+        settings.agent_timeout_seconds,
     )
-    session_id: str | None = None
-    messages: list[str] = []
-    errors: list[str] = []
-    for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
-            session_id = event["thread_id"]
-        item = event.get("item")
-        if event.get("type") == "item.completed" and isinstance(item, dict):
-            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
-                messages.append(item["text"])
-            elif item.get("type") == "error" and isinstance(item.get("message"), str):
-                errors.append(item["message"])
-    if return_code != 0 or session_id is None or not messages:
-        details = "; ".join(errors) or _tail(stderr) or _tail(stdout)
-        raise AgentExecutionError(f"Codex failed with exit code {return_code}; details={details!r}")
-    return AgentRunResult(session_id=session_id, text=messages[-1])
+    control.codex = server
+    try:
+        session_id = await server.start(session.external_session_id)
+        if session.external_session_id != session_id:
+            await asyncio.to_thread(
+                store.set_agent_external_session_id,
+                session.channel_id,
+                session.thread_ts,
+                session_id,
+            )
+        effective_prompt = (
+            f"{INITIAL_INSTRUCTION}{prompt}"
+            if session.external_session_id is None
+            else prompt
+        )
+        text = await server.run_turn(effective_prompt)
+        return AgentRunResult(session_id=session_id, text=text)
+    except TimeoutError:
+        raise AgentExecutionError(
+            f"Agent turn exceeded the {settings.agent_timeout_seconds}-second timeout"
+        ) from None
+    finally:
+        control.codex = None
+        await server.close()
 
 
 class AgentOrchestrator:
@@ -295,6 +343,7 @@ class AgentOrchestrator:
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._thread_tasks: dict[tuple[str, str], set[asyncio.Task[None]]] = {}
+        self._active_runs: dict[tuple[str, str], ActiveAgentRun] = {}
 
     async def submit(
         self,
@@ -304,8 +353,8 @@ class AgentOrchestrator:
         message_ts: str,
         thread_ts: str,
         text: str,
-    ) -> bool:
-        """Deduplicate and enqueue one Slack message without blocking its ACK."""
+    ) -> SubmitResult:
+        """Deduplicate and steer an active turn or enqueue a new one."""
         claimed = await asyncio.to_thread(
             self.store.claim_agent_request,
             channel_id,
@@ -313,7 +362,23 @@ class AgentOrchestrator:
             thread_ts,
         )
         if not claimed:
-            return False
+            return SubmitResult.DUPLICATE
+        key = (channel_id, thread_ts)
+        next_match = NEXT_RE.match(text)
+        if (
+            next_match is None
+            and (active := self._active_runs.get(key)) is not None
+            and await active.steer(text)
+        ):
+            await asyncio.to_thread(
+                self.store.finish_agent_request,
+                channel_id,
+                message_ts,
+                SubmitResult.STEERED.value,
+            )
+            return SubmitResult.STEERED
+        if next_match is not None:
+            text = text[next_match.end() :].strip()
         task = asyncio.create_task(
             self._process(
                 client,
@@ -325,10 +390,9 @@ class AgentOrchestrator:
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
         self._tasks.add(task)
-        key = (channel_id, thread_ts)
         self._thread_tasks.setdefault(key, set()).add(task)
         task.add_done_callback(self._task_done)
-        return True
+        return SubmitResult.QUEUED
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
@@ -462,12 +526,50 @@ class AgentOrchestrator:
                     self._status_heartbeat(client, channel_id, thread_ts),
                     name=f"agent-status-{channel_id}-{thread_ts}",
                 )
+                control = ActiveAgentRun(session.provider)
+                self._active_runs[key] = control
                 try:
                     if session.provider == "claude":
-                        result = await run_claude(self.settings, session, parsed.prompt)
+                        prompt = parsed.prompt
+                        force_resume = False
+                        while True:
+                            try:
+                                result = await run_claude(
+                                    self.settings,
+                                    session,
+                                    prompt,
+                                    control,
+                                    force_resume=force_resume,
+                                )
+                            except AgentSteeringInterrupt:
+                                additions = control.take_claude_steering()
+                                if not additions:
+                                    raise
+                                prompt = _claude_steering_prompt(additions)
+                                session = replace(session, status="cancelled")
+                                force_resume = True
+                                continue
+                            additions = control.take_claude_steering()
+                            if not additions:
+                                break
+                            session = replace(
+                                session,
+                                external_session_id=result.session_id,
+                                status="cancelled",
+                            )
+                            prompt = _claude_steering_prompt(additions)
+                            force_resume = True
                     else:
-                        result = await run_codex(self.settings, session, parsed.prompt)
+                        result = await run_codex(
+                            self.settings,
+                            session,
+                            parsed.prompt,
+                            control,
+                            self.store,
+                        )
                 finally:
+                    if self._active_runs.get(key) is control:
+                        self._active_runs.pop(key, None)
                     heartbeat.cancel()
                     with suppress(asyncio.CancelledError):
                         await heartbeat

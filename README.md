@@ -55,6 +55,7 @@ activity from each supported conversation type.
 - `status`
 - `help`
 - `stop` / `cancel` / `стоп` / `отмена` — cancel the active agent turn in that thread
+- `next: <request>` — queue a separate turn instead of steering the active one
 
 Messages from users other than `SLACK_USER_ID` are ignored.
 Replies are posted into the same Slack thread so they remain visible in the active Chat.
@@ -72,6 +73,13 @@ One Slack thread maps to exactly one durable CLI session:
 - different threads are bounded by `SLOPERATOR_AGENT_MAX_CONCURRENCY`;
 - Slack delivery retries are deduplicated before a paid agent turn starts.
 - a stop command in the thread terminates that turn's entire process group.
+
+While an agent is working, another ordinary message in the same Slack thread steers
+the active turn. Codex uses the native App Server `turn/steer` protocol. Claude is
+interrupted and immediately resumed in the same durable session with the additional
+guidance, because its print-mode protocol does not guarantee same-turn steering.
+Sloperator acknowledges accepted guidance in the thread. Prefix a message with
+`next:` when it should wait and run as a distinct follow-up turn.
 
 Claude Opus is the default. Select the provider and model in the first message:
 

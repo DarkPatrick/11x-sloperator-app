@@ -19,18 +19,24 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
+InaccessiblePaths=/home/egor/projects/11x-sloperator-app/.env
 ReadWritePaths=/home/egor/projects/11x-sloperator-app/data
+ReadWritePaths=/home/egor/projects/ug-ai-analyst
+ReadWritePaths=/home/egor/.claude
+ReadWritePaths=/home/egor/.claude.json
+ReadWritePaths=/home/egor/.codex
+ReadWritePaths=-/home/egor/.cache
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-RestrictNamespaces=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 SystemCallArchitectures=native
-MemoryMax=256M
-CPUQuota=50%
+TasksMax=256
+MemoryMax=1536M
+CPUQuota=100%
 
 [Install]
 WantedBy=multi-user.target

@@ -10,12 +10,14 @@ from typing import Any
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.agents import AgentOrchestrator, thread_key
 from sloperator.archive import ArchiveMiddleware
 from sloperator.config import Settings
 from sloperator.store import EventStore
 
 LOGGER = logging.getLogger(__name__)
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
+SUPPORTED_COMMANDS = {"", "help", "помощь", "ping", "status"}
 
 
 def normalize_command(text: str) -> str:
@@ -31,7 +33,12 @@ def response_for(command: str) -> str:
                 "*Sloperator is online.*\n"
                 "• `ping` — connectivity check\n"
                 "• `status` — bot status\n"
-                "• `help` — this message"
+                "• `help` — this message\n\n"
+                "Любой другой текст запускает агентскую сессию в этом треде.\n"
+                "По умолчанию: Claude Opus. Выбор для нового Chat:\n"
+                "• `[claude] запрос`\n"
+                "• `[claude:opus] запрос`\n"
+                "• `[codex:gpt-5.6-sol] запрос`"
             )
         case "ping":
             return "pong"
@@ -47,7 +54,11 @@ def reply_thread_ts(event: Mapping[str, Any]) -> str | None:
     return thread_ts if isinstance(thread_ts, str) else None
 
 
-def create_app(settings: Settings, store: EventStore) -> AsyncApp:
+def create_app(
+    settings: Settings,
+    store: EventStore,
+    orchestrator: AgentOrchestrator,
+) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
     app.use(ArchiveMiddleware(store, app.client))
@@ -70,11 +81,25 @@ def create_app(settings: Settings, store: EventStore) -> AsyncApp:
             LOGGER.debug("Ignoring malformed Slack message event")
             return
 
-        response = response_for(normalize_command(text))
-        thread_ts = reply_thread_ts(event)
-        if thread_ts is not None:
-            await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response)
+        command = normalize_command(text)
+        if command in SUPPORTED_COMMANDS:
+            response = response_for(command)
+            thread_ts = reply_thread_ts(event)
+            if thread_ts is not None:
+                await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response)
+            else:
+                await client.chat_postMessage(channel=channel, text=response)
         else:
-            await client.chat_postMessage(channel=channel, text=response)
+            message_ts = event.get("ts")
+            if not isinstance(message_ts, str):
+                LOGGER.debug("Ignoring Slack message without a timestamp")
+                return
+            await orchestrator.submit(
+                client,
+                channel_id=channel,
+                message_ts=message_ts,
+                thread_ts=thread_key(message_ts, reply_thread_ts(event)),
+                text=text,
+            )
 
     return app

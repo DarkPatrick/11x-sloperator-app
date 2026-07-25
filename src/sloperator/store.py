@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -81,11 +82,49 @@ CREATE TABLE IF NOT EXISTS action_runs (
     result_json TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    channel_id TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK(provider IN ('claude', 'codex')),
+    model TEXT NOT NULL,
+    external_session_id TEXT,
+    status TEXT NOT NULL DEFAULT 'idle',
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (channel_id, thread_ts)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS agent_requests (
+    channel_id TEXT NOT NULL,
+    message_ts TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (channel_id, message_ts)
+) STRICT;
 """
 
 
 def _json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSession:
+    """Durable mapping between one Slack thread and one CLI conversation."""
+
+    channel_id: str
+    thread_ts: str
+    provider: str
+    model: str
+    external_session_id: str | None
+    status: str
+    turn_count: int
+    last_error: str | None
 
 
 class EventStore:
@@ -257,6 +296,8 @@ class EventStore:
                     "FROM messages WHERE thread_ts IS NOT NULL"
                 ),
                 "enabled_rules": "SELECT count(*) FROM trigger_rules WHERE enabled = 1",
+                "agent_sessions": "SELECT count(*) FROM agent_sessions",
+                "agent_requests": "SELECT count(*) FROM agent_requests",
             }
             return {
                 key: int(connection.execute(query).fetchone()[0]) for key, query in keys.items()
@@ -282,6 +323,114 @@ class EventStore:
                 (channel_id,),
             ).fetchone()
         return row is not None
+
+    def get_agent_session(self, channel_id: str, thread_ts: str) -> AgentSession | None:
+        """Load the agent session associated with a Slack thread."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT channel_id, thread_ts, provider, model, external_session_id,
+                       status, turn_count, last_error
+                FROM agent_sessions
+                WHERE channel_id = ? AND thread_ts = ?
+                """,
+                (channel_id, thread_ts),
+            ).fetchone()
+        return AgentSession(*row) if row is not None else None
+
+    def create_agent_session(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        provider: str,
+        model: str,
+        external_session_id: str | None = None,
+    ) -> AgentSession:
+        """Create a durable agent session before its first CLI turn."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_sessions(
+                    channel_id, thread_ts, provider, model, external_session_id
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (channel_id, thread_ts, provider, model, external_session_id),
+            )
+        session = self.get_agent_session(channel_id, thread_ts)
+        if session is None:
+            raise RuntimeError("Agent session was not persisted")
+        return session
+
+    def start_agent_turn(self, channel_id: str, thread_ts: str) -> None:
+        """Mark a session busy before starting a CLI process."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_sessions
+                SET status = 'running', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND thread_ts = ?
+                """,
+                (channel_id, thread_ts),
+            )
+
+    def finish_agent_turn(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        external_session_id: str,
+    ) -> None:
+        """Persist a successful CLI turn and its resumable session ID."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_sessions
+                SET external_session_id = ?, status = 'idle',
+                    turn_count = turn_count + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND thread_ts = ?
+                """,
+                (external_session_id, channel_id, thread_ts),
+            )
+
+    def fail_agent_turn(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        error: str,
+    ) -> None:
+        """Persist a failed turn without discarding resumable session state."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_sessions
+                SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND thread_ts = ?
+                """,
+                (error[:4_000], channel_id, thread_ts),
+            )
+
+    def claim_agent_request(self, channel_id: str, message_ts: str, thread_ts: str) -> bool:
+        """Deduplicate Slack retries before they can launch a paid agent turn."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO agent_requests(channel_id, message_ts, thread_ts)
+                VALUES (?, ?, ?)
+                """,
+                (channel_id, message_ts, thread_ts),
+            )
+        return cursor.rowcount == 1
+
+    def finish_agent_request(self, channel_id: str, message_ts: str, status: str) -> None:
+        """Record the terminal state of a Slack agent request."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_requests
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND message_ts = ?
+                """,
+                (status, channel_id, message_ts),
+            )
 
     def channel_map(self) -> list[tuple[str, str | None, str, bool]]:
         """Return channel identifiers and membership without message content."""

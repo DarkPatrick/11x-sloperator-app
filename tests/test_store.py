@@ -67,3 +67,33 @@ def test_store_tracks_channels_threads_and_deletions(tmp_path: Path) -> None:
     assert summary["threads"] == 1
     assert store.contains_channel("C123")
     assert not store.contains_channel("C999")
+
+
+def test_store_tracks_agent_sessions_and_deduplicates_requests(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "archive.sqlite3")
+    store.initialize()
+
+    assert store.claim_agent_request("D123", "2.0", "1.0")
+    assert not store.claim_agent_request("D123", "2.0", "1.0")
+
+    created = store.create_agent_session(
+        "D123",
+        "1.0",
+        "claude",
+        "opus",
+        "00000000-0000-0000-0000-000000000001",
+    )
+    assert created.turn_count == 0
+    assert created.provider == "claude"
+
+    store.start_agent_turn("D123", "1.0")
+    store.finish_agent_turn(
+        "D123",
+        "1.0",
+        "00000000-0000-0000-0000-000000000001",
+    )
+    finished = store.get_agent_session("D123", "1.0")
+
+    assert finished is not None
+    assert finished.status == "idle"
+    assert finished.turn_count == 1

@@ -58,6 +58,38 @@ activity from each supported conversation type.
 Messages from users other than `SLACK_USER_ID` are ignored.
 Replies are posted into the same Slack thread so they remain visible in the active Chat.
 
+## Claude and Codex sessions
+
+Any authorized DM that is not one of the commands above starts or resumes an agent
+session in `/home/egor/projects/ug-ai-analyst`.
+
+One Slack thread maps to exactly one durable CLI session:
+
+- a new top-level Chat starts a new session;
+- replies in that thread resume the same session;
+- messages in one thread execute serially;
+- different threads are bounded by `SLOPERATOR_AGENT_MAX_CONCURRENCY`;
+- Slack delivery retries are deduplicated before a paid agent turn starts.
+
+Claude Opus is the default. Select the provider and model in the first message:
+
+```text
+[claude] Analyze experiment 1234
+[claude:opus] Analyze experiment 1234
+[codex:gpt-5.6-sol] Review the analysis scripts
+```
+
+Provider and model are fixed for the lifetime of a thread. Start a new Chat to choose
+different values. Defaults, CLI paths, timeout, workspace, and concurrency are
+configurable through the variables documented in `.env.example`.
+
+Each new agent session is explicitly instructed to run the repository
+`scripts/freshness_preflight.sh` before substantive work. Claude uses resumable JSON
+sessions; Codex uses resumable JSONL sessions with a `workspace-write` sandbox and
+sandboxed network access. Agent processes never bypass approval or sandbox controls.
+The automatic repository updater and agent processes share an exclusive Git lock so
+they cannot modify the working tree concurrently.
+
 ## Production
 
 The included `deploy/sloperator.service` applies restart and resource-limit policies.

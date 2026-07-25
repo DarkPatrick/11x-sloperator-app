@@ -10,6 +10,7 @@ from contextlib import suppress
 from aiohttp import web
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
+from sloperator.agents import AgentOrchestrator, validate_agent_runtime
 from sloperator.archive import periodically_synchronize_archive, synchronize_archive
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
@@ -29,9 +30,11 @@ def configure_logging(level: str) -> None:
 
 async def serve(settings: Settings) -> None:
     """Run Socket Mode and the health endpoint until termination."""
+    validate_agent_runtime(settings)
     store = EventStore(settings.database_path)
     await asyncio.to_thread(store.initialize)
-    app = create_app(settings, store)
+    orchestrator = AgentOrchestrator(settings, store)
+    app = create_app(settings, store, orchestrator)
     slack_handler = AsyncSocketModeHandler(app, settings.app_token)
     runner = web.AppRunner(create_health_app(), access_log=None)
     stop_event = asyncio.Event()
@@ -71,6 +74,7 @@ async def serve(settings: Settings) -> None:
             archive_task.cancel()
             with suppress(asyncio.CancelledError):
                 await archive_task
+        await orchestrator.close()
         await slack_handler.close_async()  # type: ignore[no-untyped-call]
         await runner.cleanup()
 

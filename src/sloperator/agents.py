@@ -1,0 +1,497 @@
+"""Durable Claude Code and Codex sessions backed by Slack threads."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+import signal
+import uuid
+from collections.abc import Sequence
+from contextlib import suppress
+from dataclasses import dataclass
+
+from slack_sdk.errors import SlackApiError
+from slack_sdk.web.async_client import AsyncWebClient
+
+from sloperator.config import Settings
+from sloperator.store import AgentSession, EventStore
+
+LOGGER = logging.getLogger(__name__)
+DIRECTIVE_RE = re.compile(
+    r"^\[(?P<provider>claude|codex)(?::(?P<model>[A-Za-z0-9._:-]{1,100}))?\]\s*",
+    re.IGNORECASE,
+)
+INITIAL_INSTRUCTION = """\
+You are serving the authorized user through a private Slack thread.
+Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
+Work in the current ug-ai-analyst repository and follow all repository instructions.
+Return a self-contained final response suitable for Slack. If you need clarification,
+ask one concise question in the final response instead of waiting for terminal input.
+
+User request:
+"""
+
+
+class AgentExecutionError(RuntimeError):
+    """Raised when an agent CLI turn cannot complete successfully."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRequest:
+    """Provider selection parsed from the first message in a Slack thread."""
+
+    provider: str
+    model: str
+    prompt: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunResult:
+    """A resumable CLI turn result."""
+
+    session_id: str
+    text: str
+
+
+def validate_agent_runtime(settings: Settings) -> None:
+    """Fail startup when the configured workspace or CLI binaries are unavailable."""
+    if not settings.agent_workspace.is_dir():
+        raise ValueError(f"Agent workspace does not exist: {settings.agent_workspace}")
+    if not (settings.agent_workspace / "AGENTS.md").is_file():
+        raise ValueError(f"Agent workspace has no AGENTS.md: {settings.agent_workspace}")
+    for name, path in (("Claude", settings.claude_cli), ("Codex", settings.codex_cli)):
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise ValueError(f"{name} CLI is not executable: {path}")
+
+
+def parse_agent_request(text: str, settings: Settings) -> AgentRequest:
+    """Parse an optional ``[provider:model]`` prefix."""
+    match = DIRECTIVE_RE.match(text)
+    if match is None:
+        provider = settings.default_agent
+        model = settings.claude_model if provider == "claude" else settings.codex_model
+        prompt = text.strip()
+    else:
+        provider = match.group("provider").lower()
+        model = match.group("model") or (
+            settings.claude_model if provider == "claude" else settings.codex_model
+        )
+        prompt = text[match.end() :].strip()
+    if not prompt:
+        raise ValueError("После выбора агента нужно написать запрос.")
+    return AgentRequest(provider=provider, model=model, prompt=prompt)
+
+
+def thread_key(message_ts: str, thread_ts: str | None) -> str:
+    """Map a top-level Slack message or reply to one durable session key."""
+    return thread_ts or message_ts
+
+
+def split_slack_message(text: str, limit: int = 3_000) -> list[str]:
+    """Split long agent output into Slack-safe chunks."""
+    normalized = text.strip() or "Агент завершил работу без текстового ответа."
+    chunks: list[str] = []
+    while len(normalized) > limit:
+        boundary = normalized.rfind("\n\n", 0, limit)
+        if boundary < limit // 2:
+            boundary = normalized.rfind("\n", 0, limit)
+        if boundary < limit // 2:
+            boundary = normalized.rfind(" ", 0, limit)
+        if boundary < limit // 2:
+            boundary = limit
+        chunks.append(normalized[:boundary].rstrip())
+        normalized = normalized[boundary:].lstrip()
+    chunks.append(normalized)
+    return chunks
+
+
+async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except TimeoutError:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+
+
+async def _run_process(
+    command: Sequence[str],
+    *,
+    cwd: str,
+    timeout_seconds: int,
+) -> tuple[int, str, str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("SLACK_", "SLOPERATOR_"))
+    }
+    environment["UG_SKIP_PREFLIGHT"] = "0"
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=cwd,
+        env=environment,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        await _terminate_process(process)
+        raise AgentExecutionError(
+            f"Agent turn exceeded the {timeout_seconds}-second timeout"
+        ) from None
+    except asyncio.CancelledError:
+        await _terminate_process(process)
+        raise
+    return (
+        process.returncode or 0,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def _tail(value: str, limit: int = 4_000) -> str:
+    return value[-limit:].strip()
+
+
+def _with_workspace_lock(settings: Settings, command: list[str]) -> list[str]:
+    """Serialize agents and automatic updates that share one working tree."""
+    lock_path = settings.agent_workspace / ".git" / "sloperator-agent.lock"
+    return ["/usr/bin/flock", "-x", str(lock_path), *command]
+
+
+async def run_claude(
+    settings: Settings,
+    session: AgentSession,
+    prompt: str,
+) -> AgentRunResult:
+    """Run or resume one Claude Code turn."""
+    new_session = session.turn_count == 0 and session.status != "failed"
+    session_id = session.external_session_id or str(uuid.uuid4())
+    command = [
+        str(settings.claude_cli),
+        "-p",
+        "--model",
+        session.model,
+        "--permission-mode",
+        "auto",
+        "--output-format",
+        "json",
+    ]
+    if new_session:
+        command.extend(("--session-id", session_id))
+        effective_prompt = f"{INITIAL_INSTRUCTION}{prompt}"
+    else:
+        command.extend(("--resume", session_id))
+        effective_prompt = prompt
+    command.append(effective_prompt)
+
+    return_code, stdout, stderr = await _run_process(
+        _with_workspace_lock(settings, command),
+        cwd=str(settings.agent_workspace),
+        timeout_seconds=settings.agent_timeout_seconds,
+    )
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as error:
+        raise AgentExecutionError(
+            f"Claude returned invalid JSON; stderr={_tail(stderr)!r}"
+        ) from error
+    if return_code != 0 or payload.get("is_error"):
+        raise AgentExecutionError(
+            f"Claude failed with exit code {return_code}; stderr={_tail(stderr)!r}"
+        )
+    result_text = payload.get("result")
+    result_session_id = payload.get("session_id")
+    if not isinstance(result_text, str) or not isinstance(result_session_id, str):
+        raise AgentExecutionError("Claude response is missing result or session_id")
+    return AgentRunResult(session_id=result_session_id, text=result_text)
+
+
+async def run_codex(
+    settings: Settings,
+    session: AgentSession,
+    prompt: str,
+) -> AgentRunResult:
+    """Run or resume one Codex CLI turn."""
+    common = [
+        "--model",
+        session.model,
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'sandbox_mode="workspace-write"',
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "--json",
+    ]
+    if session.external_session_id is None:
+        command = [
+            str(settings.codex_cli),
+            "exec",
+            "-C",
+            str(settings.agent_workspace),
+            *common,
+            f"{INITIAL_INSTRUCTION}{prompt}",
+        ]
+    else:
+        command = [
+            str(settings.codex_cli),
+            "exec",
+            "resume",
+            *common,
+            session.external_session_id,
+            prompt,
+        ]
+
+    return_code, stdout, stderr = await _run_process(
+        _with_workspace_lock(settings, command),
+        cwd=str(settings.agent_workspace),
+        timeout_seconds=settings.agent_timeout_seconds,
+    )
+    session_id: str | None = None
+    messages: list[str] = []
+    errors: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
+            session_id = event["thread_id"]
+        item = event.get("item")
+        if event.get("type") == "item.completed" and isinstance(item, dict):
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                messages.append(item["text"])
+            elif item.get("type") == "error" and isinstance(item.get("message"), str):
+                errors.append(item["message"])
+    if return_code != 0 or session_id is None or not messages:
+        details = "; ".join(errors) or _tail(stderr) or _tail(stdout)
+        raise AgentExecutionError(f"Codex failed with exit code {return_code}; details={details!r}")
+    return AgentRunResult(session_id=session_id, text=messages[-1])
+
+
+class AgentOrchestrator:
+    """Queue agent turns and serialize messages belonging to the same thread."""
+
+    def __init__(self, settings: Settings, store: EventStore) -> None:
+        self.settings = settings
+        self.store = store
+        self._semaphore = asyncio.Semaphore(settings.agent_max_concurrency)
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def submit(
+        self,
+        client: AsyncWebClient,
+        *,
+        channel_id: str,
+        message_ts: str,
+        thread_ts: str,
+        text: str,
+    ) -> bool:
+        """Deduplicate and enqueue one Slack message without blocking its ACK."""
+        claimed = await asyncio.to_thread(
+            self.store.claim_agent_request,
+            channel_id,
+            message_ts,
+            thread_ts,
+        )
+        if not claimed:
+            return False
+        task = asyncio.create_task(
+            self._process(
+                client,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                thread_ts=thread_ts,
+                text=text,
+            ),
+            name=f"agent-turn-{channel_id}-{message_ts}",
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+        return True
+
+    def _task_done(self, task: asyncio.Task[None]) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            LOGGER.error("Unhandled agent task failure: %s", type(error).__name__)
+
+    async def drain(self) -> None:
+        """Wait until all currently queued turns finish."""
+        while self._tasks:
+            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+
+    async def close(self) -> None:
+        """Cancel active CLI process groups during service shutdown."""
+        for task in self._tasks:
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    async def _set_status(
+        self,
+        client: AsyncWebClient,
+        channel_id: str,
+        thread_ts: str,
+        status: str,
+    ) -> None:
+        try:
+            await client.assistant_threads_setStatus(
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                status=status,
+            )
+        except SlackApiError:
+            LOGGER.warning("Could not set Slack agent status for thread %s", thread_ts)
+
+    async def _reply(
+        self,
+        client: AsyncWebClient,
+        channel_id: str,
+        thread_ts: str,
+        text: str,
+    ) -> None:
+        for chunk in split_slack_message(text):
+            await client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=chunk,
+            )
+
+    async def _status_heartbeat(
+        self,
+        client: AsyncWebClient,
+        channel_id: str,
+        thread_ts: str,
+    ) -> None:
+        """Refresh Slack's two-minute status while a long agent turn runs."""
+        while True:
+            await asyncio.sleep(90)
+            await self._set_status(client, channel_id, thread_ts, "выполняет запрос…")
+
+    async def _process(
+        self,
+        client: AsyncWebClient,
+        *,
+        channel_id: str,
+        message_ts: str,
+        thread_ts: str,
+        text: str,
+    ) -> None:
+        key = (channel_id, thread_ts)
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        request_status = "failed"
+        try:
+            async with lock, self._semaphore:
+                session = await asyncio.to_thread(
+                    self.store.get_agent_session,
+                    channel_id,
+                    thread_ts,
+                )
+                parsed = parse_agent_request(text, self.settings)
+                if session is None:
+                    preassigned_id = str(uuid.uuid4()) if parsed.provider == "claude" else None
+                    session = await asyncio.to_thread(
+                        self.store.create_agent_session,
+                        channel_id,
+                        thread_ts,
+                        parsed.provider,
+                        parsed.model,
+                        preassigned_id,
+                    )
+                elif DIRECTIVE_RE.match(text):
+                    if parsed.provider != session.provider or parsed.model != session.model:
+                        await self._reply(
+                            client,
+                            channel_id,
+                            thread_ts,
+                            (
+                                "Агент и модель закреплены за тредом: "
+                                f"`{session.provider}:{session.model}`. "
+                                "Начните новый Chat, чтобы выбрать другие параметры."
+                            ),
+                        )
+                        request_status = "rejected"
+                        return
+
+                await asyncio.to_thread(
+                    self.store.start_agent_turn,
+                    channel_id,
+                    thread_ts,
+                )
+                await self._set_status(
+                    client,
+                    channel_id,
+                    thread_ts,
+                    "выполняет запрос…",
+                )
+                heartbeat = asyncio.create_task(
+                    self._status_heartbeat(client, channel_id, thread_ts),
+                    name=f"agent-status-{channel_id}-{thread_ts}",
+                )
+                try:
+                    if session.provider == "claude":
+                        result = await run_claude(self.settings, session, parsed.prompt)
+                    else:
+                        result = await run_codex(self.settings, session, parsed.prompt)
+                finally:
+                    heartbeat.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await heartbeat
+                await asyncio.to_thread(
+                    self.store.finish_agent_turn,
+                    channel_id,
+                    thread_ts,
+                    result.session_id,
+                )
+                await self._reply(client, channel_id, thread_ts, result.text)
+                request_status = "completed"
+        except ValueError as error:
+            await self._reply(client, channel_id, thread_ts, str(error))
+            request_status = "rejected"
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await asyncio.to_thread(
+                self.store.fail_agent_turn,
+                channel_id,
+                thread_ts,
+                repr(error),
+            )
+            LOGGER.error(
+                "Agent turn failed in Slack thread %s: %s",
+                thread_ts,
+                type(error).__name__,
+            )
+            await self._reply(
+                client,
+                channel_id,
+                thread_ts,
+                "Агент не смог завершить запрос. Ошибка сохранена локально; попробуйте ещё раз.",
+            )
+        finally:
+            await self._set_status(client, channel_id, thread_ts, "")
+            await asyncio.to_thread(
+                self.store.finish_agent_request,
+                channel_id,
+                message_ts,
+                request_status,
+            )
+            if not lock.locked():
+                self._locks.pop(key, None)

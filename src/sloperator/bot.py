@@ -30,6 +30,12 @@ def normalize_command(text: str) -> str:
     return MENTION_RE.sub("", text, count=1).strip().lower()
 
 
+def vpn_otp_from_command(command: str) -> str | None:
+    """Return an OTP reserved for the VPN flow, regardless of its current state."""
+    match = re.fullmatch(r"(?:vpn otp\s+)?(\d{6,8})", command)
+    return match.group(1) if match is not None else None
+
+
 def response_for(command: str) -> str:
     """Return a deterministic response for a supported command."""
     match command:
@@ -88,6 +94,7 @@ def create_app(
     app.use(ArchiveMiddleware(store, app.client))
     anomaly_responder = AnomalyAlertResponder(settings, orchestrator)
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
+    vpn_threads: set[tuple[str, str]] = set()
 
     @app.event("message")
     async def handle_message(
@@ -155,7 +162,10 @@ def create_app(
             return
 
         command = normalize_command(text)
+        current_thread_ts = thread_key(message_ts, active_thread_ts)
+        current_thread = (channel, current_thread_ts)
         if command in {"vpn ready", "vpn connect", "vpn start", "готов"}:
+            vpn_threads.add(current_thread)
             try:
                 state = await vpn.connect()
                 response = _vpn_state_response(state)
@@ -163,35 +173,48 @@ def create_app(
                 response = f"VPN не запущен: {error}"
             await client.chat_postMessage(
                 channel=channel,
-                thread_ts=thread_key(message_ts, active_thread_ts),
+                thread_ts=current_thread_ts,
                 text=response,
             )
         elif command in {"vpn", "vpn status"}:
             await client.chat_postMessage(
                 channel=channel,
-                thread_ts=thread_key(message_ts, active_thread_ts),
+                thread_ts=current_thread_ts,
                 text=_vpn_state_response(await vpn.state()),
             )
         elif command == "vpn stop":
             await vpn.stop()
             await client.chat_postMessage(
                 channel=channel,
-                thread_ts=thread_key(message_ts, active_thread_ts),
+                thread_ts=current_thread_ts,
                 text="VPN остановлен.",
             )
-        elif (
-            (otp_match := re.fullmatch(r"(?:vpn otp\s+)?(\d{6,8})", command))
-            and await vpn.state() is VpnState.WAITING_OTP
-        ):
-            try:
-                state = await vpn.submit_otp(otp_match.group(1))
+        elif (otp := vpn_otp_from_command(command)) is not None:
+            # Slack may retry the same event after submit_otp has already changed
+            # WAITING_OTP to CONNECTED. OTP-shaped messages must never fall through
+            # to the default agent launcher, even after that state transition.
+            state = await vpn.state()
+            if state is VpnState.WAITING_OTP:
+                try:
+                    state = await vpn.submit_otp(otp)
+                    response = _vpn_state_response(state)
+                except VpnError as error:
+                    response = f"VPN: {error}"
+            else:
                 response = _vpn_state_response(state)
-            except VpnError as error:
-                response = f"VPN: {error}"
             await client.chat_postMessage(
                 channel=channel,
-                thread_ts=thread_key(message_ts, active_thread_ts),
+                thread_ts=current_thread_ts,
                 text=response,
+            )
+        elif current_thread in vpn_threads:
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=current_thread_ts,
+                text=(
+                    "Это служебный VPN-тред; сообщения из него не передаются агенту. "
+                    "Для Claude или Codex начните новый Chat."
+                ),
             )
         elif command in CANCEL_COMMANDS:
             if active_thread_ts is None:
@@ -202,7 +225,7 @@ def create_app(
                 response = "Сейчас в этом треде нет выполняющегося запроса."
             await client.chat_postMessage(
                 channel=channel,
-                thread_ts=thread_key(message_ts, active_thread_ts),
+                thread_ts=current_thread_ts,
                 text=response,
             )
         elif command in SUPPORTED_COMMANDS:

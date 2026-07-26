@@ -4,6 +4,7 @@ from sloperator.bot import (
     normalize_command,
     reply_thread_ts,
     response_for,
+    vpn_otp_from_command,
 )
 from sloperator.config import Settings
 
@@ -18,6 +19,13 @@ def test_response_for_ping() -> None:
 
 def test_response_for_unknown_command() -> None:
     assert "Unknown command" in response_for("something else")
+
+
+def test_vpn_otp_is_reserved_independently_of_vpn_state() -> None:
+    assert vpn_otp_from_command("123456") == "123456"
+    assert vpn_otp_from_command("vpn otp 12345678") == "12345678"
+    assert vpn_otp_from_command("12345") is None
+    assert vpn_otp_from_command("analyze 123456") is None
 
 
 def test_reply_thread_ts_preserves_active_chat_thread() -> None:

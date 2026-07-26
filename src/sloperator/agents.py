@@ -32,8 +32,9 @@ INITIAL_INSTRUCTION = """\
 You are serving the authorized user through a private Slack thread.
 Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
 Work in the current ug-ai-analyst repository and follow all repository instructions.
-Return a self-contained final response suitable for Slack. If you need clarification,
-ask one concise question in the final response instead of waiting for terminal input.
+Return a self-contained final response using standard Markdown supported by Slack.
+Do not use Markdown tables; use concise lists instead. If you need clarification, ask
+one concise question in the final response instead of waiting for terminal input.
 
 User request:
 """
@@ -467,7 +468,10 @@ class AgentOrchestrator:
             await client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=thread_ts,
-                text=chunk,
+                # Agent CLIs return standard Markdown. Slack's legacy `text`
+                # parameter expects its incompatible `mrkdwn` dialect, while
+                # `markdown_text` lets Slack translate LLM output correctly.
+                markdown_text=chunk,
             )
 
     async def _status_heartbeat(

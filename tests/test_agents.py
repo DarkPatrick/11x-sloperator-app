@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
-from sloperator.agents import parse_agent_request, split_slack_message, thread_key
+from sloperator.agents import (
+    AgentOrchestrator,
+    parse_agent_request,
+    split_slack_message,
+    thread_key,
+)
 from sloperator.config import Settings
 
 
@@ -48,3 +56,22 @@ def test_split_slack_message_preserves_all_text() -> None:
 
     assert all(len(chunk) <= 40 for chunk in chunks)
     assert "".join(chunks).replace("\n\n", "") == text.replace("\n\n", "")
+
+
+async def test_agent_replies_use_standard_markdown_parameter() -> None:
+    post_message = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message)
+    orchestrator = object.__new__(AgentOrchestrator)
+
+    await orchestrator._reply(
+        client,
+        channel_id="C123",
+        thread_ts="100.1",
+        text="## Result\n\n**Formatted**",
+    )
+
+    post_message.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        markdown_text="## Result\n\n**Formatted**",
+    )

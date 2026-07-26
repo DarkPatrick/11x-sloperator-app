@@ -21,6 +21,19 @@ def _required(name: str) -> str:
     return value
 
 
+def _user_id_set(value: str, default: str) -> frozenset[str]:
+    """Parse comma-separated Slack IDs, optionally wrapped in brackets."""
+    normalized = value.strip()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    users = frozenset(
+        item.strip().strip("'\"")
+        for item in normalized.split(",")
+        if item.strip().strip("'\"")
+    )
+    return users or frozenset({default})
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Runtime settings loaded from the environment."""
@@ -28,6 +41,7 @@ class Settings:
     slack_user_id: str
     bot_token: str
     app_token: str
+    slack_allowed_conversation_users: frozenset[str] = frozenset()
     host: str = "127.0.0.1"
     port: int = 8080
     log_level: str = "INFO"
@@ -60,6 +74,11 @@ class Settings:
     clickhouse_username: str | None = None
     clickhouse_password: str = ""
 
+    @property
+    def conversation_user_ids(self) -> frozenset[str]:
+        """Allowed channel-thread participants, falling back to the DM owner."""
+        return self.slack_allowed_conversation_users or frozenset({self.slack_user_id})
+
     @classmethod
     def from_environment(cls) -> Settings:
         """Load a validated settings object, including a local ``.env`` file."""
@@ -69,6 +88,10 @@ class Settings:
             load_dotenv(interpolate=False)
 
         user_id = _required("SLACK_USER_ID")
+        allowed_conversation_users = _user_id_set(
+            os.environ.get("SLACK_ALLOWED_CONVERSATION_USERS", ""),
+            user_id,
+        )
         bot_token = _required("SLOPERATOR_SLACK_BOT_TOKEN")
         app_token = _required("SLOPERATOR_SLACK_BOT_SOCKET_TOKEN_ID")
         host = os.environ.get("SLOPERATOR_HOST", "127.0.0.1").strip()
@@ -132,6 +155,10 @@ class Settings:
 
         if not user_id.startswith("U"):
             raise ConfigurationError("SLACK_USER_ID must be a Slack user ID")
+        if any(not user.startswith("U") for user in allowed_conversation_users):
+            raise ConfigurationError(
+                "SLACK_ALLOWED_CONVERSATION_USERS must contain Slack user IDs"
+            )
         if not bot_token.startswith("xoxb-"):
             raise ConfigurationError("SLOPERATOR_SLACK_BOT_TOKEN must be a bot token")
         if not app_token.startswith("xapp-"):
@@ -191,6 +218,7 @@ class Settings:
             slack_user_id=user_id,
             bot_token=bot_token,
             app_token=app_token,
+            slack_allowed_conversation_users=allowed_conversation_users,
             host=host,
             port=port,
             log_level=log_level,

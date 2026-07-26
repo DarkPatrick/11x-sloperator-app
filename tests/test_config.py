@@ -10,12 +10,36 @@ def test_settings_load_valid_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("SLOPERATOR_SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLOPERATOR_SLACK_BOT_SOCKET_TOKEN_ID", "xapp-test")
     monkeypatch.setenv("SLOPERATOR_PORT", "9000")
+    monkeypatch.setenv("SLACK_ALLOWED_CONVERSATION_USERS", "")
 
     settings = Settings.from_environment()
 
     assert settings.port == 9000
     assert settings.anomaly_alert_channel == "C06FADPMGKT"
     assert settings.subscription_flow_alert_channel == "C06FADPMGKT"
+    assert settings.slack_allowed_conversation_users == {"U1234567890"}
+
+
+def test_settings_parse_bracketed_allowed_conversation_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SLACK_USER_ID", "UOWNER")
+    monkeypatch.setenv(
+        "SLACK_ALLOWED_CONVERSATION_USERS",
+        "[UOWNER, UANALYST1, UANALYST2, UANALYST3, UANALYST4]",
+    )
+    monkeypatch.setenv("SLOPERATOR_SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("SLOPERATOR_SLACK_BOT_SOCKET_TOKEN_ID", "xapp-test")
+
+    settings = Settings.from_environment()
+
+    assert settings.slack_allowed_conversation_users == {
+        "UOWNER",
+        "UANALYST1",
+        "UANALYST2",
+        "UANALYST3",
+        "UANALYST4",
+    }
 
 
 def test_settings_load_clickhouse_environment(monkeypatch: pytest.MonkeyPatch) -> None:

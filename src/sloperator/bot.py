@@ -66,9 +66,9 @@ def reply_thread_ts(event: Mapping[str, Any]) -> str | None:
 
 
 def is_trusted_channel_thread(event: Mapping[str, Any], settings: Settings) -> bool:
-    """Match owner replies in agent-enabled monitoring-channel threads."""
+    """Match allowed-user replies in agent-enabled monitoring-channel threads."""
     return (
-        event.get("user") == settings.slack_user_id
+        event.get("user") in settings.conversation_user_ids
         and event.get("channel")
         in {settings.anomaly_alert_channel, settings.subscription_flow_alert_channel}
         and isinstance(event.get("thread_ts"), str)
@@ -106,12 +106,13 @@ def create_app(
         user = event.get("user")
         channel = event.get("channel")
         text = event.get("text")
-        if user != settings.slack_user_id:
+        trusted_channel_thread = is_trusted_channel_thread(event, settings)
+        if user != settings.slack_user_id and not trusted_channel_thread:
             LOGGER.warning("Ignoring message from unauthorized Slack user %s", user)
             return
         message_ts = event.get("ts")
         active_thread_ts = reply_thread_ts(event)
-        if is_trusted_channel_thread(event, settings):
+        if trusted_channel_thread:
             assert isinstance(channel, str)
             assert isinstance(text, str)
             assert isinstance(message_ts, str)

@@ -58,7 +58,8 @@ activity from each supported conversation type.
 - `next: <request>` — queue a separate turn instead of steering the active one
 - `vpn` / `vpn status` / `vpn stop` — manage the isolated corporate VPN
 
-Messages from users other than `SLACK_USER_ID` are ignored.
+DMs from users other than `SLACK_USER_ID` are ignored. In agent-enabled monitoring threads,
+users listed in `SLACK_ALLOWED_CONVERSATION_USERS` may continue the existing agent session.
 Replies are posted into the same Slack thread so they remain visible in the active Chat.
 
 ## Analytics anomaly auto-replies
@@ -72,9 +73,9 @@ mentions in other channels are ignored.
 When the check confirms an anomaly for a metric in Airflow's pinned `ug_monetisation` group,
 Sloperator starts a durable agent session in `/home/egor/projects/ug-ai-analyst`. The first turn
 must use the `time-series-research` skill to investigate the movement and recommend an action.
-Later replies from `SLACK_USER_ID` in that same channel thread continue the session; other users
-and unrelated channel threads cannot launch or steer it. Channel-thread sessions post no Slack
-assistant status or heartbeat.
+Later replies from users in `SLACK_ALLOWED_CONVERSATION_USERS` in that same channel thread
+continue the session; other users and unrelated channel threads cannot launch or steer it.
+Channel-thread sessions post no Slack assistant status or heartbeat.
 
 The responder requires `ANOMALY_*` and `CLICKHOUSE_*` settings documented in `.env.example`,
 membership in the monitoring channel, the `message.channels` event subscription, and the

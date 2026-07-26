@@ -45,6 +45,7 @@ def test_trusted_channel_thread_requires_owner_monitoring_channel_and_thread() -
         slack_user_id="UOWNER",
         bot_token="xoxb-test",
         app_token="xapp-test",
+        slack_allowed_conversation_users=frozenset({"UOWNER", "UANALYST"}),
     )
     event = {
         "user": "UOWNER",
@@ -55,6 +56,7 @@ def test_trusted_channel_thread_requires_owner_monitoring_channel_and_thread() -
     }
 
     assert is_trusted_channel_thread(event, settings)
+    assert is_trusted_channel_thread({**event, "user": "UANALYST"}, settings)
     assert not is_trusted_channel_thread({**event, "user": "UOTHER"}, settings)
     assert not is_trusted_channel_thread({**event, "channel": "COTHER"}, settings)
     assert not is_trusted_channel_thread({**event, "thread_ts": None}, settings)
@@ -65,6 +67,7 @@ def test_trusted_channel_thread_supports_subscription_flow_channel() -> None:
         slack_user_id="UOWNER",
         bot_token="xoxb-test",
         app_token="xapp-test",
+        slack_allowed_conversation_users=frozenset({"UOWNER"}),
         subscription_flow_alert_channel="CSUBFLOW",
     )
     event = {
@@ -73,6 +76,23 @@ def test_trusted_channel_thread_supports_subscription_flow_channel() -> None:
         "thread_ts": "100.1",
         "ts": "100.2",
         "text": "Что изменилось после recovery?",
+    }
+
+    assert is_trusted_channel_thread(event, settings)
+
+
+def test_settings_without_explicit_conversation_users_fall_back_to_owner() -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+    )
+    event = {
+        "user": "UOWNER",
+        "channel": settings.anomaly_alert_channel,
+        "thread_ts": "100.1",
+        "ts": "100.2",
+        "text": "Продолжай",
     }
 
     assert is_trusted_channel_thread(event, settings)

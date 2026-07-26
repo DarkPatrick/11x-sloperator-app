@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from pathlib import Path
 
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -28,13 +29,29 @@ DIRECTIVE_RE = re.compile(
     re.IGNORECASE,
 )
 NEXT_RE = re.compile(r"^next:\s*", re.IGNORECASE)
+ARTIFACT_RE = re.compile(r"^SLOPERATOR_ARTIFACT:\s*(?P<path>\S+)\s*$")
 INITIAL_INSTRUCTION = """\
-You are serving the authorized user through a private Slack thread.
+Act as a pragmatic product analyst embedded in the Ultimate Guitar monetisation team.
 Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
 Work in the current ug-ai-analyst repository and follow all repository instructions.
-Return a self-contained final response using standard Markdown supported by Slack.
-Do not use Markdown tables; use concise lists instead. If you need clarification, ask
-one concise question in the final response instead of waiting for terminal input.
+Write for product and monetisation teammates: lead with the finding, use plain language,
+state concrete human-readable facts, and finish with prioritised recommendations. Avoid
+ceremonial intros such as "Investigation complete", meta-commentary about making a
+Slack-ready summary, horizontal rules, jargon, and repetition.
+
+Return a concise self-contained response using standard Markdown supported by Slack.
+Slack does not render Markdown tables, so use short lists in the message. Tables and
+charts are encouraged in attached reports. For a large investigation, use the repository's
+dataviz helper to build a readable self-contained HTML report when useful.
+
+If you create SQL, scripts, charts, data extracts, or an HTML report, package the useful
+artifacts into one ZIP archive inside the repository. Do not merely list server paths.
+End the response with exactly `SLOPERATOR_ARTIFACT: relative/path/to/archive.zip` on its
+own line; the bot removes this line and attaches the archive to the Slack thread.
+Do not include secrets, credentials, raw personal data, or unrelated files in the archive.
+
+If you need clarification, ask one concise question in the final response instead of
+waiting for terminal input.
 
 User request:
 """
@@ -163,6 +180,32 @@ def split_slack_message(text: str, limit: int = 3_000) -> list[str]:
         normalized = normalized[boundary:].lstrip()
     chunks.append(normalized)
     return chunks
+
+
+def extract_artifact(text: str, workspace: Path) -> tuple[str, Path | None]:
+    """Remove and validate one agent-produced ZIP attachment marker."""
+    artifact: Path | None = None
+    response_lines: list[str] = []
+    workspace = workspace.resolve()
+    for line in text.splitlines():
+        match = ARTIFACT_RE.fullmatch(line.strip())
+        if match is None:
+            response_lines.append(line)
+            continue
+        if artifact is not None:
+            raise ValueError(
+                "Агент указал больше одного архива с артефактами."  # noqa: RUF001
+            )
+        relative_path = Path(match.group("path"))
+        if relative_path.is_absolute():
+            raise ValueError("Путь к архиву агента должен быть относительным.")
+        candidate = (workspace / relative_path).resolve()
+        if not candidate.is_relative_to(workspace):
+            raise ValueError("Архив агента находится за пределами рабочего каталога.")
+        if candidate.suffix.lower() != ".zip" or not candidate.is_file():
+            raise ValueError("Агент не создал указанный ZIP-архив.")
+        artifact = candidate
+    return "\n".join(response_lines).strip(), artifact
 
 
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
@@ -464,7 +507,8 @@ class AgentOrchestrator:
         thread_ts: str,
         text: str,
     ) -> None:
-        for chunk in split_slack_message(text):
+        response, artifact = extract_artifact(text, self.settings.agent_workspace)
+        for chunk in split_slack_message(response):
             await client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=thread_ts,
@@ -472,6 +516,14 @@ class AgentOrchestrator:
                 # parameter expects its incompatible `mrkdwn` dialect, while
                 # `markdown_text` lets Slack translate LLM output correctly.
                 markdown_text=chunk,
+            )
+        if artifact is not None:
+            await client.files_upload_v2(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                file=artifact,
+                filename=artifact.name,
+                title="Артефакты анализа",
             )
 
     async def _status_heartbeat(

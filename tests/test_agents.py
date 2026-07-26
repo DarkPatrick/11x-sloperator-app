@@ -7,6 +7,7 @@ import pytest
 
 from sloperator.agents import (
     AgentOrchestrator,
+    extract_artifact,
     parse_agent_request,
     split_slack_message,
     thread_key,
@@ -58,10 +59,11 @@ def test_split_slack_message_preserves_all_text() -> None:
     assert "".join(chunks).replace("\n\n", "") == text.replace("\n\n", "")
 
 
-async def test_agent_replies_use_standard_markdown_parameter() -> None:
+async def test_agent_replies_use_standard_markdown_parameter(settings: Settings) -> None:
     post_message = AsyncMock()
     client = SimpleNamespace(chat_postMessage=post_message)
     orchestrator = object.__new__(AgentOrchestrator)
+    orchestrator.settings = settings
 
     await orchestrator._reply(
         client,
@@ -74,4 +76,62 @@ async def test_agent_replies_use_standard_markdown_parameter() -> None:
         channel="C123",
         thread_ts="100.1",
         markdown_text="## Result\n\n**Formatted**",
+    )
+
+
+def test_extract_artifact_removes_and_validates_marker(tmp_path) -> None:
+    artifact = tmp_path / "output" / "analysis.zip"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"zip")
+
+    response, extracted = extract_artifact(
+        "Finding\n\nSLOPERATOR_ARTIFACT: output/analysis.zip",
+        tmp_path,
+    )
+
+    assert response == "Finding"
+    assert extracted == artifact
+
+
+def test_extract_artifact_rejects_paths_outside_workspace(tmp_path) -> None:
+    with pytest.raises(ValueError, match="за пределами"):
+        extract_artifact(
+            "SLOPERATOR_ARTIFACT: ../analysis.zip",
+            tmp_path,
+        )
+
+
+async def test_agent_reply_uploads_artifact_to_same_thread(tmp_path) -> None:
+    artifact = tmp_path / "output" / "analysis.zip"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"zip")
+    post_message = AsyncMock()
+    upload = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message, files_upload_v2=upload)
+    orchestrator = object.__new__(AgentOrchestrator)
+    orchestrator.settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+    )
+
+    await orchestrator._reply(
+        client,
+        channel_id="C123",
+        thread_ts="100.1",
+        text="Finding\nSLOPERATOR_ARTIFACT: output/analysis.zip",
+    )
+
+    post_message.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        markdown_text="Finding",
+    )
+    upload.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        file=artifact,
+        filename="analysis.zip",
+        title="Артефакты анализа",
     )

@@ -9,7 +9,7 @@ so it does not need a public HTTP endpoint.
 - A Slack bot token (`xoxb-…`)
 - A Socket Mode app token (`xapp-…`) with `connections:write`
 - Slack event subscriptions for `message.im` and `message.channels`
-- Bot scopes: `chat:write`, `im:history`, `channels:history`
+- Bot scopes: `chat:write`, `files:write`, `im:history`, `channels:history`
 
 ## Local setup
 

@@ -366,6 +366,7 @@ class AgentOrchestrator:
         message_ts: str,
         thread_ts: str,
         text: str,
+        show_status: bool = True,
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
         claimed = await asyncio.to_thread(
@@ -399,6 +400,7 @@ class AgentOrchestrator:
                 message_ts=message_ts,
                 thread_ts=thread_ts,
                 text=text,
+                show_status=show_status,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
@@ -487,6 +489,7 @@ class AgentOrchestrator:
         message_ts: str,
         thread_ts: str,
         text: str,
+        show_status: bool,
     ) -> None:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -529,16 +532,18 @@ class AgentOrchestrator:
                     channel_id,
                     thread_ts,
                 )
-                await self._set_status(
-                    client,
-                    channel_id,
-                    thread_ts,
-                    "выполняет запрос…",
-                )
-                heartbeat = asyncio.create_task(
-                    self._status_heartbeat(client, channel_id, thread_ts),
-                    name=f"agent-status-{channel_id}-{thread_ts}",
-                )
+                heartbeat: asyncio.Task[None] | None = None
+                if show_status:
+                    await self._set_status(
+                        client,
+                        channel_id,
+                        thread_ts,
+                        "выполняет запрос…",
+                    )
+                    heartbeat = asyncio.create_task(
+                        self._status_heartbeat(client, channel_id, thread_ts),
+                        name=f"agent-status-{channel_id}-{thread_ts}",
+                    )
                 control = ActiveAgentRun(session.provider)
                 self._active_runs[key] = control
                 environment_overrides = (
@@ -591,9 +596,10 @@ class AgentOrchestrator:
                 finally:
                     if self._active_runs.get(key) is control:
                         self._active_runs.pop(key, None)
-                    heartbeat.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await heartbeat
+                    if heartbeat is not None:
+                        heartbeat.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await heartbeat
                 await asyncio.to_thread(
                     self.store.finish_agent_turn,
                     channel_id,
@@ -632,7 +638,8 @@ class AgentOrchestrator:
                 "Агент не смог завершить запрос. Ошибка сохранена локально; попробуйте ещё раз.",
             )
         finally:
-            await self._set_status(client, channel_id, thread_ts, "")
+            if show_status:
+                await self._set_status(client, channel_id, thread_ts, "")
             await asyncio.to_thread(
                 self.store.finish_agent_request,
                 channel_id,

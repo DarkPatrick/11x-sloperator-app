@@ -7,8 +7,9 @@ import json
 import logging
 import re
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 
 import aiohttp
@@ -52,6 +53,26 @@ TABLE_COLUMNS = [
     "verdict",
     "redash",
 ]
+# Pinned from analytics-airflow-dags@feff00a5:
+# monitorings/ug_anomalies/cfg_consts.py -> mention_groups["ug_monetisation"]["metrics"].
+MONETISATION_METRICS = frozenset(
+    {
+        "Landing Upgrade Open",
+        "Tour Start",
+        "Landing Checkout View",
+        "Landing Sign Up Success",
+        "Landing Plans View",
+        "Landing Purchase",
+        "Banner View:from Tour",
+        "Banner View:from App",
+        "Banner Purchase Click:from Tour",
+        "Banner Purchase Click:from App",
+        "Purchase:from Tour",
+        "Purchase:from App",
+        "All Subscription Events",
+        "Splash View",
+    }
+)
 WOW_QUERY = """
 select
     `mel`.`datetime` as `datetime`,
@@ -94,6 +115,21 @@ class AlertBatch:
     header_ts: str
     mention_ts: str | None = None
     alerts: list[Alert] = field(default_factory=list)
+
+
+class AgentSubmitter(Protocol):
+    """Narrow agent-orchestrator interface used by the alert responder."""
+
+    def submit(
+        self,
+        client: AsyncWebClient,
+        *,
+        channel_id: str,
+        message_ts: str,
+        thread_ts: str,
+        text: str,
+        show_status: bool = True,
+    ) -> Awaitable[object]: ...
 
 
 def is_anomaly_trigger(event: dict[str, Any], settings: Settings) -> bool:
@@ -159,8 +195,9 @@ def build_batches(
 class AnomalyAlertResponder:
     """Fetch a just-completed alert batch, validate it, and reply to its mention message."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, agent: AgentSubmitter) -> None:
         self.settings = settings
+        self.agent = agent
         self._in_flight: set[str] = set()
 
     async def handle(self, event: dict[str, Any], client: AsyncWebClient) -> None:
@@ -199,6 +236,16 @@ class AnomalyAlertResponder:
                 blocks=blocks,
                 unfurl_links=False,
             )
+            monetisation = confirmed_monetisation_anomalies(batch, results)
+            if monetisation:
+                await self.agent.submit(
+                    client,
+                    channel_id=self.settings.anomaly_alert_channel,
+                    message_ts=f"{trigger_ts}:monetisation-analysis",
+                    thread_ts=trigger_ts,
+                    text=build_monetisation_agent_prompt(batch, monetisation),
+                    show_status=False,
+                )
         finally:
             self._in_flight.discard(trigger_ts)
 
@@ -494,3 +541,50 @@ def render_blocks(
             )
         )
     return intro, blocks
+
+
+def confirmed_monetisation_anomalies(
+    batch: AlertBatch,
+    results: list[dict[str, Any]],
+) -> list[tuple[Alert, dict[str, Any]]]:
+    """Keep confirmed anomalies belonging to the pinned UG monetisation group."""
+    return [
+        (alert, result)
+        for alert, result in zip(batch.alerts, results, strict=True)
+        if alert.metric in MONETISATION_METRICS
+        and result.get("status") == "ok"
+        and result.get("verdict") == "ANOMALY"
+    ]
+
+
+def build_monetisation_agent_prompt(
+    batch: AlertBatch,
+    anomalies: list[tuple[Alert, dict[str, Any]]],
+) -> str:
+    """Build the first durable agent turn for a confirmed monetisation incident."""
+    metric_lines = []
+    for alert, result in anomalies:
+        metric_lines.append(
+            "- "
+            f"{alert.metric} | platform={alert.platform} | type={alert.metric_type} | "
+            f"prophet_delta={alert.diff}% | value={_integer(result.get('value'))} | "
+            f"last_week={_integer(result.get('last_week'))} | "
+            f"wow={_percent(result.get('wow'))} | "
+            f"peak_wow={_percent(result.get('peak_wow'))}"
+        )
+    metrics = "\n".join(metric_lines)
+    return f"""\
+Use the `time-series-research` skill to investigate the confirmed UG monetisation anomalies
+below. Work from the current `/home/egor/projects/ug-ai-analyst` repository, follow its
+AGENTS.md and freshness preflight, and use its analytics context and data tools.
+
+Alert timestamp: {batch.alert_dt or "unknown"} UTC
+Confirmed monetisation anomalies:
+{metrics}
+
+Determine the most likely cause using relevant time-series cuts and supporting evidence.
+Distinguish a persistent/product or technical issue from a one-off fluctuation. Reply in this
+Slack thread with a concise, self-contained investigation: findings, confidence, likely cause,
+and concrete recommended next action. If evidence points to a transient deviation, say so
+plainly instead of forcing a root cause. Do not merely repeat the auto-reply calculation.
+"""

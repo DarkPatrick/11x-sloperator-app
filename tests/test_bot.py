@@ -1,5 +1,11 @@
 from sloperator.archive import conversation_kind, event_channel_id
-from sloperator.bot import normalize_command, reply_thread_ts, response_for
+from sloperator.bot import (
+    is_trusted_channel_thread,
+    normalize_command,
+    reply_thread_ts,
+    response_for,
+)
+from sloperator.config import Settings
 
 
 def test_normalize_command_removes_mention_and_whitespace() -> None:
@@ -32,3 +38,23 @@ def test_conversation_kind_identifies_direct_conversations() -> None:
     assert conversation_kind({"is_im": True}) == "direct"
     assert conversation_kind({"is_mpim": True}) == "direct"
     assert conversation_kind({"is_private": True}) == "channel"
+
+
+def test_trusted_channel_thread_requires_owner_monitoring_channel_and_thread() -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+    )
+    event = {
+        "user": "UOWNER",
+        "channel": settings.anomaly_alert_channel,
+        "thread_ts": "100.1",
+        "ts": "100.2",
+        "text": "Проверь ещё платформы",
+    }
+
+    assert is_trusted_channel_thread(event, settings)
+    assert not is_trusted_channel_thread({**event, "user": "UOTHER"}, settings)
+    assert not is_trusted_channel_thread({**event, "channel": "COTHER"}, settings)
+    assert not is_trusted_channel_thread({**event, "thread_ts": None}, settings)

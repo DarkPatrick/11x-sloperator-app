@@ -364,6 +364,24 @@ class EventStore:
             ).fetchone()
         return AgentSession(*row) if row is not None else None
 
+    def has_agent_thread(self, channel_id: str, thread_ts: str) -> bool:
+        """Return whether a thread has a session or a queued/running agent request."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM agent_sessions
+                WHERE channel_id = ? AND thread_ts = ?
+                UNION ALL
+                SELECT 1
+                FROM agent_requests
+                WHERE channel_id = ? AND thread_ts = ?
+                LIMIT 1
+                """,
+                (channel_id, thread_ts, channel_id, thread_ts),
+            ).fetchone()
+        return row is not None
+
     def create_agent_session(
         self,
         channel_id: str,

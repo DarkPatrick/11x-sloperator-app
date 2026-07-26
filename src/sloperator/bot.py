@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Mapping
@@ -63,6 +64,17 @@ def reply_thread_ts(event: Mapping[str, Any]) -> str | None:
     return thread_ts if isinstance(thread_ts, str) else None
 
 
+def is_trusted_channel_thread(event: Mapping[str, Any], settings: Settings) -> bool:
+    """Match owner replies in agent-enabled monitoring-channel threads."""
+    return (
+        event.get("user") == settings.slack_user_id
+        and event.get("channel") == settings.anomaly_alert_channel
+        and isinstance(event.get("thread_ts"), str)
+        and isinstance(event.get("text"), str)
+        and isinstance(event.get("ts"), str)
+    )
+
+
 def create_app(
     settings: Settings,
     store: EventStore,
@@ -72,7 +84,7 @@ def create_app(
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
     app.use(ArchiveMiddleware(store, app.client))
-    anomaly_responder = AnomalyAlertResponder(settings)
+    anomaly_responder = AnomalyAlertResponder(settings, orchestrator)
 
     @app.event("message")
     async def handle_message(
@@ -91,17 +103,51 @@ def create_app(
         if user != settings.slack_user_id:
             LOGGER.warning("Ignoring message from unauthorized Slack user %s", user)
             return
+        message_ts = event.get("ts")
+        active_thread_ts = reply_thread_ts(event)
+        if is_trusted_channel_thread(event, settings):
+            assert isinstance(channel, str)
+            assert isinstance(text, str)
+            assert isinstance(message_ts, str)
+            assert active_thread_ts is not None
+            has_agent = await asyncio.to_thread(
+                store.has_agent_thread,
+                channel,
+                active_thread_ts,
+            )
+            if not has_agent:
+                LOGGER.debug("Ignoring owner reply in a non-agent monitoring thread")
+                return
+            command = normalize_command(text)
+            if command in CANCEL_COMMANDS:
+                if await orchestrator.cancel(channel, active_thread_ts):
+                    response = "Остановлено. Выполнение агента в этом треде отменено."
+                else:
+                    response = "Сейчас в этом треде нет выполняющегося запроса."
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=active_thread_ts,
+                    text=response,
+                )
+                return
+            await orchestrator.submit(
+                client,
+                channel_id=channel,
+                message_ts=message_ts,
+                thread_ts=active_thread_ts,
+                text=text,
+                show_status=False,
+            )
+            return
         if not isinstance(channel, str) or not channel.startswith("D") or not isinstance(text, str):
             LOGGER.debug("Ignoring malformed Slack message event")
             return
 
-        message_ts = event.get("ts")
         if not isinstance(message_ts, str):
             LOGGER.debug("Ignoring Slack message without a timestamp")
             return
 
         command = normalize_command(text)
-        active_thread_ts = reply_thread_ts(event)
         if command in {"vpn ready", "vpn connect", "vpn start", "готов"}:
             try:
                 state = await vpn.connect()

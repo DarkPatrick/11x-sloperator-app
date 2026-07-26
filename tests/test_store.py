@@ -118,6 +118,19 @@ def test_store_tracks_agent_sessions_and_deduplicates_requests(tmp_path: Path) -
     assert recovered.status == "cancelled"
 
 
+def test_store_recognizes_queued_and_persisted_agent_threads(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+
+    assert not store.has_agent_thread("C123", "100.1")
+    assert store.claim_agent_request("C123", "100.1:auto", "100.1")
+    assert store.has_agent_thread("C123", "100.1")
+
+    store.create_agent_session("C456", "200.1", "claude", "opus")
+
+    assert store.has_agent_thread("C456", "200.1")
+
+
 def test_store_redacts_vpn_otp_from_event_and_message(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "archive.sqlite3")
     store.initialize()

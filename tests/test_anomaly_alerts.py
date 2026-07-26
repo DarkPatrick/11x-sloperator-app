@@ -7,6 +7,8 @@ from sloperator.anomaly_alerts import (
     AlertBatch,
     build_batch_sql,
     build_batches,
+    build_monetisation_agent_prompt,
+    confirmed_monetisation_anomalies,
     is_anomaly_trigger,
     verdict_for_metric,
 )
@@ -95,3 +97,50 @@ def test_batch_sql_escapes_dimension_values() -> None:
 
     assert "Bob''s metric" in sql
     assert "format JSON" in sql
+
+
+def test_only_confirmed_monetisation_anomalies_launch_analysis() -> None:
+    batch = AlertBatch(
+        "2026-07-25 10:00:00",
+        "100.1",
+        alerts=[
+            Alert("Landing Purchase", "web", "events", "-20", 80, 100, "0.001"),
+            Alert("Tab View 60s", "ios", "events", "-30", 70, 100, "0.001"),
+            Alert("Splash View", "ios", "events", "+5", 105, 100, "0.001"),
+        ],
+    )
+    results = [
+        {"status": "ok", "verdict": "ANOMALY"},
+        {"status": "ok", "verdict": "ANOMALY"},
+        {"status": "ok", "verdict": "OK"},
+    ]
+
+    selected = confirmed_monetisation_anomalies(batch, results)
+
+    assert [alert.metric for alert, _ in selected] == ["Landing Purchase"]
+
+
+def test_monetisation_agent_prompt_requires_time_series_skill() -> None:
+    batch = AlertBatch("2026-07-25 10:00:00", "100.1")
+    anomaly = Alert("Landing Purchase", "web", "events", "-20", 80, 100, "0.001")
+
+    prompt = build_monetisation_agent_prompt(
+        batch,
+        [
+            (
+                anomaly,
+                {
+                    "status": "ok",
+                    "verdict": "ANOMALY",
+                    "value": 80,
+                    "last_week": 100,
+                    "wow": -0.2,
+                    "peak_wow": -0.25,
+                },
+            )
+        ],
+    )
+
+    assert "`time-series-research`" in prompt
+    assert "/home/egor/projects/ug-ai-analyst" in prompt
+    assert "Landing Purchase" in prompt

@@ -69,6 +69,13 @@ history, checks the alerted metrics against the same week-over-week rule used by
 GitLab cron job, and replies in the mention message's thread. Messages from other bots and
 mentions in other channels are ignored.
 
+When the check confirms an anomaly for a metric in Airflow's pinned `ug_monetisation` group,
+Sloperator starts a durable agent session in `/home/egor/projects/ug-ai-analyst`. The first turn
+must use the `time-series-research` skill to investigate the movement and recommend an action.
+Later replies from `SLACK_USER_ID` in that same channel thread continue the session; other users
+and unrelated channel threads cannot launch or steer it. Channel-thread sessions post no Slack
+assistant status or heartbeat.
+
 The responder requires `ANOMALY_*` and `CLICKHOUSE_*` settings documented in `.env.example`,
 membership in the monitoring channel, the `message.channels` event subscription, and the
 `channels:history` scope. Slack thread history provides durable deduplication, while an

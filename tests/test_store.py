@@ -221,6 +221,30 @@ def test_old_recovery_does_not_close_newer_component_alert(tmp_path: Path) -> No
     assert store.recover_subscription_flow_component("ios:recurring", "200.2") == 1
 
 
+def test_anomaly_analysis_cooldown_filters_only_recent_metric_keys(
+    tmp_path: Path,
+) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    purchase = ("Landing Purchase", "web", "events")
+    tour = ("Tour Start", "web", "uniques")
+
+    assert store.claim_anomaly_analyses([purchase]) == {purchase}
+    assert store.claim_anomaly_analyses([purchase, tour]) == {tour}
+
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE anomaly_analysis_cooldowns
+            SET last_launched_at = datetime('now', '-25 hours')
+            WHERE metric = ? AND platform = ? AND metric_type = ?
+            """,
+            purchase,
+        )
+
+    assert store.claim_anomaly_analyses([purchase]) == {purchase}
+
+
 def test_store_redacts_vpn_otp_from_event_and_message(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "archive.sqlite3")
     store.initialize()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -16,6 +17,7 @@ import aiohttp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.config import Settings
+from sloperator.store import EventStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -195,8 +197,14 @@ def build_batches(
 class AnomalyAlertResponder:
     """Fetch a just-completed alert batch, validate it, and reply to its mention message."""
 
-    def __init__(self, settings: Settings, agent: AgentSubmitter) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        store: EventStore,
+        agent: AgentSubmitter,
+    ) -> None:
         self.settings = settings
+        self.store = store
         self.agent = agent
         self._in_flight: set[str] = set()
 
@@ -237,6 +245,14 @@ class AnomalyAlertResponder:
                 unfurl_links=False,
             )
             monetisation = confirmed_monetisation_anomalies(batch, results)
+            if monetisation:
+                claimed = await asyncio.to_thread(
+                    self.store.claim_anomaly_analyses,
+                    [alert.key() for alert, _ in monetisation],
+                )
+                monetisation = [
+                    item for item in monetisation if item[0].key() in claimed
+                ]
             if monetisation:
                 await self.agent.submit(
                     client,

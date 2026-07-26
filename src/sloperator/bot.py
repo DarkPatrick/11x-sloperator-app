@@ -92,7 +92,7 @@ def create_app(
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
     app.use(ArchiveMiddleware(store, app.client))
-    anomaly_responder = AnomalyAlertResponder(settings, orchestrator)
+    anomaly_responder = AnomalyAlertResponder(settings, store, orchestrator)
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     vpn_threads: set[tuple[str, str]] = set()
 

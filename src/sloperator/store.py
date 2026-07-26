@@ -119,6 +119,14 @@ CREATE TABLE IF NOT EXISTS subscription_flow_incidents (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS anomaly_analysis_cooldowns (
+    metric TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    metric_type TEXT NOT NULL,
+    last_launched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (metric, platform, metric_type)
+) STRICT;
 """
 OTP_MESSAGE_RE = re.compile(r"^\s*(?:vpn\s+otp\s+)?\d{6,8}\s*$", re.IGNORECASE)
 REDACTED_OTP = "[redacted one-time code]"
@@ -185,7 +193,7 @@ class EventStore:
                     """
                 )
             connection.execute(
-                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '2')"
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '3')"
             )
         os.chmod(self.path, 0o600)
 
@@ -473,6 +481,39 @@ class EventStore:
                 ),
             )
         return True
+
+    def claim_anomaly_analyses(
+        self,
+        keys: Sequence[tuple[str, str, str]],
+        cooldown_hours: int = 24,
+    ) -> set[tuple[str, str, str]]:
+        """Reserve only anomaly dimensions not analysed within the cooldown."""
+        claimed: set[tuple[str, str, str]] = set()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for key in dict.fromkeys(keys):
+                row = connection.execute(
+                    """
+                    SELECT datetime(last_launched_at) > datetime('now', ?)
+                    FROM anomaly_analysis_cooldowns
+                    WHERE metric = ? AND platform = ? AND metric_type = ?
+                    """,
+                    (f"-{cooldown_hours} hours", *key),
+                ).fetchone()
+                if row is not None and bool(row[0]):
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO anomaly_analysis_cooldowns(
+                        metric, platform, metric_type, last_launched_at
+                    ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(metric, platform, metric_type) DO UPDATE SET
+                        last_launched_at = CURRENT_TIMESTAMP
+                    """,
+                    key,
+                )
+                claimed.add(key)
+        return claimed
 
     def recover_subscription_flow_component(
         self,

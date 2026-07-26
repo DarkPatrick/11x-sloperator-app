@@ -90,6 +90,11 @@ upstream/downstream baseline model. The agent runs in `/home/egor/projects/ug-ai
 the `time-series-research` skill, and replies with an evidence-backed likely cause and action.
 The same trusted-user thread continuation and no-channel-status rules apply.
 
+Confirmed Analytics Bot anomalies are deduplicated per metric, platform, and metric type.
+Once an agent investigation is launched for a combination, repeated alerts for that same
+combination are excluded from agent analysis for 24 hours; new combinations in a mixed alert
+are still investigated.
+
 Repeated alerts are grouped persistently by their failure shape: upstream severity, downstream
 severity, and ingestion-probe state. Platform, flow kind, evaluated hour, and changing values do
 not make a continuing incident look new. Sloperator tracks the affected platform-and-flow

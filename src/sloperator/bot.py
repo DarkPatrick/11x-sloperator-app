@@ -144,7 +144,7 @@ def create_app(
                     text=response,
                 )
                 return
-            await orchestrator.submit(
+            result = await orchestrator.submit(
                 client,
                 channel_id=channel,
                 message_ts=message_ts,
@@ -152,6 +152,15 @@ def create_app(
                 text=text,
                 show_status=False,
             )
+            if result is SubmitResult.EXPIRED:
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=active_thread_ts,
+                    text=(
+                        "Сессия агента закрыта после 24 часов без активности. "
+                        "Продолжить её в этом треде нельзя."
+                    ),
+                )
             return
         if not isinstance(channel, str) or not channel.startswith("D") or not isinstance(text, str):
             LOGGER.debug("Ignoring malformed Slack message event")
@@ -248,6 +257,15 @@ def create_app(
                     channel=channel,
                     thread_ts=thread_key(message_ts, reply_thread_ts(event)),
                     text="Уточнение передано активному агенту.",
+                )
+            elif result is SubmitResult.EXPIRED:
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_key(message_ts, reply_thread_ts(event)),
+                    text=(
+                        "Сессия агента закрыта после 24 часов без активности. "
+                        "Начните новый Chat, чтобы создать новую сессию."
+                    ),
                 )
 
     return app

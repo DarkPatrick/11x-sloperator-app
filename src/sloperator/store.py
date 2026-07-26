@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_activity_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (channel_id, thread_ts)
 ) STRICT;
 
@@ -169,8 +170,22 @@ class EventStore:
         os.chmod(self.path.parent, 0o700)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            agent_session_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(agent_sessions)")
+            }
+            if "last_activity_at" not in agent_session_columns:
+                connection.execute(
+                    "ALTER TABLE agent_sessions ADD COLUMN last_activity_at TEXT"
+                )
+                connection.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET last_activity_at = updated_at
+                    WHERE last_activity_at IS NULL
+                    """
+                )
             connection.execute(
-                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '1')"
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '2')"
             )
         os.chmod(self.path, 0o600)
 
@@ -523,8 +538,9 @@ class EventStore:
             connection.execute(
                 """
                 INSERT INTO agent_sessions(
-                    channel_id, thread_ts, provider, model, external_session_id
-                ) VALUES (?, ?, ?, ?, ?)
+                    channel_id, thread_ts, provider, model, external_session_id,
+                    last_activity_at
+                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (channel_id, thread_ts, provider, model, external_session_id),
             )
@@ -639,6 +655,76 @@ class EventStore:
                 (channel_id, message_ts, thread_ts),
             )
         return cursor.rowcount == 1
+
+    def prepare_agent_request(
+        self,
+        channel_id: str,
+        message_ts: str,
+        thread_ts: str,
+        inactivity_hours: int = 24,
+    ) -> str:
+        """Claim a request and permanently expire an inactive thread session."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                """
+                SELECT 1 FROM agent_requests
+                WHERE channel_id = ? AND message_ts = ?
+                """,
+                (channel_id, message_ts),
+            ).fetchone():
+                return "duplicate"
+            session = connection.execute(
+                """
+                SELECT status,
+                       COALESCE(last_activity_at, updated_at)
+                FROM agent_sessions
+                WHERE channel_id = ? AND thread_ts = ?
+                """,
+                (channel_id, thread_ts),
+            ).fetchone()
+            if session is not None:
+                status, last_activity_at = session
+                expired = status == "expired" or connection.execute(
+                    """
+                    SELECT datetime(?) <= datetime('now', ?)
+                    """,
+                    (last_activity_at, f"-{inactivity_hours} hours"),
+                ).fetchone()[0]
+                if expired:
+                    connection.execute(
+                        """
+                        UPDATE agent_sessions
+                        SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+                        WHERE channel_id = ? AND thread_ts = ?
+                        """,
+                        (channel_id, thread_ts),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO agent_requests(
+                            channel_id, message_ts, thread_ts, status
+                        ) VALUES (?, ?, ?, 'expired')
+                        """,
+                        (channel_id, message_ts, thread_ts),
+                    )
+                    return "expired"
+                connection.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET last_activity_at = CURRENT_TIMESTAMP
+                    WHERE channel_id = ? AND thread_ts = ?
+                    """,
+                    (channel_id, thread_ts),
+                )
+            connection.execute(
+                """
+                INSERT INTO agent_requests(channel_id, message_ts, thread_ts)
+                VALUES (?, ?, ?)
+                """,
+                (channel_id, message_ts, thread_ts),
+            )
+        return "claimed"
 
     def finish_agent_request(self, channel_id: str, message_ts: str, status: str) -> None:
         """Record the terminal state of a Slack agent request."""

@@ -71,6 +71,7 @@ class SubmitResult(StrEnum):
     QUEUED = "queued"
     STEERED = "steered"
     DUPLICATE = "duplicate"
+    EXPIRED = "expired"
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,14 +414,16 @@ class AgentOrchestrator:
         show_status: bool = True,
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
-        claimed = await asyncio.to_thread(
-            self.store.claim_agent_request,
+        claim = await asyncio.to_thread(
+            self.store.prepare_agent_request,
             channel_id,
             message_ts,
             thread_ts,
         )
-        if not claimed:
+        if claim == SubmitResult.DUPLICATE:
             return SubmitResult.DUPLICATE
+        if claim == SubmitResult.EXPIRED:
+            return SubmitResult.EXPIRED
         key = (channel_id, thread_ts)
         next_match = NEXT_RE.match(text)
         if (

@@ -110,6 +110,8 @@ One Slack thread maps to exactly one durable CLI session:
 - messages in one thread execute serially;
 - different threads are bounded by `SLOPERATOR_AGENT_MAX_CONCURRENCY`;
 - Slack delivery retries are deduplicated before a paid agent turn starts.
+- after 24 hours without a user message, the thread session expires permanently;
+  later replies cannot resume it or create another agent session in that thread;
 - a stop command in the thread terminates that turn's entire process group.
 
 While an agent is working, another ordinary message in the same Slack thread steers

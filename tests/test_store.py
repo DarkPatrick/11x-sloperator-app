@@ -131,6 +131,43 @@ def test_store_recognizes_queued_and_persisted_agent_threads(tmp_path: Path) -> 
     assert store.has_agent_thread("C456", "200.1")
 
 
+def test_store_expires_agent_session_after_24_hours_of_inactivity(
+    tmp_path: Path,
+) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.create_agent_session("D123", "100.1", "claude", "opus")
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agent_sessions
+            SET last_activity_at = datetime('now', '-25 hours')
+            WHERE channel_id = 'D123' AND thread_ts = '100.1'
+            """
+        )
+
+    assert store.prepare_agent_request("D123", "100.2", "100.1") == "expired"
+    assert store.get_agent_session("D123", "100.1").status == "expired"
+    assert store.prepare_agent_request("D123", "100.3", "100.1") == "expired"
+
+
+def test_store_keeps_active_session_alive_on_new_message(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.create_agent_session("D123", "100.1", "claude", "opus")
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE agent_sessions
+            SET last_activity_at = datetime('now', '-23 hours')
+            WHERE channel_id = 'D123' AND thread_ts = '100.1'
+            """
+        )
+
+    assert store.prepare_agent_request("D123", "100.2", "100.1") == "claimed"
+    assert store.get_agent_session("D123", "100.1").status == "idle"
+
+
 def test_subscription_flow_incident_dedup_recovery_and_rearm(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()

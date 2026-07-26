@@ -58,3 +58,21 @@ def test_trusted_channel_thread_requires_owner_monitoring_channel_and_thread() -
     assert not is_trusted_channel_thread({**event, "user": "UOTHER"}, settings)
     assert not is_trusted_channel_thread({**event, "channel": "COTHER"}, settings)
     assert not is_trusted_channel_thread({**event, "thread_ts": None}, settings)
+
+
+def test_trusted_channel_thread_supports_subscription_flow_channel() -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        subscription_flow_alert_channel="CSUBFLOW",
+    )
+    event = {
+        "user": "UOWNER",
+        "channel": "CSUBFLOW",
+        "thread_ts": "100.1",
+        "ts": "100.2",
+        "text": "Что изменилось после recovery?",
+    }
+
+    assert is_trusted_channel_thread(event, settings)

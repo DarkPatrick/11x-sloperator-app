@@ -107,12 +107,23 @@ CREATE TABLE IF NOT EXISTS agent_requests (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (channel_id, message_ts)
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS subscription_flow_incidents (
+    nature_key TEXT PRIMARY KEY,
+    active INTEGER NOT NULL CHECK(active IN (0, 1)),
+    components_json TEXT NOT NULL,
+    first_alert_ts TEXT NOT NULL,
+    last_alert_ts TEXT NOT NULL,
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+) STRICT;
 """
 OTP_MESSAGE_RE = re.compile(r"^\s*(?:vpn\s+otp\s+)?\d{6,8}\s*$", re.IGNORECASE)
 REDACTED_OTP = "[redacted one-time code]"
 
 
-def _json(value: Mapping[str, Any]) -> str:
+def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
@@ -381,6 +392,123 @@ class EventStore:
                 (channel_id, thread_ts, channel_id, thread_ts),
             ).fetchone()
         return row is not None
+
+    def claim_subscription_flow_incident(
+        self,
+        nature_key: str,
+        components: set[str],
+        alert_ts: str,
+    ) -> bool:
+        """Open or extend an incident; return true only when Claude should be launched."""
+        if not nature_key or not components:
+            raise ValueError("Subscription-flow incidents need a nature and components")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT active, components_json
+                FROM subscription_flow_incidents
+                WHERE nature_key = ?
+                """,
+                (nature_key,),
+            ).fetchone()
+            if row is None:
+                component_alerts = {component: alert_ts for component in sorted(components)}
+                connection.execute(
+                    """
+                    INSERT INTO subscription_flow_incidents(
+                        nature_key, active, components_json, first_alert_ts, last_alert_ts
+                    ) VALUES (?, 1, ?, ?, ?)
+                    """,
+                    (nature_key, _json(component_alerts), alert_ts, alert_ts),
+                )
+                return True
+            active, raw_components = bool(row[0]), row[1]
+            decoded = json.loads(raw_components)
+            existing = (
+                decoded
+                if isinstance(decoded, dict)
+                else {component: alert_ts for component in decoded}
+            )
+            merged = {**existing, **dict.fromkeys(sorted(components), alert_ts)}
+            if active:
+                connection.execute(
+                    """
+                    UPDATE subscription_flow_incidents
+                    SET components_json = ?, last_alert_ts = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE nature_key = ?
+                    """,
+                    (_json(merged), alert_ts, nature_key),
+                )
+                return False
+            connection.execute(
+                """
+                UPDATE subscription_flow_incidents
+                SET active = 1, components_json = ?, first_alert_ts = ?,
+                    last_alert_ts = ?, resolved_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE nature_key = ?
+                """,
+                (
+                    _json({component: alert_ts for component in sorted(components)}),
+                    alert_ts,
+                    alert_ts,
+                    nature_key,
+                ),
+            )
+        return True
+
+    def recover_subscription_flow_component(
+        self,
+        component: str,
+        recovered_alert_ts: str,
+    ) -> int:
+        """Remove a recovered component and resolve incidents with no affected flows left."""
+        resolved = 0
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT nature_key, components_json
+                FROM subscription_flow_incidents
+                WHERE active = 1
+                """
+            ).fetchall()
+            for nature_key, raw_components in rows:
+                decoded = json.loads(raw_components)
+                components = (
+                    decoded
+                    if isinstance(decoded, dict)
+                    else {item: recovered_alert_ts for item in decoded}
+                )
+                if component not in components:
+                    continue
+                if float(recovered_alert_ts) < float(components[component]):
+                    continue
+                components.pop(component)
+                if components:
+                    connection.execute(
+                        """
+                        UPDATE subscription_flow_incidents
+                        SET components_json = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE nature_key = ?
+                        """,
+                        (_json(components), nature_key),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE subscription_flow_incidents
+                        SET active = 0, components_json = '{}',
+                            resolved_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE nature_key = ?
+                        """,
+                        (nature_key,),
+                    )
+                    resolved += 1
+        return resolved
 
     def create_agent_session(
         self,

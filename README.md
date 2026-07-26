@@ -81,6 +81,22 @@ membership in the monitoring channel, the `message.channels` event subscription,
 `channels:history` scope. Slack thread history provides durable deduplication, while an
 in-process guard suppresses concurrent delivery retries.
 
+## Subscription-flow incident investigations
+
+When `subscription_flow_monitor.py` posts a `SERIOUS` alert, Sloperator starts a Claude
+investigation in the alert thread with the exact detector output and an explanation of its
+upstream/downstream baseline model. The agent runs in `/home/egor/projects/ug-ai-analyst`, uses
+the `time-series-research` skill, and replies with an evidence-backed likely cause and action.
+The same trusted-user thread continuation and no-channel-status rules apply.
+
+Repeated alerts are grouped persistently by their failure shape: upstream severity, downstream
+severity, and ingestion-probe state. Platform, flow kind, evaluated hour, and changing values do
+not make a continuing incident look new. Sloperator tracks the affected platform-and-flow
+components and suppresses another agent launch until every component has received the monitor's
+threaded `Recovered` event. Recovery is tied to the latest alert timestamp for that component,
+so a delayed reply from an older alert cannot close a newer recurrence. A different failure shape
+or the same shape after full recovery launches a new investigation.
+
 ## Claude and Codex sessions
 
 Any authorized DM that is not one of the commands above starts or resumes an agent

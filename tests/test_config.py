@@ -15,6 +15,7 @@ def test_settings_load_valid_environment(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert settings.port == 9000
     assert settings.anomaly_alert_channel == "C06FADPMGKT"
+    assert settings.subscription_flow_alert_channel == "C06FADPMGKT"
 
 
 def test_settings_load_clickhouse_environment(monkeypatch: pytest.MonkeyPatch) -> None:

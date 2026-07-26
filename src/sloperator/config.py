@@ -54,6 +54,7 @@ class Settings:
     anomaly_window_hours: float = 24.0
     anomaly_threshold: float = 0.10
     anomaly_days_before: int = 1
+    subscription_flow_alert_channel: str = "C06FADPMGKT"
     clickhouse_host: str | None = None
     clickhouse_port: int = 8443
     clickhouse_username: str | None = None
@@ -106,6 +107,9 @@ class Settings:
             "ANOMALY_BOT_USER_ID", "U018X57PTFV"
         ).strip()
         anomaly_bot_id = os.environ.get("ANOMALY_BOT_ID", "B018Q735LSJ").strip()
+        subscription_flow_alert_channel = os.environ.get(
+            "SUBFLOW_ALERT_CHANNEL", "C06FADPMGKT"
+        ).strip()
         clickhouse_host = os.environ.get("CLICKHOUSE_HOST", "").strip() or None
         clickhouse_username = os.environ.get("CLICKHOUSE_USERNAME", "").strip() or None
         clickhouse_password = os.environ.get("CLICKHOUSE_PASSWORD", "")
@@ -166,6 +170,8 @@ class Settings:
             raise ConfigurationError("ANOMALY_THRESHOLD must be between 0 and 1")
         if anomaly_days_before < 1:
             raise ConfigurationError("ANOMALY_DAYS_BEFORE must be positive")
+        if not subscription_flow_alert_channel.startswith("C"):
+            raise ConfigurationError("SUBFLOW_ALERT_CHANNEL must be a Slack channel ID")
         if not 1 <= clickhouse_port <= 65_535:
             raise ConfigurationError("CLICKHOUSE_PORT must be between 1 and 65535")
         if bool(clickhouse_host) != bool(clickhouse_username):
@@ -211,6 +217,7 @@ class Settings:
             anomaly_window_hours=anomaly_window_hours,
             anomaly_threshold=anomaly_threshold,
             anomaly_days_before=anomaly_days_before,
+            subscription_flow_alert_channel=subscription_flow_alert_channel,
             clickhouse_host=clickhouse_host,
             clickhouse_port=clickhouse_port,
             clickhouse_username=clickhouse_username,

@@ -16,6 +16,7 @@ from sloperator.anomaly_alerts import AnomalyAlertResponder, is_anomaly_trigger
 from sloperator.archive import ArchiveMiddleware
 from sloperator.config import Settings
 from sloperator.store import EventStore
+from sloperator.subscription_flow import SubscriptionFlowResponder, is_subscription_flow_event
 from sloperator.vpn import VpnError, VpnManager, VpnState
 
 LOGGER = logging.getLogger(__name__)
@@ -68,7 +69,8 @@ def is_trusted_channel_thread(event: Mapping[str, Any], settings: Settings) -> b
     """Match owner replies in agent-enabled monitoring-channel threads."""
     return (
         event.get("user") == settings.slack_user_id
-        and event.get("channel") == settings.anomaly_alert_channel
+        and event.get("channel")
+        in {settings.anomaly_alert_channel, settings.subscription_flow_alert_channel}
         and isinstance(event.get("thread_ts"), str)
         and isinstance(event.get("text"), str)
         and isinstance(event.get("ts"), str)
@@ -85,6 +87,7 @@ def create_app(
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
     app.use(ArchiveMiddleware(store, app.client))
     anomaly_responder = AnomalyAlertResponder(settings, orchestrator)
+    subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
 
     @app.event("message")
     async def handle_message(
@@ -93,6 +96,9 @@ def create_app(
     ) -> None:
         if is_anomaly_trigger(dict(event), settings):
             await anomaly_responder.handle(dict(event), client)
+            return
+        if is_subscription_flow_event(dict(event), settings):
+            await subscription_flow_responder.handle(dict(event), client)
             return
         if event.get("subtype") is not None or event.get("bot_id") is not None:
             return

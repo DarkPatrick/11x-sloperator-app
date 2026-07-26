@@ -131,6 +131,59 @@ def test_store_recognizes_queued_and_persisted_agent_threads(tmp_path: Path) -> 
     assert store.has_agent_thread("C456", "200.1")
 
 
+def test_subscription_flow_incident_dedup_recovery_and_rearm(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    nature = "upstream-serious-downstream-ok-probe-healthy"
+
+    assert store.claim_subscription_flow_incident(
+        nature,
+        {"android:recurring", "ios:recurring"},
+        "100.1",
+    )
+    assert not store.claim_subscription_flow_incident(
+        nature,
+        {"web:acquisitions"},
+        "100.2",
+    )
+
+    assert store.recover_subscription_flow_component("android:recurring", "100.1") == 0
+    assert store.recover_subscription_flow_component("ios:recurring", "100.1") == 0
+    assert store.recover_subscription_flow_component("web:acquisitions", "100.2") == 1
+
+    assert store.claim_subscription_flow_incident(
+        nature,
+        {"android:recurring"},
+        "200.1",
+    )
+
+
+def test_old_recovery_does_not_close_newer_component_alert(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    nature = "same-nature"
+
+    assert store.claim_subscription_flow_incident(
+        nature,
+        {"android:recurring"},
+        "100.1",
+    )
+    assert not store.claim_subscription_flow_incident(
+        nature,
+        {"android:recurring"},
+        "200.1",
+    )
+
+    assert store.recover_subscription_flow_component("android:recurring", "100.1") == 0
+    assert not store.claim_subscription_flow_incident(
+        nature,
+        {"ios:recurring"},
+        "200.2",
+    )
+    assert store.recover_subscription_flow_component("android:recurring", "200.1") == 0
+    assert store.recover_subscription_flow_component("ios:recurring", "200.2") == 1
+
+
 def test_store_redacts_vpn_otp_from_event_and_message(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "archive.sqlite3")
     store.initialize()

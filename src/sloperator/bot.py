@@ -153,13 +153,10 @@ def create_app(
                 show_status=False,
             )
             if result is SubmitResult.EXPIRED:
-                await client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=active_thread_ts,
-                    text=(
-                        "Сессия агента закрыта после 24 часов без активности. "
-                        "Продолжить её в этом треде нельзя."
-                    ),
+                LOGGER.debug(
+                    "Ignoring reply in expired monitoring thread %s/%s",
+                    channel,
+                    active_thread_ts,
                 )
             return
         if not isinstance(channel, str) or not channel.startswith("D") or not isinstance(text, str):

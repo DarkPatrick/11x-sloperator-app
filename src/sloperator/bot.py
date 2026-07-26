@@ -11,6 +11,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import AgentOrchestrator, SubmitResult, thread_key
+from sloperator.anomaly_alerts import AnomalyAlertResponder, is_anomaly_trigger
 from sloperator.archive import ArchiveMiddleware
 from sloperator.config import Settings
 from sloperator.store import EventStore
@@ -71,12 +72,16 @@ def create_app(
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
     app.use(ArchiveMiddleware(store, app.client))
+    anomaly_responder = AnomalyAlertResponder(settings)
 
     @app.event("message")
     async def handle_message(
         event: Mapping[str, Any],
         client: AsyncWebClient,
     ) -> None:
+        if is_anomaly_trigger(dict(event), settings):
+            await anomaly_responder.handle(dict(event), client)
+            return
         if event.get("subtype") is not None or event.get("bot_id") is not None:
             return
 

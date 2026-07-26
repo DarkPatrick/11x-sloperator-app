@@ -48,6 +48,16 @@ class Settings:
     vpn_image: str = "local/openvpn-agent:24.04"
     vpn_container: str = "sloperator-vpn"
     vpn_proxy_port: int = 18_888
+    anomaly_alert_channel: str = "C06FADPMGKT"
+    anomaly_bot_user_id: str = "U018X57PTFV"
+    anomaly_bot_id: str = "B018Q735LSJ"
+    anomaly_window_hours: float = 24.0
+    anomaly_threshold: float = 0.10
+    anomaly_days_before: int = 1
+    clickhouse_host: str | None = None
+    clickhouse_port: int = 8443
+    clickhouse_username: str | None = None
+    clickhouse_password: str = ""
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -89,6 +99,16 @@ class Settings:
         vpn_container = os.environ.get(
             "SLOPERATOR_VPN_CONTAINER", "sloperator-vpn"
         ).strip()
+        anomaly_alert_channel = os.environ.get(
+            "ANOMALY_ALERT_CHANNEL", "C06FADPMGKT"
+        ).strip()
+        anomaly_bot_user_id = os.environ.get(
+            "ANOMALY_BOT_USER_ID", "U018X57PTFV"
+        ).strip()
+        anomaly_bot_id = os.environ.get("ANOMALY_BOT_ID", "B018Q735LSJ").strip()
+        clickhouse_host = os.environ.get("CLICKHOUSE_HOST", "").strip() or None
+        clickhouse_username = os.environ.get("CLICKHOUSE_USERNAME", "").strip() or None
+        clickhouse_password = os.environ.get("CLICKHOUSE_PASSWORD", "")
 
         try:
             port = int(os.environ.get("SLOPERATOR_PORT", "8080"))
@@ -97,6 +117,10 @@ class Settings:
             agent_timeout_seconds = int(os.environ.get("SLOPERATOR_AGENT_TIMEOUT_SECONDS", "1800"))
             agent_max_concurrency = int(os.environ.get("SLOPERATOR_AGENT_MAX_CONCURRENCY", "2"))
             vpn_proxy_port = int(os.environ.get("SLOPERATOR_VPN_PROXY_PORT", "18888"))
+            anomaly_window_hours = float(os.environ.get("ANOMALY_WINDOW_HOURS", "24"))
+            anomaly_threshold = float(os.environ.get("ANOMALY_THRESHOLD", "0.10"))
+            anomaly_days_before = int(float(os.environ.get("ANOMALY_DAYS_BEFORE", "1")))
+            clickhouse_port = int(os.environ.get("CLICKHOUSE_PORT", "8443"))
         except ValueError as error:
             raise ConfigurationError(
                 "Port, archive limits, and agent limits must be integers"
@@ -130,6 +154,24 @@ class Settings:
             raise ConfigurationError("SLOPERATOR_AGENT_MAX_CONCURRENCY must be between 1 and 8")
         if not 1 <= vpn_proxy_port <= 65_535:
             raise ConfigurationError("SLOPERATOR_VPN_PROXY_PORT must be between 1 and 65535")
+        if not anomaly_alert_channel.startswith("C"):
+            raise ConfigurationError("ANOMALY_ALERT_CHANNEL must be a Slack channel ID")
+        if not anomaly_bot_user_id.startswith("U"):
+            raise ConfigurationError("ANOMALY_BOT_USER_ID must be a Slack user ID")
+        if anomaly_bot_id and not anomaly_bot_id.startswith("B"):
+            raise ConfigurationError("ANOMALY_BOT_ID must be a Slack bot ID")
+        if anomaly_window_hours <= 0:
+            raise ConfigurationError("ANOMALY_WINDOW_HOURS must be positive")
+        if not 0 < anomaly_threshold < 1:
+            raise ConfigurationError("ANOMALY_THRESHOLD must be between 0 and 1")
+        if anomaly_days_before < 1:
+            raise ConfigurationError("ANOMALY_DAYS_BEFORE must be positive")
+        if not 1 <= clickhouse_port <= 65_535:
+            raise ConfigurationError("CLICKHOUSE_PORT must be between 1 and 65535")
+        if bool(clickhouse_host) != bool(clickhouse_username):
+            raise ConfigurationError(
+                "CLICKHOUSE_HOST and CLICKHOUSE_USERNAME must be set together"
+            )
         if bool(ldap_username) != bool(ldap_password):
             raise ConfigurationError("LDAP_USERNAME and LDAP_PASSWORD must be set together")
         if ldap_username and any(character in ldap_username for character in "\r\n"):
@@ -163,4 +205,14 @@ class Settings:
             vpn_image=vpn_image,
             vpn_container=vpn_container,
             vpn_proxy_port=vpn_proxy_port,
+            anomaly_alert_channel=anomaly_alert_channel,
+            anomaly_bot_user_id=anomaly_bot_user_id,
+            anomaly_bot_id=anomaly_bot_id,
+            anomaly_window_hours=anomaly_window_hours,
+            anomaly_threshold=anomaly_threshold,
+            anomaly_days_before=anomaly_days_before,
+            clickhouse_host=clickhouse_host,
+            clickhouse_port=clickhouse_port,
+            clickhouse_username=clickhouse_username,
+            clickhouse_password=clickhouse_password,
         )

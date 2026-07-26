@@ -8,8 +8,8 @@ so it does not need a public HTTP endpoint.
 - Python 3.13
 - A Slack bot token (`xoxb-…`)
 - A Socket Mode app token (`xapp-…`) with `connections:write`
-- Slack event subscription for `message.im`
-- Bot scopes: `chat:write`, `im:history`
+- Slack event subscriptions for `message.im` and `message.channels`
+- Bot scopes: `chat:write`, `im:history`, `channels:history`
 
 ## Local setup
 
@@ -60,6 +60,19 @@ activity from each supported conversation type.
 
 Messages from users other than `SLACK_USER_ID` are ignored.
 Replies are posted into the same Slack thread so they remain visible in the active Chat.
+
+## Analytics anomaly auto-replies
+
+Sloperator reacts immediately when Analytics Bot mentions `SLACK_USER_ID` in
+`#ug-analytics-monitoring`. It reconstructs the bot's split alert batch from recent channel
+history, checks the alerted metrics against the same week-over-week rule used by the former
+GitLab cron job, and replies in the mention message's thread. Messages from other bots and
+mentions in other channels are ignored.
+
+The responder requires `ANOMALY_*` and `CLICKHOUSE_*` settings documented in `.env.example`,
+membership in the monitoring channel, the `message.channels` event subscription, and the
+`channels:history` scope. Slack thread history provides durable deduplication, while an
+in-process guard suppresses concurrent delivery retries.
 
 ## Claude and Codex sessions
 

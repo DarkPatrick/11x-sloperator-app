@@ -46,6 +46,7 @@ async def test_run_once_starts_private_agent_thread() -> None:
     result = await run_once(client, agent, settings)
 
     assert result is SubmitResult.QUEUED
+    client.chat_postMessage.assert_awaited_once_with(channel="D123", text="\u2063")
     agent.submit.assert_awaited_once_with(
         client,
         channel_id="D123",

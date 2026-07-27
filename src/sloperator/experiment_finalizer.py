@@ -78,6 +78,11 @@ Execution for the selected experiment:
 
 Notification (temporary test routing):
 - Do not post to `ug-monetization-pvt` in this test configuration.
+- Do not send any kickoff, progress, validation, QA, waiting, or completion-soon messages through
+  Slack tools. In particular, never post messages such as "starting the daily finalisation" or
+  "Validating: running a QA check". Produce exactly one Slack-facing notification, and only after
+  the calculation, Confluence publication and verification, and Jira comment verification have
+  all completed. Return that notification solely as the final response; do not send it yourself.
 - Return the notification in your final response; Sloperator will deliver it only to the owner's
   Slack DM.
 - Start with the experiment title and id and say that its results were calculated and published.
@@ -133,10 +138,9 @@ async def run_once(
     channel_id = conversation["channel"]["id"]
     kickoff = await client.chat_postMessage(
         channel=channel_id,
-        text=(
-            "Запускаю ежедневную финализацию одного монетизационного эксперимента "
-            "(тестовый режим: результат только в этой личке)."
-        ),
+        # Slack requires a real parent message for a threaded agent session. An
+        # invisible separator keeps that implementation detail out of the DM.
+        text="\u2063",
     )
     message_ts = kickoff["ts"]
     return await agent.submit(

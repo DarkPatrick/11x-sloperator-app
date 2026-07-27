@@ -168,6 +168,37 @@ def test_store_keeps_active_session_alive_on_new_message(tmp_path: Path) -> None
     assert store.get_agent_session("D123", "100.1").status == "idle"
 
 
+def test_store_lists_and_permanently_closes_agent_session(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.upsert_channels(
+        [{"id": "D123", "name": "owner", "is_member": True}],
+        "direct",
+    )
+    store.create_agent_session("D123", "100.1", "claude", "opus")
+    store.upsert_history_messages(
+        "D123",
+        [
+            {"ts": "100.1", "user": "U1", "text": "question"},
+            {"ts": "100.2", "thread_ts": "100.1", "bot_id": "B1", "text": "answer"},
+        ],
+    )
+    store.record_admin_agent_message("D123", "100.1", "follow-up from admin")
+
+    sessions = store.list_agent_sessions()
+
+    assert sessions[0]["channel_name"] == "owner"
+    assert [message["text"] for message in store.thread_messages("D123", "100.1")] == [
+        "question",
+        "answer",
+        "follow-up from admin",
+    ]
+    assert store.close_agent_session("D123", "100.1")
+    assert store.get_agent_session("D123", "100.1").status == "closed"
+    assert store.prepare_agent_request("D123", "100.3", "100.1") == "expired"
+    assert store.get_agent_session("D123", "100.1").status == "closed"
+
+
 def test_subscription_flow_incident_dedup_recovery_and_rearm(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()

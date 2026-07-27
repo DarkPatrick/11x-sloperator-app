@@ -42,6 +42,24 @@ Inspect counts or the channel map locally:
 .venv/bin/sloperator-inspect channels --members-only
 ```
 
+## Local admin UI over SSH
+
+The operational UI is served at `/admin` on the same loopback-only HTTP listener as
+`/healthz`. It is not exposed to the internet and has no public login surface. Open it from
+your workstation through an SSH tunnel:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 egor@SERVER
+```
+
+Then open <http://127.0.0.1:8080/admin> in the workstation browser. SSH authenticates the
+operator; the UI additionally uses a per-process CSRF token for mutations.
+
+The UI shows the current user crontab, cron launch records from the last seven days of the
+system journal, and recent durable agent sessions. An agent turn can be stopped, a session
+can be permanently closed, or a message can be sent into the existing session. Agent replies
+continue to be delivered to the original Slack thread.
+
 The schema includes disabled-by-default trigger rules and an action-run ledger. No
 actions execute until an explicit condition and action are configured.
 

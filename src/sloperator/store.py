@@ -109,6 +109,14 @@ CREATE TABLE IF NOT EXISTS agent_requests (
     PRIMARY KEY (channel_id, message_ts)
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS admin_agent_messages (
+    message_id INTEGER PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS subscription_flow_incidents (
     nature_key TEXT PRIMARY KEY,
     active INTEGER NOT NULL CHECK(active IN (0, 1)),
@@ -193,7 +201,7 @@ class EventStore:
                     """
                 )
             connection.execute(
-                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '3')"
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '4')"
             )
         os.chmod(self.path, 0o600)
 
@@ -397,6 +405,89 @@ class EventStore:
                 (channel_id, thread_ts),
             ).fetchone()
         return AgentSession(*row) if row is not None else None
+
+    def list_agent_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent agent sessions with channel names for the admin UI."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT s.channel_id, COALESCE(c.name, s.channel_id) AS channel_name,
+                       s.thread_ts, s.provider, s.model, s.external_session_id,
+                       s.status, s.turn_count, s.last_error, s.created_at,
+                       s.updated_at, s.last_activity_at
+                FROM agent_sessions AS s
+                LEFT JOIN channels AS c ON c.channel_id = s.channel_id
+                ORDER BY datetime(s.updated_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def thread_messages(
+        self, channel_id: str, thread_ts: str, limit: int = 30
+    ) -> list[dict[str, Any]]:
+        """Return recent persisted messages from one Slack thread."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT message_ts, user_id, bot_id, text, updated_at
+                FROM (
+                    SELECT message_ts, user_id, bot_id, text, updated_at,
+                           CAST(message_ts AS REAL) AS sort_key
+                    FROM messages
+                    WHERE channel_id = ?
+                      AND (message_ts = ? OR thread_ts = ?)
+                      AND deleted = 0
+                    UNION ALL
+                    SELECT 'admin:' || message_id, 'admin', NULL, text, created_at,
+                           CAST(strftime('%s', created_at) AS REAL)
+                    FROM admin_agent_messages
+                    WHERE channel_id = ? AND thread_ts = ?
+                )
+                ORDER BY sort_key DESC
+                LIMIT ?
+                """,
+                (channel_id, thread_ts, thread_ts, channel_id, thread_ts, limit),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def record_admin_agent_message(
+        self, channel_id: str, thread_ts: str, text: str
+    ) -> None:
+        """Persist a message submitted through the local admin UI."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO admin_agent_messages(channel_id, thread_ts, text)
+                VALUES (?, ?, ?)
+                """,
+                (channel_id, thread_ts, text),
+            )
+
+    def close_agent_session(self, channel_id: str, thread_ts: str) -> bool:
+        """Permanently close a session while retaining its audit history."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_sessions
+                SET status = 'closed', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND thread_ts = ?
+                  AND status != 'closed'
+                """,
+                (channel_id, thread_ts),
+            )
+            connection.execute(
+                """
+                UPDATE agent_requests
+                SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND thread_ts = ? AND status = 'queued'
+                """,
+                (channel_id, thread_ts),
+            )
+        return cursor.rowcount == 1
 
     def has_agent_thread(self, channel_id: str, thread_ts: str) -> bool:
         """Return whether a thread has a session or a queued/running agent request."""
@@ -726,21 +817,23 @@ class EventStore:
             ).fetchone()
             if session is not None:
                 status, last_activity_at = session
-                expired = status == "expired" or connection.execute(
+                terminal = status in {"expired", "closed"}
+                expired = terminal or connection.execute(
                     """
                     SELECT datetime(?) <= datetime('now', ?)
                     """,
                     (last_activity_at, f"-{inactivity_hours} hours"),
                 ).fetchone()[0]
                 if expired:
-                    connection.execute(
-                        """
-                        UPDATE agent_sessions
-                        SET status = 'expired', updated_at = CURRENT_TIMESTAMP
-                        WHERE channel_id = ? AND thread_ts = ?
-                        """,
-                        (channel_id, thread_ts),
-                    )
+                    if not terminal:
+                        connection.execute(
+                            """
+                            UPDATE agent_sessions
+                            SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+                            WHERE channel_id = ? AND thread_ts = ?
+                            """,
+                            (channel_id, thread_ts),
+                        )
                     connection.execute(
                         """
                         INSERT INTO agent_requests(

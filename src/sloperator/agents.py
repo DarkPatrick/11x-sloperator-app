@@ -475,6 +475,10 @@ class AgentOrchestrator:
         await asyncio.gather(*tasks, return_exceptions=True)
         return True
 
+    def active_keys(self) -> set[tuple[str, str]]:
+        """Return Slack thread keys with queued or running in-process work."""
+        return {key for key, tasks in self._thread_tasks.items() if tasks}
+
     async def drain(self) -> None:
         """Wait until all currently queued turns finish."""
         while self._tasks:

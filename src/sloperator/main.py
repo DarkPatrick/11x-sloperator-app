@@ -11,6 +11,7 @@ from aiohttp import web
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
+from sloperator.admin import create_admin_routes
 from sloperator.agents import AgentOrchestrator, validate_agent_runtime
 from sloperator.archive import periodically_synchronize_archive, synchronize_archive
 from sloperator.bot import create_app
@@ -42,7 +43,9 @@ async def serve(settings: Settings) -> None:
     orchestrator = AgentOrchestrator(settings, store, vpn)
     app = create_app(settings, store, orchestrator, vpn)
     slack_handler = AsyncSocketModeHandler(app, settings.app_token)
-    runner = web.AppRunner(create_health_app(), access_log=None)
+    http_app = create_health_app()
+    create_admin_routes(http_app, store, orchestrator, app.client)
+    runner = web.AppRunner(http_app, access_log=None)
     stop_event = asyncio.Event()
     archive_task: asyncio.Task[None] | None = None
     vpn_task: asyncio.Task[None] | None = None
@@ -74,7 +77,7 @@ async def serve(settings: Settings) -> None:
                 name="vpn-monitor",
             )
         LOGGER.info(
-            "Sloperator started; health endpoint http://%s:%d/healthz; archive %s",
+            "Sloperator started; health http://%s:%d/healthz; admin /admin; archive %s",
             settings.host,
             settings.port,
             store.path,

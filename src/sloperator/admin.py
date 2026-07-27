@@ -29,6 +29,9 @@ h1{margin:0 0 4px;font-size:28px}h2{margin:30px 0 12px}.sub{color:var(--muted)}
 border-radius:12px;padding:16px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .spread{justify-content:space-between}.badge{padding:3px 8px;border-radius:99px;background:#303744}
 .running{background:#174b35;color:#8cf0be}.failed{background:#552526;color:#ffaaaa}
+.tabs{display:flex;gap:8px;margin:24px 0}.tabs button{font-weight:650;padding:9px 16px}
+.tabs button.active{background:var(--blue);border-color:var(--blue);color:#0c1a2d}
+.panel{display:none}.panel.active{display:block}
 button{border:1px solid var(--line);background:#252b35;color:#fff;border-radius:7px;padding:7px 11px;
 cursor:pointer}button:hover{border-color:var(--blue)}button.danger{color:#ffaaaa}textarea{width:100%;
 min-height:72px;background:#111318;color:#fff;border:1px solid var(--line);border-radius:8px;padding:10px}
@@ -37,12 +40,21 @@ max-height:320px;overflow:auto}.messages{max-height:300px;overflow:auto;margin:1
 solid var(--line);padding:5px 9px;margin:4px 0}.meta{font-size:12px;color:var(--muted)}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
 </style></head><body><main><h1>Sloperator</h1><div class="sub">localhost admin · access via SSH tunnel</div>
-<h2>Agent sessions</h2><div id="sessions" class="grid"></div>
-<h2>Configured cron</h2><div id="cron" class="card"></div>
-<h2>Cron launch history</h2><div id="history" class="card"></div></main>
+<nav class="tabs" aria-label="Admin sections">
+<button id="tab-agents" onclick="setTab('agents')">Агенты</button>
+<button id="tab-cron" onclick="setTab('cron')">Cron</button>
+</nav>
+<section id="panel-agents" class="panel"><h2>Agent sessions</h2>
+<div id="sessions" class="grid"></div></section>
+<section id="panel-cron" class="panel"><h2>Configured cron</h2><div id="cron" class="card"></div>
+<h2>Cron launch history</h2><div id="history" class="card"></div></section></main>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function setTab(tab){if(!["agents","cron"].includes(tab))tab="agents";
+for(const name of ["agents","cron"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
+document.getElementById("tab-"+name).classList.toggle("active",name===tab)}
+if(location.hash!=="#"+tab)history.replaceState(null,"","#"+tab)}
 async function api(path,opts={}){opts.headers={...(opts.headers||{}),"X-Admin-CSRF":csrf};
 const r=await fetch("/admin/api"+path,opts);if(!r.ok)throw new Error(await r.text());return r.json()}
 async function action(path,body){await api(path,{method:"POST",headers:{"Content-Type":"application/json"},
@@ -72,6 +84,7 @@ document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr>
 '<span class="sub">No user crontab</span>';
 document.getElementById("history").innerHTML=`<table><thead><tr><th>Time</th><th>Command</th></tr></thead>
 <tbody>${d.cron_history.map(x=>`<tr><td>${esc(x.time)}</td><td><code>${esc(x.command)}</code></td></tr>`).join("")}</tbody></table>`}
+setTab(location.hash.slice(1));addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
 load();setInterval(load,5000);
 </script></body></html>"""
 

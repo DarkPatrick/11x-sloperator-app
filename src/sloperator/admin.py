@@ -15,6 +15,7 @@ from aiohttp import web
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import AgentOrchestrator, SubmitResult
+from sloperator.config import Settings
 from sloperator.store import EventStore
 
 ADMIN_HTML = """<!doctype html>
@@ -56,8 +57,8 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;bord
 </nav>
 <section id="panel-agents" class="panel"><h2>Agent sessions</h2>
 <div id="sessions" class="grid"></div></section>
-<section id="panel-cron" class="panel"><h2>Configured cron</h2><div id="cron" class="card"></div>
-<h2>Cron launch history</h2><div id="history" class="card"></div></section></main>
+<section id="panel-cron" class="panel"><h2>Scheduled jobs</h2><div id="cron" class="card"></div>
+<h2>Launch history</h2><div id="history" class="card"></div></section></main>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -176,6 +177,91 @@ def _cron_history() -> list[dict[str, str]]:
     return list(reversed(rows))
 
 
+def _systemd_scheduler_job(settings: Settings) -> dict[str, str]:
+    """Describe the experiment scheduler embedded in sloperator.service."""
+    result = subprocess.run(
+        [
+            "systemctl",
+            "show",
+            "sloperator",
+            "--property=ActiveState,MainPID",
+            "--no-pager",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    properties = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    state = properties.get("ActiveState", "unknown")
+    pid = properties.get("MainPID", "unknown")
+    return {
+        "name": "experiment-finalizer (sloperator.service)",
+        "schedule": (
+            f"daily {settings.experiment_finalizer_hour:02d}:00 "
+            f"{settings.experiment_finalizer_timezone}"
+        ),
+        "command": f"embedded asyncio scheduler · {state} · PID {pid}",
+    }
+
+
+def _systemd_scheduler_history() -> list[dict[str, str]]:
+    """Return recent schedule/start/completion events from the service journal."""
+    result = subprocess.run(
+        [
+            "journalctl",
+            "--no-pager",
+            "-o",
+            "json",
+            "-u",
+            "sloperator",
+            "--since",
+            "7 days ago",
+            "-n",
+            "300",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    prefixes = {
+        "Next experiment finalizer run scheduled for ": "scheduled: ",
+        "Starting scheduled experiment finalizer run": "started",
+        "Experiment finalizer run completed": "completed",
+    }
+    rows: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = str(item.get("MESSAGE", ""))
+        event: str | None = None
+        for prefix, label in prefixes.items():
+            if message.endswith(prefix.rstrip()):
+                event = label
+                break
+            if prefix in message:
+                event = f"{label}{message.split(prefix, 1)[1]}"
+                break
+        if event is None:
+            continue
+        micros = int(item.get("__REALTIME_TIMESTAMP", 0))
+        rows.append(
+            {
+                "time": time.strftime(
+                    "%Y-%m-%d %H:%M:%S UTC",
+                    time.gmtime(micros / 1e6),
+                ),
+                "command": f"sloperator.service · experiment-finalizer · {event}",
+            }
+        )
+    return list(reversed(rows))
+
+
 def create_admin_routes(
     app: web.Application,
     store: EventStore,
@@ -215,15 +301,22 @@ def create_admin_routes(
             session["messages"] = await asyncio.to_thread(
                 store.thread_messages, *key
             )
-        crontab, history = await asyncio.gather(
-            asyncio.to_thread(_crontab), asyncio.to_thread(_cron_history)
+        crontab, history, service_job, service_history = await asyncio.gather(
+            asyncio.to_thread(_crontab),
+            asyncio.to_thread(_cron_history),
+            asyncio.to_thread(_systemd_scheduler_job, orchestrator.settings),
+            asyncio.to_thread(_systemd_scheduler_history),
         )
         return web.json_response(
             {
                 "sessions": sessions,
                 "crontab": crontab,
-                "cron_jobs": _cron_jobs(crontab),
-                "cron_history": history,
+                "cron_jobs": [service_job, *_cron_jobs(crontab)],
+                "cron_history": sorted(
+                    [*history, *service_history],
+                    key=lambda row: row["time"],
+                    reverse=True,
+                ),
             }
         )
 

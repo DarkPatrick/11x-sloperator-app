@@ -175,8 +175,9 @@ async def run_daily(
         LOGGER.info("Next experiment finalizer run scheduled for %s", target.isoformat())
         await asyncio.sleep(delay)
         try:
-            result = await run_once(client, agent, settings)
-            LOGGER.info("Experiment finalizer submission result: %s", result)
+            LOGGER.info("Starting scheduled experiment finalizer run")
+            await run_once(client, agent, settings)
+            LOGGER.info("Experiment finalizer run completed")
         except asyncio.CancelledError:
             raise
         except Exception:

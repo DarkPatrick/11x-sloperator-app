@@ -70,6 +70,9 @@ Execution for the selected experiment:
    contains non-empty Results, Insights, Decision, and Next steps, that storage XML is valid, and
    that no unrelated block disappeared. If verification fails, report failure and do not announce
    success.
+   Never put local/server paths or links to logs, SQL, scripts, CSVs, ZIPs, or other run artifacts
+   into the project-page body. Package useful reader-safe analysis artifacts into one bundle and
+   upload it as an attachment to the existing project page instead. Verify the attachment upload.
 5. Resolve the project's Jira epic, then the Results/Итоги task for the matching iteration. Use the
    repository Jira helper and add one short English comment saying the results were calculated and
    published automatically, with the experiment id and project-page link. Re-fetch the issue and
@@ -85,15 +88,21 @@ Notification (temporary test routing):
   all completed. Return that notification solely as the final response; do not send it yourself.
 - Return the notification in your final response; Sloperator will deliver it only to the owner's
   Slack DM.
-- Start with the experiment title and id and say that its results were calculated and published.
+- Do not return `SLOPERATOR_ARTIFACT` and do not attach analysis artifacts to Slack. The analysis
+  bundle belongs only on the project page as described above.
+- Start with exactly one compact heading sentence. Render it on one line in this shape:
+  `[<project/experiment title>](<project page URL>) — experiment
+  [<id>](https://www.ultimate-guitar.com/components/ab/experiment/view?id=<id>),
+  Iteration <n>. Results calculated and published.`
+  Put the project-page link into the title and the UG admin link into the experiment id. Do not
+  print raw URLs.
 - Add at most two extremely short bullets with the most important conclusions.
 - Mention every distinct person listed in the project-page header table under DRI / Project owner
   and Team. Resolve Slack user ids and use real `<@USERID>` mentions; never invent ids. If a person
   cannot be resolved, name them plainly and report the resolution gap.
-- Include the project-page link and the Jira issue key/link. Keep operational detail out of this
-  notification, but append a compact execution audit after it: installed calculator commit,
-  direct-library calculation status and resulting snapshot timestamp, eligibility evidence,
-  maturity result, Confluence verification, and Jira verification.
+- Do not include a separate Project page line, Jira link/key/epic, Execution audit, calculation
+  metadata, verification details, artifact list, file paths, or any other operational appendix.
+  After the heading, mentions, and at most two conclusion bullets, stop.
 
 Use the current date/time in Asia/Nicosia for all relative-date and completion decisions.
 Never finalise more than one experiment in this run.

@@ -29,6 +29,9 @@ def test_prompt_has_selection_pipeline_and_test_routing() -> None:
     assert "DRI / Project owner" in FINALIZATION_PROMPT
     assert "calculate_exp_info(exp_id, config=cfg, update_rollout=True)" in FINALIZATION_PROMPT
     assert "do not use the calculator HTTP API" in FINALIZATION_PROMPT
+    assert "Do not include a separate Project page line" in FINALIZATION_PROMPT
+    assert "Do not return `SLOPERATOR_ARTIFACT`" in FINALIZATION_PROMPT
+    assert "components/ab/experiment/view?id=<id>" in FINALIZATION_PROMPT
 
 
 async def test_run_once_starts_private_agent_thread() -> None:

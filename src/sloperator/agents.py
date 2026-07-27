@@ -469,6 +469,51 @@ class AgentOrchestrator:
         if not task.cancelled() and (error := task.exception()) is not None:
             LOGGER.error("Unhandled agent task failure: %s", type(error).__name__)
 
+    async def execute_once(self, text: str, timeout_seconds: int) -> str:
+        """Run one isolated agent turn without creating a Slack thread."""
+        parsed = parse_agent_request(text, self.settings)
+        session = AgentSession(
+            channel_id="scheduled",
+            thread_ts=str(uuid.uuid4()),
+            provider=parsed.provider,
+            model=parsed.model,
+            external_session_id=str(uuid.uuid4()) if parsed.provider == "claude" else None,
+            status="queued",
+            turn_count=0,
+            last_error=None,
+        )
+        run_settings = replace(self.settings, agent_timeout_seconds=timeout_seconds)
+        control = ActiveAgentRun(session.provider)
+        async with self._semaphore:
+            environment_overrides = (
+                self.vpn.agent_environment()
+                if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
+                else None
+            )
+            if session.provider == "claude":
+                result = await run_claude(
+                    run_settings,
+                    session,
+                    parsed.prompt,
+                    control,
+                    environment_overrides=environment_overrides,
+                )
+            else:
+                result = await run_codex(
+                    run_settings,
+                    session,
+                    parsed.prompt,
+                    control,
+                    self.store,
+                    environment_overrides,
+                )
+        response, artifact = extract_artifact(result.text, self.settings.agent_workspace)
+        if artifact is not None:
+            LOGGER.warning(
+                "Ignoring headless agent artifact marker; scheduled artifacts belong on Confluence"
+            )
+        return response
+
     async def cancel(self, channel_id: str, thread_ts: str) -> bool:
         """Cancel all queued or running turns belonging to one Slack thread."""
         tasks = tuple(self._thread_tasks.get((channel_id, thread_ts), ()))

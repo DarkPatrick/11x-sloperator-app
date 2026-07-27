@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from slack_sdk.web.async_client import AsyncWebClient
 
-from sloperator.agents import SubmitResult
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
@@ -110,18 +109,7 @@ Never finalise more than one experiment in this run.
 
 
 class AgentSubmitter(Protocol):
-    async def submit(
-        self,
-        client: AsyncWebClient,
-        *,
-        channel_id: str,
-        message_ts: str,
-        thread_ts: str,
-        text: str,
-        show_status: bool = True,
-        timeout_seconds: int | None = None,
-        disable_link_previews: bool = False,
-    ) -> SubmitResult: ...
+    async def execute_once(self, text: str, timeout_seconds: int) -> str: ...
 
 
 def next_run_at(
@@ -142,27 +130,21 @@ async def run_once(
     client: AsyncWebClient,
     agent: AgentSubmitter,
     settings: Settings,
-) -> SubmitResult:
-    """Create a private audit thread and enqueue the autonomous agent turn."""
+) -> str:
+    """Run headlessly, then publish exactly one top-level DM notification."""
+    response = await agent.execute_once(
+        FINALIZATION_PROMPT,
+        settings.experiment_finalizer_timeout_seconds,
+    )
     conversation = await client.conversations_open(users=settings.slack_user_id)
     channel_id = conversation["channel"]["id"]
-    kickoff = await client.chat_postMessage(
+    await client.chat_postMessage(
         channel=channel_id,
-        # Slack requires a real parent message for a threaded agent session. An
-        # invisible separator keeps that implementation detail out of the DM.
-        text="\u2063",
+        markdown_text=response,
+        unfurl_links=False,
+        unfurl_media=False,
     )
-    message_ts = kickoff["ts"]
-    return await agent.submit(
-        client,
-        channel_id=channel_id,
-        message_ts=message_ts,
-        thread_ts=message_ts,
-        text=FINALIZATION_PROMPT,
-        show_status=True,
-        timeout_seconds=settings.experiment_finalizer_timeout_seconds,
-        disable_link_previews=True,
-    )
+    return response
 
 
 async def run_daily(

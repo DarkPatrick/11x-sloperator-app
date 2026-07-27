@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
-from sloperator.agents import SubmitResult
 from sloperator.config import Settings
 from sloperator.experiment_finalizer import FINALIZATION_PROMPT, next_run_at, run_once
 
@@ -37,9 +36,9 @@ def test_prompt_has_selection_pipeline_and_test_routing() -> None:
 async def test_run_once_starts_private_agent_thread() -> None:
     client = SimpleNamespace(
         conversations_open=AsyncMock(return_value={"channel": {"id": "D123"}}),
-        chat_postMessage=AsyncMock(return_value={"ts": "100.1"}),
+        chat_postMessage=AsyncMock(),
     )
-    agent = SimpleNamespace(submit=AsyncMock(return_value=SubmitResult.QUEUED))
+    agent = SimpleNamespace(execute_once=AsyncMock(return_value="Final result"))
     settings = Settings(
         slack_user_id="UOWNER",
         bot_token="xoxb-test",
@@ -48,15 +47,11 @@ async def test_run_once_starts_private_agent_thread() -> None:
 
     result = await run_once(client, agent, settings)
 
-    assert result is SubmitResult.QUEUED
-    client.chat_postMessage.assert_awaited_once_with(channel="D123", text="\u2063")
-    agent.submit.assert_awaited_once_with(
-        client,
-        channel_id="D123",
-        message_ts="100.1",
-        thread_ts="100.1",
-        text=FINALIZATION_PROMPT,
-        show_status=True,
-        timeout_seconds=5_400,
-        disable_link_previews=True,
+    assert result == "Final result"
+    agent.execute_once.assert_awaited_once_with(FINALIZATION_PROMPT, 5_400)
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="D123",
+        markdown_text="Final result",
+        unfurl_links=False,
+        unfurl_media=False,
     )

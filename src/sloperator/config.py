@@ -56,6 +56,10 @@ class Settings:
     codex_cli: Path = Path("/usr/bin/codex")
     agent_timeout_seconds: int = 2_700
     agent_max_concurrency: int = 2
+    experiment_finalizer_enabled: bool = True
+    experiment_finalizer_timezone: str = "Asia/Nicosia"
+    experiment_finalizer_hour: int = 12
+    experiment_finalizer_timeout_seconds: int = 5_400
     ldap_username: str | None = None
     ldap_password: str | None = None
     vpn_profile: Path = Path("/home/egor/hz config 2fa.ovpn")
@@ -112,6 +116,12 @@ class Settings:
             os.environ.get("SLOPERATOR_CLAUDE_CLI", "/home/egor/.local/bin/claude")
         ).expanduser()
         codex_cli = Path(os.environ.get("SLOPERATOR_CODEX_CLI", "/usr/bin/codex")).expanduser()
+        experiment_finalizer_enabled = os.environ.get(
+            "EXPERIMENT_FINALIZER_ENABLED", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        experiment_finalizer_timezone = os.environ.get(
+            "EXPERIMENT_FINALIZER_TIMEZONE", "Asia/Nicosia"
+        ).strip()
         ldap_username = os.environ.get("LDAP_USERNAME")
         ldap_password = os.environ.get("LDAP_PASSWORD")
         vpn_profile = Path(
@@ -143,6 +153,12 @@ class Settings:
             sync_interval_seconds = int(os.environ.get("SLOPERATOR_SYNC_INTERVAL_SECONDS", "300"))
             agent_timeout_seconds = int(os.environ.get("SLOPERATOR_AGENT_TIMEOUT_SECONDS", "2700"))
             agent_max_concurrency = int(os.environ.get("SLOPERATOR_AGENT_MAX_CONCURRENCY", "2"))
+            experiment_finalizer_hour = int(
+                os.environ.get("EXPERIMENT_FINALIZER_HOUR", "12")
+            )
+            experiment_finalizer_timeout_seconds = int(
+                os.environ.get("EXPERIMENT_FINALIZER_TIMEOUT_SECONDS", "5400")
+            )
             vpn_proxy_port = int(os.environ.get("SLOPERATOR_VPN_PROXY_PORT", "18888"))
             anomaly_window_hours = float(os.environ.get("ANOMALY_WINDOW_HOURS", "24"))
             anomaly_threshold = float(os.environ.get("ANOMALY_THRESHOLD", "0.10"))
@@ -183,6 +199,20 @@ class Settings:
             )
         if not 1 <= agent_max_concurrency <= 8:
             raise ConfigurationError("SLOPERATOR_AGENT_MAX_CONCURRENCY must be between 1 and 8")
+        if not 0 <= experiment_finalizer_hour <= 23:
+            raise ConfigurationError("EXPERIMENT_FINALIZER_HOUR must be between 0 and 23")
+        if not 300 <= experiment_finalizer_timeout_seconds <= 86_400:
+            raise ConfigurationError(
+                "EXPERIMENT_FINALIZER_TIMEOUT_SECONDS must be between 300 and 86400"
+            )
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(experiment_finalizer_timezone)
+        except (KeyError, ValueError) as error:
+            raise ConfigurationError(
+                "EXPERIMENT_FINALIZER_TIMEZONE must be a valid IANA timezone"
+            ) from error
         if not 1 <= vpn_proxy_port <= 65_535:
             raise ConfigurationError("SLOPERATOR_VPN_PROXY_PORT must be between 1 and 65535")
         if not anomaly_alert_channel.startswith("C"):
@@ -233,6 +263,10 @@ class Settings:
             codex_cli=codex_cli,
             agent_timeout_seconds=agent_timeout_seconds,
             agent_max_concurrency=agent_max_concurrency,
+            experiment_finalizer_enabled=experiment_finalizer_enabled,
+            experiment_finalizer_timezone=experiment_finalizer_timezone,
+            experiment_finalizer_hour=experiment_finalizer_hour,
+            experiment_finalizer_timeout_seconds=experiment_finalizer_timeout_seconds,
             ldap_username=ldap_username,
             ldap_password=ldap_password,
             vpn_profile=vpn_profile,

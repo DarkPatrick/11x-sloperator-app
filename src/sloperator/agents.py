@@ -412,6 +412,7 @@ class AgentOrchestrator:
         thread_ts: str,
         text: str,
         show_status: bool = True,
+        timeout_seconds: int | None = None,
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
         claim = await asyncio.to_thread(
@@ -448,6 +449,7 @@ class AgentOrchestrator:
                 thread_ts=thread_ts,
                 text=text,
                 show_status=show_status,
+                timeout_seconds=timeout_seconds,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
@@ -553,6 +555,7 @@ class AgentOrchestrator:
         thread_ts: str,
         text: str,
         show_status: bool,
+        timeout_seconds: int | None,
     ) -> None:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -622,7 +625,13 @@ class AgentOrchestrator:
                         while True:
                             try:
                                 result = await run_claude(
-                                    self.settings,
+                                    replace(
+                                        self.settings,
+                                        agent_timeout_seconds=(
+                                            timeout_seconds
+                                            or self.settings.agent_timeout_seconds
+                                        ),
+                                    ),
                                     session,
                                     prompt,
                                     control,
@@ -649,7 +658,13 @@ class AgentOrchestrator:
                             force_resume = True
                     else:
                         result = await run_codex(
-                            self.settings,
+                            replace(
+                                self.settings,
+                                agent_timeout_seconds=(
+                                    timeout_seconds
+                                    or self.settings.agent_timeout_seconds
+                                ),
+                            ),
                             session,
                             parsed.prompt,
                             control,

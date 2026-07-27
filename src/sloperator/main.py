@@ -16,6 +16,7 @@ from sloperator.agents import AgentOrchestrator, validate_agent_runtime
 from sloperator.archive import periodically_synchronize_archive, synchronize_archive
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
+from sloperator.experiment_finalizer import cancel_task, run_daily
 from sloperator.health import create_health_app
 from sloperator.store import EventStore
 from sloperator.vpn import VpnError, VpnManager, VpnState
@@ -49,6 +50,7 @@ async def serve(settings: Settings) -> None:
     stop_event = asyncio.Event()
     archive_task: asyncio.Task[None] | None = None
     vpn_task: asyncio.Task[None] | None = None
+    experiment_finalizer_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -76,6 +78,11 @@ async def serve(settings: Settings) -> None:
                 _monitor_vpn(app, settings, vpn),
                 name="vpn-monitor",
             )
+        if settings.experiment_finalizer_enabled:
+            experiment_finalizer_task = asyncio.create_task(
+                run_daily(app.client, orchestrator, settings),
+                name="daily-experiment-finalizer",
+            )
         LOGGER.info(
             "Sloperator started; health http://%s:%d/healthz; admin /admin; archive %s",
             settings.host,
@@ -93,6 +100,7 @@ async def serve(settings: Settings) -> None:
             vpn_task.cancel()
             with suppress(asyncio.CancelledError):
                 await vpn_task
+        await cancel_task(experiment_finalizer_task)
         await orchestrator.close()
         await slack_handler.close_async()  # type: ignore[no-untyped-call]
         await runner.cleanup()

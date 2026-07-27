@@ -60,6 +60,7 @@ class Settings:
     experiment_finalizer_timezone: str = "Asia/Nicosia"
     experiment_finalizer_hour: int = 12
     experiment_finalizer_timeout_seconds: int = 5_400
+    experiment_finalizer_channel: str = "C07A9FDQ14P"
     ldap_username: str | None = None
     ldap_password: str | None = None
     vpn_profile: Path = Path("/home/egor/hz config 2fa.ovpn")
@@ -121,6 +122,9 @@ class Settings:
         ).strip().lower() in {"1", "true", "yes", "on"}
         experiment_finalizer_timezone = os.environ.get(
             "EXPERIMENT_FINALIZER_TIMEZONE", "Asia/Nicosia"
+        ).strip()
+        experiment_finalizer_channel = os.environ.get(
+            "EXPERIMENT_FINALIZER_CHANNEL", "C07A9FDQ14P"
         ).strip()
         ldap_username = os.environ.get("LDAP_USERNAME")
         ldap_password = os.environ.get("LDAP_PASSWORD")
@@ -213,6 +217,8 @@ class Settings:
             raise ConfigurationError(
                 "EXPERIMENT_FINALIZER_TIMEZONE must be a valid IANA timezone"
             ) from error
+        if not experiment_finalizer_channel.startswith("C"):
+            raise ConfigurationError("EXPERIMENT_FINALIZER_CHANNEL must be a Slack channel ID")
         if not 1 <= vpn_proxy_port <= 65_535:
             raise ConfigurationError("SLOPERATOR_VPN_PROXY_PORT must be between 1 and 65535")
         if not anomaly_alert_channel.startswith("C"):
@@ -267,6 +273,7 @@ class Settings:
             experiment_finalizer_timezone=experiment_finalizer_timezone,
             experiment_finalizer_hour=experiment_finalizer_hour,
             experiment_finalizer_timeout_seconds=experiment_finalizer_timeout_seconds,
+            experiment_finalizer_channel=experiment_finalizer_channel,
             ldap_username=ldap_username,
             ldap_password=ldap_password,
             vpn_profile=vpn_profile,

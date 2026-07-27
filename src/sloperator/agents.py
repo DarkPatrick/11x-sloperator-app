@@ -91,6 +91,28 @@ class AgentRunResult:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class HeadlessAgentRun:
+    """One completed turn that can be attached to a Slack message afterwards."""
+
+    provider: str
+    model: str
+    session_id: str
+    text: str
+
+
+NO_REPLY_MARKER = "SLOPERATOR_NO_REPLY"
+OPTIONAL_REPLY_INSTRUCTION = f"""\
+Decide first whether the new thread message is addressed to you or whether you have something
+materially useful to add. You do not need to answer every message in the thread. If it is side
+conversation between people, an acknowledgement that needs no analysis, or you have no useful
+addition, return exactly `{NO_REPLY_MARKER}` and nothing else. Otherwise answer normally and
+concisely in the context of the existing session.
+
+New thread message:
+"""
+
+
 class ActiveAgentRun:
     """Mutable control surface for one running provider turn."""
 
@@ -414,6 +436,7 @@ class AgentOrchestrator:
         show_status: bool = True,
         timeout_seconds: int | None = None,
         disable_link_previews: bool = False,
+        optional_reply: bool = False,
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
         claim = await asyncio.to_thread(
@@ -452,6 +475,7 @@ class AgentOrchestrator:
                 show_status=show_status,
                 timeout_seconds=timeout_seconds,
                 disable_link_previews=disable_link_previews,
+                optional_reply=optional_reply,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
@@ -469,7 +493,7 @@ class AgentOrchestrator:
         if not task.cancelled() and (error := task.exception()) is not None:
             LOGGER.error("Unhandled agent task failure: %s", type(error).__name__)
 
-    async def execute_once(self, text: str, timeout_seconds: int) -> str:
+    async def execute_once(self, text: str, timeout_seconds: int) -> HeadlessAgentRun:
         """Run one isolated agent turn without creating a Slack thread."""
         parsed = parse_agent_request(text, self.settings)
         session = AgentSession(
@@ -512,7 +536,34 @@ class AgentOrchestrator:
             LOGGER.warning(
                 "Ignoring headless agent artifact marker; scheduled artifacts belong on Confluence"
             )
-        return response
+        return HeadlessAgentRun(
+            provider=parsed.provider,
+            model=parsed.model,
+            session_id=result.session_id,
+            text=response,
+        )
+
+    async def attach_session(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        run: HeadlessAgentRun,
+    ) -> None:
+        """Persist a completed headless turn as a resumable Slack thread session."""
+        await asyncio.to_thread(
+            self.store.create_agent_session,
+            channel_id,
+            thread_ts,
+            run.provider,
+            run.model,
+            run.session_id,
+        )
+        await asyncio.to_thread(
+            self.store.finish_agent_turn,
+            channel_id,
+            thread_ts,
+            run.session_id,
+        )
 
     async def cancel(self, channel_id: str, thread_ts: str) -> bool:
         """Cancel all queued or running turns belonging to one Slack thread."""
@@ -614,6 +665,7 @@ class AgentOrchestrator:
         show_status: bool,
         timeout_seconds: int | None,
         disable_link_previews: bool,
+        optional_reply: bool,
     ) -> None:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -626,6 +678,11 @@ class AgentOrchestrator:
                     thread_ts,
                 )
                 parsed = parse_agent_request(text, self.settings)
+                if optional_reply and session is not None:
+                    parsed = replace(
+                        parsed,
+                        prompt=f"{OPTIONAL_REPLY_INSTRUCTION}{parsed.prompt}",
+                    )
                 if session is None:
                     preassigned_id = str(uuid.uuid4()) if parsed.provider == "claude" else None
                     session = await asyncio.to_thread(
@@ -742,13 +799,14 @@ class AgentOrchestrator:
                     thread_ts,
                     result.session_id,
                 )
-                await self._reply(
-                    client,
-                    channel_id,
-                    thread_ts,
-                    result.text,
-                    disable_link_previews,
-                )
+                if result.text.strip() != NO_REPLY_MARKER:
+                    await self._reply(
+                        client,
+                        channel_id,
+                        thread_ts,
+                        result.text,
+                        disable_link_previews,
+                    )
                 request_status = "completed"
         except ValueError as error:
             await self._reply(client, channel_id, thread_ts, str(error))

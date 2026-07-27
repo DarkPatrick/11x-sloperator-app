@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
+from sloperator.agents import HeadlessAgentRun
 from sloperator.config import Settings
 from sloperator.experiment_finalizer import FINALIZATION_PROMPT, next_run_at, run_once
 
@@ -24,7 +25,7 @@ def test_prompt_has_selection_pipeline_and_test_routing() -> None:
     assert "oldest by actual end timestamp" in FINALIZATION_PROMPT
     assert "at least one configured segment" in FINALIZATION_PROMPT
     assert "Results → Insights → Decision / Next steps" in FINALIZATION_PROMPT
-    assert "Do not post to `ug-monetization-pvt`" in FINALIZATION_PROMPT
+    assert "`ug-monetization-pvt`" in FINALIZATION_PROMPT
     assert "DRI / Project owner" in FINALIZATION_PROMPT
     assert "calculate_exp_info(exp_id, config=cfg, update_rollout=True)" in FINALIZATION_PROMPT
     assert "do not use the calculator HTTP API" in FINALIZATION_PROMPT
@@ -33,16 +34,25 @@ def test_prompt_has_selection_pipeline_and_test_routing() -> None:
     assert "components/ab/experiment/view?id=<id>" in FINALIZATION_PROMPT
 
 
-async def test_run_once_starts_private_agent_thread() -> None:
+async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     client = SimpleNamespace(
-        conversations_open=AsyncMock(return_value={"channel": {"id": "D123"}}),
-        chat_postMessage=AsyncMock(),
+        chat_postMessage=AsyncMock(return_value={"ts": "100.1"}),
     )
-    agent = SimpleNamespace(execute_once=AsyncMock(return_value="Final result"))
+    run = HeadlessAgentRun(
+        provider="claude",
+        model="opus",
+        session_id="session-1",
+        text="Final result",
+    )
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(return_value=run),
+        attach_session=AsyncMock(),
+    )
     settings = Settings(
         slack_user_id="UOWNER",
         bot_token="xoxb-test",
         app_token="xapp-test",
+        experiment_finalizer_channel="CFINAL",
     )
 
     result = await run_once(client, agent, settings)
@@ -50,8 +60,9 @@ async def test_run_once_starts_private_agent_thread() -> None:
     assert result == "Final result"
     agent.execute_once.assert_awaited_once_with(FINALIZATION_PROMPT, 5_400)
     client.chat_postMessage.assert_awaited_once_with(
-        channel="D123",
+        channel="CFINAL",
         markdown_text="Final result",
         unfurl_links=False,
         unfurl_media=False,
     )
+    agent.attach_session.assert_awaited_once_with("CFINAL", "100.1", run)

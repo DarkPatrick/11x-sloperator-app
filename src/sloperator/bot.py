@@ -76,7 +76,11 @@ def is_trusted_channel_thread(event: Mapping[str, Any], settings: Settings) -> b
     return (
         event.get("user") in settings.conversation_user_ids
         and event.get("channel")
-        in {settings.anomaly_alert_channel, settings.subscription_flow_alert_channel}
+        in {
+            settings.anomaly_alert_channel,
+            settings.subscription_flow_alert_channel,
+            settings.experiment_finalizer_channel,
+        }
         and isinstance(event.get("thread_ts"), str)
         and isinstance(event.get("text"), str)
         and isinstance(event.get("ts"), str)
@@ -151,6 +155,7 @@ def create_app(
                 thread_ts=active_thread_ts,
                 text=text,
                 show_status=False,
+                optional_reply=True,
             )
             if result is SubmitResult.EXPIRED:
                 LOGGER.debug(

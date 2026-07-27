@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.agents import HeadlessAgentRun
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
@@ -78,15 +79,15 @@ Execution for the selected experiment:
    verify the comment. Do not comment on a guessed epic, a different iteration, or a generic task;
    if the exact task cannot be established, report that as an incomplete step.
 
-Notification (temporary test routing):
-- Do not post to `ug-monetization-pvt` in this test configuration.
+Notification:
+- Return the final notification to Sloperator; it will publish it as one top-level message in
+  `ug-monetization-pvt` and attach this same agent session to the resulting Slack thread.
 - Do not send any kickoff, progress, validation, QA, waiting, or completion-soon messages through
   Slack tools. In particular, never post messages such as "starting the daily finalisation" or
   "Validating: running a QA check". Produce exactly one Slack-facing notification, and only after
   the calculation, Confluence publication and verification, and Jira comment verification have
   all completed. Return that notification solely as the final response; do not send it yourself.
-- Return the notification in your final response; Sloperator will deliver it only to the owner's
-  Slack DM.
+- Return the notification only in your final response; do not send it yourself through Slack tools.
 - Do not return `SLOPERATOR_ARTIFACT` and do not attach analysis artifacts to Slack. The analysis
   bundle belongs only on the project page as described above.
 - Start with exactly one compact heading sentence. Render it on one line in this shape:
@@ -109,7 +110,14 @@ Never finalise more than one experiment in this run.
 
 
 class AgentSubmitter(Protocol):
-    async def execute_once(self, text: str, timeout_seconds: int) -> str: ...
+    async def execute_once(self, text: str, timeout_seconds: int) -> HeadlessAgentRun: ...
+
+    async def attach_session(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        run: HeadlessAgentRun,
+    ) -> None: ...
 
 
 def next_run_at(
@@ -131,20 +139,23 @@ async def run_once(
     agent: AgentSubmitter,
     settings: Settings,
 ) -> str:
-    """Run headlessly, then publish exactly one top-level DM notification."""
-    response = await agent.execute_once(
+    """Run headlessly, publish once, and attach the resumable session."""
+    run = await agent.execute_once(
         FINALIZATION_PROMPT,
         settings.experiment_finalizer_timeout_seconds,
     )
-    conversation = await client.conversations_open(users=settings.slack_user_id)
-    channel_id = conversation["channel"]["id"]
-    await client.chat_postMessage(
-        channel=channel_id,
-        markdown_text=response,
+    response = await client.chat_postMessage(
+        channel=settings.experiment_finalizer_channel,
+        markdown_text=run.text,
         unfurl_links=False,
         unfurl_media=False,
     )
-    return response
+    await agent.attach_session(
+        settings.experiment_finalizer_channel,
+        response["ts"],
+        run,
+    )
+    return run.text
 
 
 async def run_daily(

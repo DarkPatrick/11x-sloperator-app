@@ -22,6 +22,7 @@ def test_settings_load_valid_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.experiment_finalizer_timezone == "Asia/Nicosia"
     assert settings.experiment_finalizer_hour == 12
     assert settings.experiment_finalizer_timeout_seconds == 5_400
+    assert settings.experiment_finalizer_channel == "C07A9FDQ14P"
 
 
 def test_settings_parse_bracketed_allowed_conversation_users(

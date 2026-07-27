@@ -144,3 +144,5 @@ def test_monetisation_agent_prompt_requires_time_series_skill() -> None:
     assert "`time-series-research`" in prompt
     assert "/home/egor/projects/ug-ai-analyst" in prompt
     assert "Landing Purchase" in prompt
+    assert "at most one visual-review pass" in prompt
+    assert "Prioritise a correct, timely Slack" in prompt

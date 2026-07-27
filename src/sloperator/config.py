@@ -54,7 +54,7 @@ class Settings:
     codex_model: str = "gpt-5.6-sol"
     claude_cli: Path = Path("/home/egor/.local/bin/claude")
     codex_cli: Path = Path("/usr/bin/codex")
-    agent_timeout_seconds: int = 1_800
+    agent_timeout_seconds: int = 2_700
     agent_max_concurrency: int = 2
     ldap_username: str | None = None
     ldap_password: str | None = None
@@ -141,7 +141,7 @@ class Settings:
             port = int(os.environ.get("SLOPERATOR_PORT", "8080"))
             backfill_limit = int(os.environ.get("SLOPERATOR_BACKFILL_LIMIT", "100"))
             sync_interval_seconds = int(os.environ.get("SLOPERATOR_SYNC_INTERVAL_SECONDS", "300"))
-            agent_timeout_seconds = int(os.environ.get("SLOPERATOR_AGENT_TIMEOUT_SECONDS", "1800"))
+            agent_timeout_seconds = int(os.environ.get("SLOPERATOR_AGENT_TIMEOUT_SECONDS", "2700"))
             agent_max_concurrency = int(os.environ.get("SLOPERATOR_AGENT_MAX_CONCURRENCY", "2"))
             vpn_proxy_port = int(os.environ.get("SLOPERATOR_VPN_PROXY_PORT", "18888"))
             anomaly_window_hours = float(os.environ.get("ANOMALY_WINDOW_HOURS", "24"))

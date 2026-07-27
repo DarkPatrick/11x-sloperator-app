@@ -21,25 +21,34 @@ ADMIN_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Sloperator admin</title>
 <style>
-:root{color-scheme:dark;--bg:#111318;--card:#1b1f27;--muted:#9aa4b2;--line:#303744;
---green:#47d18c;--red:#ff6b6b;--blue:#6ea8fe}*{box-sizing:border-box}body{margin:0;background:var(--bg);
-color:#eef2f7;font:14px/1.45 system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:28px}
+:root{color-scheme:dark;--bg:#111318;--card:#1b1f27;--surface:#12151b;--text:#eef2f7;
+--muted:#9aa4b2;--line:#303744;--button:#252b35;--green:#47d18c;--red:#ff6b6b;
+--blue:#6ea8fe}html[data-theme="light"]{color-scheme:light;--bg:#f5f7fa;--card:#fff;
+--surface:#f0f3f7;--text:#17202b;--muted:#667085;--line:#d9dee7;--button:#eef1f5;
+--green:#08783f;--red:#b42318;--blue:#3976d3}*{box-sizing:border-box}body{margin:0;
+background:var(--bg);color:var(--text);font:14px/1.45 system-ui,sans-serif}
+main{max-width:1180px;margin:auto;padding:28px}
 h1{margin:0 0 4px;font-size:28px}h2{margin:30px 0 12px}.sub{color:var(--muted)}
 .grid{display:grid;gap:12px}.card{background:var(--card);border:1px solid var(--line);
 border-radius:12px;padding:16px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .spread{justify-content:space-between}.badge{padding:3px 8px;border-radius:99px;background:#303744}
 .running{background:#174b35;color:#8cf0be}.failed{background:#552526;color:#ffaaaa}
+html[data-theme="light"] .running{background:#d7f4e5;color:#08783f}
+html[data-theme="light"] .failed{background:#fee4e2;color:#b42318}
 .tabs{display:flex;gap:8px;margin:24px 0}.tabs button{font-weight:650;padding:9px 16px}
 .tabs button.active{background:var(--blue);border-color:var(--blue);color:#0c1a2d}
 .panel{display:none}.panel.active{display:block}
-button{border:1px solid var(--line);background:#252b35;color:#fff;border-radius:7px;padding:7px 11px;
-cursor:pointer}button:hover{border-color:var(--blue)}button.danger{color:#ffaaaa}textarea{width:100%;
-min-height:72px;background:#111318;color:#fff;border:1px solid var(--line);border-radius:8px;padding:10px}
-pre{white-space:pre-wrap;word-break:break-word;background:#12151b;padding:10px;border-radius:8px;
+button{border:1px solid var(--line);background:var(--button);color:var(--text);border-radius:7px;
+padding:7px 11px;cursor:pointer}button:hover{border-color:var(--blue)}button.danger{color:var(--red)}
+textarea{width:100%;min-height:72px;background:var(--surface);color:var(--text);border:1px solid var(--line);
+border-radius:8px;padding:10px}pre{white-space:pre-wrap;word-break:break-word;background:var(--surface);
+padding:10px;border-radius:8px;
 max-height:320px;overflow:auto}.messages{max-height:300px;overflow:auto;margin:10px 0}.msg{border-left:2px
 solid var(--line);padding:5px 9px;margin:4px 0}.meta{font-size:12px;color:var(--muted)}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
-</style></head><body><main><h1>Sloperator</h1><div class="sub">localhost admin · access via SSH tunnel</div>
+</style></head><body><main><div class="row spread"><div><h1>Sloperator</h1>
+<div class="sub">localhost admin · access via SSH tunnel</div></div>
+<button id="theme-toggle" onclick="toggleTheme()" aria-label="Переключить тему"></button></div>
 <nav class="tabs" aria-label="Admin sections">
 <button id="tab-agents" onclick="setTab('agents')">Агенты</button>
 <button id="tab-cron" onclick="setTab('cron')">Cron</button>
@@ -51,6 +60,12 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;bord
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function preferredTheme(){const saved=localStorage.getItem("sloperator-theme");
+return saved|| (matchMedia("(prefers-color-scheme: light)").matches?"light":"dark")}
+function applyTheme(theme){document.documentElement.dataset.theme=theme;
+document.getElementById("theme-toggle").textContent=theme==="light"?"Тёмная тема":"Светлая тема"}
+function toggleTheme(){const next=document.documentElement.dataset.theme==="light"?"dark":"light";
+localStorage.setItem("sloperator-theme",next);applyTheme(next)}
 function setTab(tab){if(!["agents","cron"].includes(tab))tab="agents";
 for(const name of ["agents","cron"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
 document.getElementById("tab-"+name).classList.toggle("active",name===tab)}
@@ -84,7 +99,8 @@ document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr>
 '<span class="sub">No user crontab</span>';
 document.getElementById("history").innerHTML=`<table><thead><tr><th>Time</th><th>Command</th></tr></thead>
 <tbody>${d.cron_history.map(x=>`<tr><td>${esc(x.time)}</td><td><code>${esc(x.command)}</code></td></tr>`).join("")}</tbody></table>`}
-setTab(location.hash.slice(1));addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
+applyTheme(preferredTheme());setTab(location.hash.slice(1));
+addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
 load();setInterval(load,5000);
 </script></body></html>"""
 

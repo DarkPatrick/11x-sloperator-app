@@ -43,11 +43,18 @@ Selection rules:
 Execution for the selected experiment:
 1. State the selected title, id, end timestamp, clients, segments, target project page, iteration,
    configured table prefix, and affected package-managed tables.
-2. Use the `ug-experiment-calculator` skill. Enqueue a fresh calculation through the calculator
-   HTTP API (`POST /calculate?exp_id=<id>`), retain the request_id, and poll `/status` every
-   30 seconds until a terminal state. Continue only after `succeeded`. Do not silently use stale
-   results. If the API fails or times out, stop without publishing partial итогов; do not use the
-   direct-library mutation fallback in this unattended job.
+2. Use the `ug-experiment-calculator` skill and the installed repository `.venv` library directly;
+   do not use the calculator HTTP API in this job. First run the repository freshness preflight and
+   perform the skill's mandatory installed-commit versus git `main` check. If the installed
+   `ug-experiment-calculator` is stale, update it through the repository's supported
+   internal-library update flow before calculating. Then run the synchronous in-process
+   `calculate_exp_info(exp_id, config=cfg, update_rollout=True)` with the standard
+   `ExperimentCalculatorConfig.from_env()` configuration and the
+   `ug_monetization_sloperator_` table prefix. This direct calculation is explicitly authorised for
+   this scheduled job, including its documented writes and subscription-source refresh. Wait for
+   the call to finish and verify fresh successful rows in every expected result/stat/funnel and raw
+   users table before continuing. Do not silently use stale results. If the direct calculation
+   fails or times out, stop without publishing partial итогов and report the exact failure.
 3. Run the complete Results → Insights → Decision / Next steps pipeline in this exact order:
    a. Generate the full publishable Results/Итоги block through `ug-experiment-calculator`,
       including its required finished-experiment Forecast/audience workflow and maturity checks.
@@ -79,8 +86,9 @@ Notification (temporary test routing):
   and Team. Resolve Slack user ids and use real `<@USERID>` mentions; never invent ids. If a person
   cannot be resolved, name them plainly and report the resolution gap.
 - Include the project-page link and the Jira issue key/link. Keep operational detail out of this
-  notification, but append a compact execution audit after it: calculator request_id/status,
-  eligibility evidence, maturity result, Confluence verification, and Jira verification.
+  notification, but append a compact execution audit after it: installed calculator commit,
+  direct-library calculation status and resulting snapshot timestamp, eligibility evidence,
+  maturity result, Confluence verification, and Jira verification.
 
 Use the current date/time in Asia/Nicosia for all relative-date and completion decisions.
 Never finalise more than one experiment in this run.

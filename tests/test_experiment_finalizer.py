@@ -27,6 +27,8 @@ def test_prompt_has_selection_pipeline_and_test_routing() -> None:
     assert "Results → Insights → Decision / Next steps" in FINALIZATION_PROMPT
     assert "Do not post to `ug-monetization-pvt`" in FINALIZATION_PROMPT
     assert "DRI / Project owner" in FINALIZATION_PROMPT
+    assert "calculate_exp_info(exp_id, config=cfg, update_rollout=True)" in FINALIZATION_PROMPT
+    assert "do not use the calculator HTTP API" in FINALIZATION_PROMPT
 
 
 async def test_run_once_starts_private_agent_thread() -> None:

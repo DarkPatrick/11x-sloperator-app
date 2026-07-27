@@ -58,4 +58,5 @@ async def test_run_once_starts_private_agent_thread() -> None:
         text=FINALIZATION_PROMPT,
         show_status=True,
         timeout_seconds=5_400,
+        disable_link_previews=True,
     )

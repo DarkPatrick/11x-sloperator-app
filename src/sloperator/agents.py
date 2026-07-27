@@ -413,6 +413,7 @@ class AgentOrchestrator:
         text: str,
         show_status: bool = True,
         timeout_seconds: int | None = None,
+        disable_link_previews: bool = False,
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
         claim = await asyncio.to_thread(
@@ -450,6 +451,7 @@ class AgentOrchestrator:
                 text=text,
                 show_status=show_status,
                 timeout_seconds=timeout_seconds,
+                disable_link_previews=disable_link_previews,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
@@ -515,17 +517,27 @@ class AgentOrchestrator:
         channel_id: str,
         thread_ts: str,
         text: str,
+        disable_link_previews: bool = False,
     ) -> None:
         response, artifact = extract_artifact(text, self.settings.agent_workspace)
         for chunk in split_slack_message(response):
-            await client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                # Agent CLIs return standard Markdown. Slack's legacy `text`
-                # parameter expects its incompatible `mrkdwn` dialect, while
-                # `markdown_text` lets Slack translate LLM output correctly.
-                markdown_text=chunk,
-            )
+            # Agent CLIs return standard Markdown. Slack's legacy `text`
+            # parameter expects its incompatible `mrkdwn` dialect, while
+            # `markdown_text` lets Slack translate LLM output correctly.
+            if disable_link_previews:
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    markdown_text=chunk,
+                    unfurl_links=False,
+                    unfurl_media=False,
+                )
+            else:
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    markdown_text=chunk,
+                )
         if artifact is not None:
             await client.files_upload_v2(
                 channel=channel_id,
@@ -556,6 +568,7 @@ class AgentOrchestrator:
         text: str,
         show_status: bool,
         timeout_seconds: int | None,
+        disable_link_previews: bool,
     ) -> None:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -684,7 +697,13 @@ class AgentOrchestrator:
                     thread_ts,
                     result.session_id,
                 )
-                await self._reply(client, channel_id, thread_ts, result.text)
+                await self._reply(
+                    client,
+                    channel_id,
+                    thread_ts,
+                    result.text,
+                    disable_link_previews,
+                )
                 request_status = "completed"
         except ValueError as error:
             await self._reply(client, channel_id, thread_ts, str(error))

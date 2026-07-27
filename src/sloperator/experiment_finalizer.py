@@ -120,6 +120,7 @@ class AgentSubmitter(Protocol):
         text: str,
         show_status: bool = True,
         timeout_seconds: int | None = None,
+        disable_link_previews: bool = False,
     ) -> SubmitResult: ...
 
 
@@ -160,6 +161,7 @@ async def run_once(
         text=FINALIZATION_PROMPT,
         show_status=True,
         timeout_seconds=settings.experiment_finalizer_timeout_seconds,
+        disable_link_previews=True,
     )
 
 

@@ -79,6 +79,29 @@ async def test_agent_replies_use_standard_markdown_parameter(settings: Settings)
     )
 
 
+async def test_agent_reply_can_disable_link_previews(settings: Settings) -> None:
+    post_message = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message)
+    orchestrator = object.__new__(AgentOrchestrator)
+    orchestrator.settings = settings
+
+    await orchestrator._reply(
+        client,
+        channel_id="D123",
+        thread_ts="100.1",
+        text="[Project](https://example.com)",
+        disable_link_previews=True,
+    )
+
+    post_message.assert_awaited_once_with(
+        channel="D123",
+        thread_ts="100.1",
+        markdown_text="[Project](https://example.com)",
+        unfurl_links=False,
+        unfurl_media=False,
+    )
+
+
 def test_extract_artifact_removes_and_validates_marker(tmp_path) -> None:
     artifact = tmp_path / "output" / "analysis.zip"
     artifact.parent.mkdir()

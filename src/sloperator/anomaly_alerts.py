@@ -605,9 +605,16 @@ and concrete recommended next action. If evidence points to a transient deviatio
 plainly instead of forcing a root cause. Do not merely repeat the auto-reply calculation.
 
 This is a routine automated Analytics Bot investigation. Prioritise a correct, timely Slack
-answer over presentation polish. Reuse existing report templates when available, keep charts
-to the minimum needed to support the conclusion, and perform at most one visual-review pass.
-Do not delegate visual review to a subagent unless the evidence cannot be understood without
-custom visualisation. Reserve enough time to package artifacts and return the final response
-before the agent deadline.
+answer while keeping the usual useful charts and visual-review workflow. Perfect visual polish
+is not required: fix critical issues that could mislead the reader or obscure the evidence,
+but if further review rounds are only producing non-critical cosmetic changes and consuming
+substantial time, publish the current sound version instead of continuing to polish it.
+Reserve enough time to package artifacts and return the final response before the deadline.
+
+Before investigating, read `.claude/reusable_analyses/README.md` and any linked cases that
+look similar. Reuse relevant metric definitions, diagnostic cuts, queries, report structure,
+and prior findings where they still apply, while validating the current incident independently.
+After completing the investigation, add a short dated entry to that index and save a concise
+Markdown case summary under `.claude/reusable_analyses/YYYYMMDD_short-purpose/`, including
+the anomaly, conclusion, reusable lessons, and links to the Slack thread and report artifacts.
 """

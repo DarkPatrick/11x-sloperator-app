@@ -78,7 +78,7 @@ body:JSON.stringify(body||{})});await load()}
 function sessionCard(s){const k=encodeURIComponent(s.channel_id)+"/"+encodeURIComponent(s.thread_ts);
 const msgs=(s.messages||[]).map(m=>`<div class="msg"><div class="meta">${esc(m.message_ts)} ·
 ${esc(m.user_id||m.bot_id||"unknown")}</div>${esc(m.text)}</div>`).join("");
-return `<section class="card"><div class="row spread"><div><b>${esc(s.channel_name)}</b>
+return `<section class="card" data-session="${esc(k)}"><div class="row spread"><div><b>${esc(s.channel_name)}</b>
 <span class="meta">${esc(s.channel_id)} / ${esc(s.thread_ts)}</span></div><span class="badge
 ${esc(s.runtime_status)}">${esc(s.runtime_status)}</span></div><div class="meta">${esc(s.provider)}:
 ${esc(s.model)} · turns ${s.turn_count} · updated ${esc(s.updated_at)}</div>
@@ -91,8 +91,18 @@ ${s.last_error?`<pre>${esc(s.last_error)}</pre>`:""}<details><summary>Thread mes
 async function send(k,id){const el=document.getElementById(id);if(!el.value.trim())return;
 await action("/sessions/"+k+"/message",{text:el.value.trim()})}
 async function closeSession(k){if(confirm("Permanently close this session?"))await action("/sessions/"+k+"/close")}
-async function load(){const d=await api("/state");document.getElementById("sessions").innerHTML=
-d.sessions.map(sessionCard).join("")||'<div class="card sub">No sessions</div>';
+let sessionsSignature="";
+function renderSessions(sessions){const root=document.getElementById("sessions");const previous=new Map();
+for(const card of root.querySelectorAll("[data-session]")){const details=card.querySelector("details");
+const messages=card.querySelector(".messages");const draft=card.querySelector("textarea");
+previous.set(card.dataset.session,{open:details?.open,scroll:messages?.scrollTop||0,draft:draft?.value||""})}
+root.innerHTML=sessions.map(sessionCard).join("")||'<div class="card sub">No sessions</div>';
+for(const card of root.querySelectorAll("[data-session]")){const state=previous.get(card.dataset.session);
+if(!state)continue;const details=card.querySelector("details");const messages=card.querySelector(".messages");
+const draft=card.querySelector("textarea");if(details)details.open=state.open;if(messages)messages.scrollTop=state.scroll;
+if(draft)draft.value=state.draft}}
+async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
+if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
 document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr><th>Job</th>
 <th>Schedule</th><th>Command</th></tr></thead><tbody>${d.cron_jobs.map(x=>`<tr><td>${esc(x.name)}
 </td><td><code>${esc(x.schedule)}</code></td><td><code>${esc(x.command)}</code></td></tr>`).join("")}

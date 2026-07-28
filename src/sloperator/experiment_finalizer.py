@@ -80,8 +80,8 @@ Execution for the selected experiment:
    if the exact task cannot be established, report that as an incomplete step.
 
 Notification:
-- Return the final notification to Sloperator; it will publish it as one top-level message in
-  `ug-monetization-pvt` and attach this same agent session to the resulting Slack thread.
+- Return the final notification to Sloperator; it will publish it as one top-level direct message
+  to the operator and attach this same agent session to the resulting Slack thread.
 - Do not send any kickoff, progress, validation, QA, waiting, or completion-soon messages through
   Slack tools. In particular, never post messages such as "starting the daily finalisation" or
   "Validating: running a QA check". Produce exactly one Slack-facing notification, and only after
@@ -147,13 +147,14 @@ async def run_once(
         settings.experiment_finalizer_timeout_seconds,
     )
     response = await client.chat_postMessage(
-        channel=settings.experiment_finalizer_channel,
+        channel=settings.slack_user_id,
         markdown_text=run.text,
         unfurl_links=False,
         unfurl_media=False,
     )
+    channel_id = response.get("channel", settings.slack_user_id)
     await agent.attach_session(
-        settings.experiment_finalizer_channel,
+        channel_id,
         response["ts"],
         run,
     )
@@ -176,12 +177,23 @@ async def run_daily(
         delay = (target.astimezone(dt.UTC) - now).total_seconds()
         LOGGER.info("Next experiment finalizer run scheduled for %s", target.isoformat())
         await asyncio.sleep(delay)
+        run_task: asyncio.Task[str] | None = None
         try:
             LOGGER.info("Starting scheduled experiment finalizer run")
-            await run_once(client, agent, settings)
+            run_task = asyncio.create_task(
+                run_once(client, agent, settings),
+                name="scheduled-experiment-finalizer-run",
+            )
+            await run_task
             LOGGER.info("Experiment finalizer run completed")
         except asyncio.CancelledError:
-            raise
+            if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+                if run_task is not None:
+                    run_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await run_task
+                raise
+            LOGGER.info("Scheduled experiment finalizer run cancelled from admin")
         except Exception:
             LOGGER.exception("Could not start the daily experiment finalizer")
 

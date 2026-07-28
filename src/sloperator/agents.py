@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import signal
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
@@ -124,6 +125,7 @@ class HeadlessAgentRun:
     model: str
     session_id: str
     text: str
+    run_id: str | None = None
 
 
 NO_REPLY_MARKER = "SLOPERATOR_NO_REPLY"
@@ -449,6 +451,35 @@ class AgentOrchestrator:
         self._tasks: set[asyncio.Task[None]] = set()
         self._thread_tasks: dict[tuple[str, str], set[asyncio.Task[None]]] = {}
         self._active_runs: dict[tuple[str, str], ActiveAgentRun] = {}
+        self._headless_tasks: dict[tuple[str, str], asyncio.Task[object]] = {}
+        self._headless_sessions: dict[tuple[str, str], dict[str, object]] = {}
+
+    def headless_sessions(self) -> list[dict[str, object]]:
+        """Return cron/headless runs for display and control in the admin UI."""
+        rows: list[dict[str, object]] = []
+        for key, session in self._headless_sessions.items():
+            active = key in self._headless_tasks
+            control = self._active_runs.get(key)
+            process_id = (
+                control.process.pid if control is not None and control.process is not None else None
+            )
+            rows.append(
+                {
+                    **session,
+                    "active": active,
+                    "runtime_status": "running" if active else session["status"],
+                    "process_id": process_id,
+                    "messages": [],
+                }
+            )
+        return sorted(rows, key=lambda row: str(row["updated_at"]), reverse=True)
+
+    def dismiss_headless(self, channel_id: str, thread_ts: str) -> bool:
+        """Remove a completed headless run from the in-memory admin history."""
+        key = (channel_id, thread_ts)
+        if key in self._headless_tasks:
+            return False
+        return self._headless_sessions.pop(key, None) is not None
 
     async def _run_with_retries[AgentResult](
         self,
@@ -533,9 +564,10 @@ class AgentOrchestrator:
     async def execute_once(self, text: str, timeout_seconds: int) -> HeadlessAgentRun:
         """Run one isolated agent turn without creating a Slack thread."""
         parsed = parse_agent_request(text, self.settings)
+        run_id = str(uuid.uuid4())
         session = AgentSession(
             channel_id="scheduled",
-            thread_ts=str(uuid.uuid4()),
+            thread_ts=run_id,
             provider=parsed.provider,
             model=parsed.model,
             external_session_id=str(uuid.uuid4()) if parsed.provider == "claude" else None,
@@ -545,13 +577,37 @@ class AgentOrchestrator:
         )
         run_settings = replace(self.settings, agent_timeout_seconds=timeout_seconds)
         control = ActiveAgentRun(session.provider)
+        key = (session.channel_id, session.thread_ts)
+        now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        self._headless_sessions[key] = {
+            "channel_id": session.channel_id,
+            "channel_name": "Scheduled experiment finalizer",
+            "thread_ts": session.thread_ts,
+            "provider": session.provider,
+            "model": session.model,
+            "external_session_id": session.external_session_id,
+            "status": "running",
+            "turn_count": 0,
+            "last_error": None,
+            "created_at": now,
+            "updated_at": now,
+            "last_activity_at": now,
+            "headless": True,
+        }
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._headless_tasks[key] = current_task
+        self._active_runs[key] = control
 
         async def execute_provider() -> AgentRunResult:
-            environment_overrides = (
-                self.vpn.agent_environment()
-                if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
-                else None
-            )
+            environment_overrides = {
+                **(
+                    self.vpn.agent_environment()
+                    if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
+                    else {}
+                ),
+                "UG_SKIP_PREFLIGHT": "1",
+            }
             if session.provider == "claude":
                 result = await run_claude(
                     run_settings,
@@ -571,9 +627,31 @@ class AgentOrchestrator:
                 )
             return result
 
-        result = await self._run_with_retries(
-            execute_provider,
-            context="scheduled agent turn",
+        try:
+            result = await self._run_with_retries(
+                execute_provider,
+                context="scheduled agent turn",
+            )
+        except asyncio.CancelledError:
+            self._headless_sessions[key].update(status="cancelled", last_error=None)
+            raise
+        except Exception as error:
+            self._headless_sessions[key].update(
+                status="failed",
+                last_error=repr(error),
+            )
+            raise
+        finally:
+            self._active_runs.pop(key, None)
+            self._headless_tasks.pop(key, None)
+            self._headless_sessions[key]["updated_at"] = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.gmtime(),
+            )
+        self._headless_sessions[key].update(
+            status="completed",
+            turn_count=1,
+            external_session_id=result.session_id,
         )
         response, artifact = extract_artifact(result.text, self.settings.agent_workspace)
         if artifact is not None:
@@ -585,6 +663,7 @@ class AgentOrchestrator:
             model=parsed.model,
             session_id=result.session_id,
             text=response,
+            run_id=run_id,
         )
 
     async def attach_session(
@@ -608,10 +687,15 @@ class AgentOrchestrator:
             thread_ts,
             run.session_id,
         )
+        if run.run_id is not None:
+            self._headless_sessions.pop(("scheduled", run.run_id), None)
 
     async def cancel(self, channel_id: str, thread_ts: str) -> bool:
         """Cancel all queued or running turns belonging to one Slack thread."""
-        tasks = tuple(self._thread_tasks.get((channel_id, thread_ts), ()))
+        key = (channel_id, thread_ts)
+        tasks = tuple(self._thread_tasks.get(key, ()))
+        if headless_task := self._headless_tasks.get(key):
+            tasks = (*tasks, headless_task)
         if not tasks:
             return False
         for task in tasks:
@@ -621,7 +705,9 @@ class AgentOrchestrator:
 
     def active_keys(self) -> set[tuple[str, str]]:
         """Return Slack thread keys with queued or running in-process work."""
-        return {key for key, tasks in self._thread_tasks.items() if tasks}
+        return {
+            key for key, tasks in self._thread_tasks.items() if tasks
+        } | self._headless_tasks.keys()
 
     async def drain(self) -> None:
         """Wait until all currently queued turns finish."""

@@ -9,6 +9,7 @@ from sloperator.agents import (
     AGENT_RETRY_DELAYS,
     AgentExecutionError,
     AgentOrchestrator,
+    AgentRunResult,
     extract_artifact,
     parse_agent_request,
     retry_agent_service_errors,
@@ -97,6 +98,27 @@ async def test_agent_service_error_is_raised_only_after_all_retries(
 
     assert operation.await_count == 3
     assert [call.args[0] for call in sleep.await_args_list] == [15, 30]
+
+
+async def test_headless_run_is_visible_and_disables_interactive_hooks(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_claude = AsyncMock(return_value=AgentRunResult(session_id="session-1", text="Final result"))
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    orchestrator = AgentOrchestrator(settings, SimpleNamespace())
+
+    result = await orchestrator.execute_once("Automated work", 5_400)
+
+    assert result.text == "Final result"
+    assert result.run_id is not None
+    assert run_claude.await_args.kwargs["environment_overrides"] == {"UG_SKIP_PREFLIGHT": "1"}
+    sessions = orchestrator.headless_sessions()
+    assert len(sessions) == 1
+    assert sessions[0]["headless"] is True
+    assert sessions[0]["status"] == "completed"
+    assert sessions[0]["active"] is False
+    assert orchestrator.dismiss_headless("scheduled", result.run_id)
 
 
 def test_split_slack_message_preserves_all_text() -> None:

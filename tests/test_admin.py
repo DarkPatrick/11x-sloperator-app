@@ -81,9 +81,14 @@ def test_cron_history_is_labelled_for_calendar() -> None:
 
 
 def test_admin_contains_seven_day_cron_calendar() -> None:
-    assert 'Array.from({length:7}' in ADMIN_HTML
+    assert "Array.from({length:7}" in ADMIN_HTML
     assert 'class="cron-calendar"' in ADMIN_HTML
     assert "renderCronHistory(d.cron_jobs,d.cron_history)" in ADMIN_HTML
+
+
+def test_admin_supports_headless_agent_runs() -> None:
+    assert "s.headless" in ADMIN_HTML
+    assert "PID ${esc(s.process_id)} + subprocess tree" in ADMIN_HTML
 
 
 def test_systemd_scheduler_job_includes_schedule_and_runtime_state() -> None:
@@ -115,8 +120,7 @@ def test_systemd_scheduler_history_extracts_scheduler_events() -> None:
     started = {
         "__REALTIME_TIMESTAMP": "2000000",
         "MESSAGE": (
-            "2026 INFO sloperator.experiment_finalizer: "
-            "Starting scheduled experiment finalizer run"
+            "2026 INFO sloperator.experiment_finalizer: Starting scheduled experiment finalizer run"
         ),
     }
     with patch("sloperator.admin.subprocess.run") as run:
@@ -126,12 +130,7 @@ def test_systemd_scheduler_history_extracts_scheduler_events() -> None:
 
     assert [row["command"] for row in rows] == [
         "sloperator.service · experiment-finalizer · started",
-        (
-            "sloperator.service · experiment-finalizer · scheduled: "
-            "2026-07-28T12:00:00+03:00"
-        ),
+        ("sloperator.service · experiment-finalizer · scheduled: 2026-07-28T12:00:00+03:00"),
     ]
     assert [row["status"] for row in rows] == ["started", "scheduled"]
-    assert {row["job"] for row in rows} == {
-        "experiment-finalizer (sloperator.service)"
-    }
+    assert {row["job"] for row in rows} == {"experiment-finalizer (sloperator.service)"}

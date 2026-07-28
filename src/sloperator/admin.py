@@ -99,11 +99,12 @@ ${esc(m.user_id||m.bot_id||"unknown")}</div>${esc(m.text)}</div>`).join("");
 return `<section class="card" data-session="${esc(k)}"><div class="row spread"><div><b>${esc(s.channel_name)}</b>
 <span class="meta">${esc(s.channel_id)} / ${esc(s.thread_ts)}</span></div><span class="badge
 ${esc(s.runtime_status)}">${esc(s.runtime_status)}</span></div><div class="meta">${esc(s.provider)}:
-${esc(s.model)} · turns ${s.turn_count} · updated ${esc(s.updated_at)}</div>
-${s.last_error?`<pre>${esc(s.last_error)}</pre>`:""}<details><summary>Thread messages</summary>
+${esc(s.model)} · turns ${s.turn_count} · updated ${esc(s.updated_at)}
+${s.process_id?` · PID ${esc(s.process_id)} + subprocess tree`:""}</div>
+${s.last_error?`<pre>${esc(s.last_error)}</pre>`:""}${s.headless?"":`<details><summary>Thread messages</summary>
 <div class="messages">${msgs||'<span class="sub">No archived messages</span>'}</div></details>
 <textarea id="m-${esc(s.thread_ts)}" placeholder="Message or steer this agent"></textarea>
-<div class="row"><button onclick="send('${k}','m-${esc(s.thread_ts)}')">Send</button>
+`}<div class="row">${s.headless?"":`<button onclick="send('${k}','m-${esc(s.thread_ts)}')">Send</button>`}
 <button onclick="action('/sessions/${k}/stop')" ${s.active?"":"disabled"}>Stop process</button>
 <button class="danger" onclick="closeSession('${k}')">Close session</button></div></section>`}
 async function send(k,id){const el=document.getElementById(id);if(!el.value.trim())return;
@@ -198,10 +199,21 @@ def _cron_jobs(crontab: str) -> list[dict[str, str]]:
 def _cron_history() -> list[dict[str, str]]:
     result = subprocess.run(
         [
-            "journalctl", "--no-pager", "-o", "json", "-t", "CRON",
-            "--since", "7 days ago", "-n", "200",
+            "journalctl",
+            "--no-pager",
+            "-o",
+            "json",
+            "-t",
+            "CRON",
+            "--since",
+            "7 days ago",
+            "-n",
+            "200",
         ],
-        capture_output=True, text=True, timeout=10, check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     rows: list[dict[str, str]] = []
     for line in result.stdout.splitlines():
@@ -257,9 +269,7 @@ def _systemd_scheduler_job(settings: Settings) -> dict[str, str]:
         timeout=5,
         check=False,
     )
-    properties = dict(
-        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
-    )
+    properties = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
     state = properties.get("ActiveState", "unknown")
     pid = properties.get("MainPID", "unknown")
     return {
@@ -362,15 +372,18 @@ def create_admin_routes(
 
     async def state(request: web.Request) -> web.Response:
         require_local(request)
-        sessions = await asyncio.to_thread(store.list_agent_sessions)
+        sessions = [
+            *orchestrator.headless_sessions(),
+            *await asyncio.to_thread(store.list_agent_sessions),
+        ]
         active = orchestrator.active_keys()
         for session in sessions:
             key = (session["channel_id"], session["thread_ts"])
             session["active"] = key in active
             session["runtime_status"] = "running" if key in active else session["status"]
-            session["messages"] = await asyncio.to_thread(
-                store.thread_messages, *key
-            )
+            if not session.get("headless"):
+                session["messages"] = await asyncio.to_thread(store.thread_messages, *key)
+        sessions.sort(key=lambda session: session["updated_at"], reverse=True)
         crontab, history, service_job, service_history = await asyncio.gather(
             asyncio.to_thread(_crontab),
             asyncio.to_thread(_cron_history),
@@ -407,7 +420,9 @@ def create_admin_routes(
         require_csrf(request)
         key = (request.match_info["channel"], request.match_info["thread"])
         await orchestrator.cancel(*key)
-        closed = await asyncio.to_thread(store.close_agent_session, *key)
+        closed = orchestrator.dismiss_headless(*key)
+        if not closed:
+            closed = await asyncio.to_thread(store.close_agent_session, *key)
         return web.json_response({"closed": closed})
 
     async def message(request: web.Request) -> web.Response:
@@ -417,6 +432,8 @@ def create_admin_routes(
         if not isinstance(text, str) or not text.strip():
             raise web.HTTPBadRequest(text="Message text is required")
         channel, thread = request.match_info["channel"], request.match_info["thread"]
+        if channel == "scheduled":
+            raise web.HTTPConflict(text="Headless runs do not accept messages")
         result = await orchestrator.submit(
             slack_client,
             channel_id=channel,

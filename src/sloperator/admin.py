@@ -51,8 +51,10 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;bord
 .cron-toolbar{margin-bottom:12px}.cron-legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);
 font-size:12px}.legend-item{display:flex;align-items:center;gap:6px}.run-dot{width:10px;height:10px;
 border-radius:3px;background:var(--blue);box-shadow:inset 0 0 0 1px #ffffff24}.run-dot.success,
-.cron-day.success{background:var(--green)}.run-dot.running,.cron-day.running{background:#f5a524}
-.run-dot.scheduled,.cron-day.scheduled{background:#697386}.run-dot.failed,.cron-day.failed{background:var(--red)}
+.cron-day.success,.cron-day.completed{background:var(--green)}.run-dot.running,
+.cron-day.running{background:#f5a524}
+.cron-day.launched{background:var(--blue)}.run-dot.scheduled,.cron-day.scheduled{background:#697386}
+.run-dot.failed,.cron-day.failed{background:var(--red)}
 .cron-board{padding:0;overflow:hidden}.cron-board-head{padding:13px 16px;border-bottom:1px solid var(--line)}
 .cron-scroll{overflow-x:auto}.cron-grid{display:grid;grid-template-columns:220px repeat(28,24px);
 column-gap:5px;row-gap:0;min-width:1048px;padding:12px 16px 16px;align-items:center}
@@ -66,8 +68,8 @@ text-overflow:ellipsis}.cron-job-stats{font-size:11px;color:var(--muted);margin-
 border:1px solid var(--line);transition:transform .12s,border-color .12s}.cron-day.has-runs{border-color:#ffffff20}
 .cron-day:hover{transform:scale(1.18);z-index:2;border-color:var(--text)}.cron-day.today{
 outline:2px solid var(--blue);outline-offset:2px}.cron-day.future{opacity:.32}
-.cron-day.multi:after{content:"";position:absolute;right:2px;bottom:2px;width:4px;height:4px;
-border-radius:50%;background:#fff;box-shadow:0 0 0 1px #0004}.cron-day.failed{border-color:var(--red)}
+.cron-day.multi:after{content:attr(data-count);position:absolute;inset:0;display:grid;place-items:center;
+color:#fff;font-size:9px;font-weight:750;text-shadow:0 1px 2px #0008}.cron-day.failed{border-color:var(--red)}
 .cron-empty-board{padding:18px;color:var(--muted)}.cron-config,.history-log{margin-top:14px}
 .cron-config .table-wrap,.history-log .table-wrap{overflow:auto}summary{cursor:pointer}
 @media(max-width:700px){main{padding:18px}.cron-grid{grid-template-columns:170px repeat(28,24px);
@@ -133,6 +135,7 @@ for(const card of root.querySelectorAll("[data-session]")){const state=previous.
 if(!state)continue;const details=card.querySelector("details");const messages=card.querySelector(".messages");
 const draft=card.querySelector("textarea");if(details)details.open=state.open;if(messages)messages.scrollTop=state.scroll;
 if(draft)draft.value=state.draft}}
+let cronSignature="";
 function utcDate(value){return new Date(value.replace(" UTC","Z").replace(" ","T"))}
 function calendarDays(){const today=new Date();const end=new Date(Date.UTC(today.getUTCFullYear(),
 today.getUTCMonth(),today.getUTCDate()));return Array.from({length:28},(_,index)=>{
@@ -148,7 +151,8 @@ const runs=events.filter(event=>dayKey(utcDate(event.time))===key);const status=
 const details=runs.length?runs.map(event=>`${event.time} — ${statusLabel(event.status)}`).join("\\n"):
 `${key} — no runs`;return `<div class="cron-day-slot"><div class="cron-day ${esc(status)}
 ${runs.length?"has-runs":""} ${runs.length>1?"multi":""} ${key===today?"today":""}"
-title="${esc(details)}" aria-label="${esc(details)}"></div></div>`}).join("");
+data-count="${runs.length>1?esc(runs.length):""}" title="${esc(details)}"
+aria-label="${esc(details)}"></div></div>`}).join("");
 const completed=events.filter(event=>statusLabel(event.status)==="completed").length;
 return `<div class="cron-job-label" title="${esc(job.name)} · ${esc(job.schedule)}"><b>${esc(job.name)}</b>
 <div class="cron-job-stats">${esc(job.schedule)} · ${events.length} events${completed?` · ${completed} done`:""}</div>
@@ -171,12 +175,19 @@ root.innerHTML+=`<details class="card history-log"><summary>Event log</summary><
 '<tr><td colspan="4" class="sub">No events in the last 28 days</td></tr>'}</tbody></table></div></details>`}
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
+const nextCronSignature=JSON.stringify([d.cron_jobs,d.cron_history,d.crontab]);
+if(nextCronSignature!==cronSignature){const config=document.querySelector(".cron-config");
+const history=document.querySelector(".history-log");const scroll=document.querySelector(".cron-scroll");
+const ui={configOpen:config?.open||false,historyOpen:history?.open||false,scrollLeft:scroll?.scrollLeft||0};
 document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr><th>Job</th>
 <th>Schedule</th><th>Command</th></tr></thead><tbody>${d.cron_jobs.map(x=>`<tr><td>${esc(x.name)}
 </td><td><code>${esc(x.schedule)}</code></td><td><code>${esc(x.command)}</code></td></tr>`).join("")}
 </tbody></table><details><summary>Raw crontab</summary><pre>${esc(d.crontab)}</pre></details>`:
 '<span class="sub">No user crontab</span>';
-renderCronHistory(d.cron_jobs,d.cron_history)}
+renderCronHistory(d.cron_jobs,d.cron_history);document.querySelector(".cron-config").open=ui.configOpen;
+const nextHistory=document.querySelector(".history-log");if(nextHistory)nextHistory.open=ui.historyOpen;
+const nextScroll=document.querySelector(".cron-scroll");if(nextScroll)nextScroll.scrollLeft=ui.scrollLeft;
+cronSignature=nextCronSignature}}
 applyTheme(preferredTheme());setTab(location.hash.slice(1));
 addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
 load();setInterval(load,5000);

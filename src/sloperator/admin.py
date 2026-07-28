@@ -48,6 +48,18 @@ padding:10px;border-radius:8px;
 max-height:320px;overflow:auto}.messages{max-height:300px;overflow:auto;margin:10px 0}.msg{border-left:2px
 solid var(--line);padding:5px 9px;margin:4px 0}.meta{font-size:12px;color:var(--muted)}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
+.cron-history{display:grid;gap:14px}.cron-run{padding:0;overflow:hidden}.cron-run-head{padding:15px 16px;
+border-bottom:1px solid var(--line)}.cron-calendar-wrap{overflow-x:auto;padding:14px 16px 16px}
+.cron-calendar{display:grid;grid-template-columns:repeat(7,minmax(112px,1fr));gap:8px;min-width:820px}
+.cron-day{min-height:92px;background:var(--surface);border:1px solid var(--line);border-radius:9px;
+padding:9px}.cron-day.today{border-color:var(--blue)}.cron-date{display:flex;justify-content:space-between;
+color:var(--muted);font-size:12px}.cron-date b{color:var(--text)}.run-dots{display:flex;gap:5px;
+flex-wrap:wrap;align-content:flex-start;margin-top:12px}.run-dot{width:11px;height:11px;border-radius:3px;
+background:var(--blue);box-shadow:inset 0 0 0 1px #ffffff24}.run-dot.success{background:var(--green)}
+.run-dot.running{background:#f5a524}.run-dot.scheduled{background:var(--muted)}
+.run-count{margin-top:8px;font-size:12px;color:var(--muted)}.cron-empty{margin-top:12px;color:var(--muted);
+font-size:12px}.cron-legend{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 12px}.legend-item{display:flex;
+align-items:center;gap:6px}.history-log{margin-top:16px}.history-log .table-wrap{overflow:auto}
 </style></head><body><main><div class="row spread"><div><h1>Sloperator</h1>
 <div class="sub">localhost admin · access via SSH tunnel</div></div>
 <button id="theme-toggle" onclick="toggleTheme()" aria-label="Переключить тему"></button></div>
@@ -58,7 +70,12 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;bord
 <section id="panel-agents" class="panel"><h2>Agent sessions</h2>
 <div id="sessions" class="grid"></div></section>
 <section id="panel-cron" class="panel"><h2>Scheduled jobs</h2><div id="cron" class="card"></div>
-<h2>Launch history</h2><div id="history" class="card"></div></section></main>
+<h2>Launch history</h2><div class="cron-legend">
+<span class="legend-item"><i class="run-dot success"></i>Completed</span>
+<span class="legend-item"><i class="run-dot running"></i>Running</span>
+<span class="legend-item"><i class="run-dot"></i>Launched</span>
+<span class="legend-item"><i class="run-dot scheduled"></i>Scheduled</span>
+</div><div id="history" class="cron-history"></div></section></main>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -102,6 +119,35 @@ for(const card of root.querySelectorAll("[data-session]")){const state=previous.
 if(!state)continue;const details=card.querySelector("details");const messages=card.querySelector(".messages");
 const draft=card.querySelector("textarea");if(details)details.open=state.open;if(messages)messages.scrollTop=state.scroll;
 if(draft)draft.value=state.draft}}
+const weekdays=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+function utcDate(value){return new Date(value.replace(" UTC","Z").replace(" ","T"))}
+function calendarDays(){const today=new Date();const end=new Date(Date.UTC(today.getUTCFullYear(),
+today.getUTCMonth(),today.getUTCDate()));return Array.from({length:7},(_,index)=>{
+const date=new Date(end);date.setUTCDate(end.getUTCDate()-6+index);return date})}
+function dayKey(date){return date.toISOString().slice(0,10)}
+function statusLabel(status){return {completed:"completed",started:"running",launched:"launched",
+scheduled:"scheduled"}[status]||status}
+function cronCalendar(job,events){const days=calendarDays();const today=dayKey(days[6]);
+const cells=days.map(date=>{const key=dayKey(date);const runs=events.filter(event=>
+dayKey(utcDate(event.time))===key);const dots=runs.slice(0,35).map(event=>
+`<i class="run-dot ${esc(statusLabel(event.status))}" title="${esc(event.time)} ·
+${esc(statusLabel(event.status))}"></i>`).join("");return `<div class="cron-day ${key===today?"today":""}">
+<div class="cron-date"><b>${weekdays[date.getUTCDay()]}</b><span>${date.getUTCDate()} ${date.toLocaleString(
+"en",{month:"short",timeZone:"UTC"})}</span></div>${runs.length?`<div class="run-dots">${dots}</div>
+<div class="run-count">${runs.length} ${runs.length===1?"event":"events"}</div>`:
+'<div class="cron-empty">No runs</div>'}</div>`}).join("");
+return `<section class="card cron-run"><div class="cron-run-head row spread"><div><b>${esc(job.name)}</b>
+<div class="meta">${esc(job.schedule)}</div></div><span class="badge">${events.length} events · 7 days</span>
+</div><div class="cron-calendar-wrap"><div class="cron-calendar">${cells}</div></div></section>`}
+function renderCronHistory(jobs,events){const root=document.getElementById("history");
+const calendars=jobs.map(job=>cronCalendar(job,events.filter(event=>event.job===job.name))).join("");
+const rows=events.map(event=>`<tr><td>${esc(event.time)}</td><td>${esc(event.job||"unknown")}</td>
+<td><span class="badge ${esc(statusLabel(event.status))}">${esc(statusLabel(event.status))}</span></td>
+<td><code>${esc(event.command)}</code></td></tr>`).join("");
+root.innerHTML=(calendars||'<div class="card sub">No scheduled jobs</div>')+
+`<details class="card history-log"><summary>Event log</summary><div class="table-wrap"><table><thead>
+<tr><th>Time</th><th>Job</th><th>Status</th><th>Command</th></tr></thead><tbody>${rows||
+'<tr><td colspan="4" class="sub">No events in the last 7 days</td></tr>'}</tbody></table></div></details>`}
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
 document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr><th>Job</th>
@@ -109,8 +155,7 @@ document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr>
 </td><td><code>${esc(x.schedule)}</code></td><td><code>${esc(x.command)}</code></td></tr>`).join("")}
 </tbody></table><details><summary>Raw crontab</summary><pre>${esc(d.crontab)}</pre></details>`:
 '<span class="sub">No user crontab</span>';
-document.getElementById("history").innerHTML=`<table><thead><tr><th>Time</th><th>Command</th></tr></thead>
-<tbody>${d.cron_history.map(x=>`<tr><td>${esc(x.time)}</td><td><code>${esc(x.command)}</code></td></tr>`).join("")}</tbody></table>`}
+renderCronHistory(d.cron_jobs,d.cron_history)}
 applyTheme(preferredTheme());setTab(location.hash.slice(1));
 addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
 load();setInterval(load,5000);
@@ -177,6 +222,26 @@ def _cron_history() -> list[dict[str, str]]:
     return list(reversed(rows))
 
 
+def _label_cron_history(
+    jobs: list[dict[str, str]],
+    rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Attach configured job names and launch status to CRON journal events."""
+    labelled: list[dict[str, str]] = []
+    for row in rows:
+        command = row["command"]
+        job = next(
+            (
+                item["name"]
+                for item in jobs
+                if command == item["command"] or item["command"] in command
+            ),
+            command.split()[0] if command else "unknown",
+        )
+        labelled.append({**row, "job": job, "status": "launched"})
+    return labelled
+
+
 def _systemd_scheduler_job(settings: Settings) -> dict[str, str]:
     """Describe the experiment scheduler embedded in sloperator.service."""
     result = subprocess.run(
@@ -228,9 +293,9 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
         check=False,
     )
     prefixes = {
-        "Next experiment finalizer run scheduled for ": "scheduled: ",
-        "Starting scheduled experiment finalizer run": "started",
-        "Experiment finalizer run completed": "completed",
+        "Next experiment finalizer run scheduled for ": ("scheduled: ", "scheduled"),
+        "Starting scheduled experiment finalizer run": ("started", "started"),
+        "Experiment finalizer run completed": ("completed", "completed"),
     }
     rows: list[dict[str, str]] = []
     for line in result.stdout.splitlines():
@@ -240,14 +305,17 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
             continue
         message = str(item.get("MESSAGE", ""))
         event: str | None = None
-        for prefix, label in prefixes.items():
+        status: str | None = None
+        for prefix, (label, event_status) in prefixes.items():
             if message.endswith(prefix.rstrip()):
                 event = label
+                status = event_status
                 break
             if prefix in message:
                 event = f"{label}{message.split(prefix, 1)[1]}"
+                status = event_status
                 break
-        if event is None:
+        if event is None or status is None:
             continue
         micros = int(item.get("__REALTIME_TIMESTAMP", 0))
         rows.append(
@@ -257,6 +325,8 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
                     time.gmtime(micros / 1e6),
                 ),
                 "command": f"sloperator.service · experiment-finalizer · {event}",
+                "job": "experiment-finalizer (sloperator.service)",
+                "status": status,
             }
         )
     return list(reversed(rows))
@@ -307,13 +377,14 @@ def create_admin_routes(
             asyncio.to_thread(_systemd_scheduler_job, orchestrator.settings),
             asyncio.to_thread(_systemd_scheduler_history),
         )
+        cron_jobs = _cron_jobs(crontab)
         return web.json_response(
             {
                 "sessions": sessions,
                 "crontab": crontab,
-                "cron_jobs": [service_job, *_cron_jobs(crontab)],
+                "cron_jobs": [service_job, *cron_jobs],
                 "cron_history": sorted(
-                    [*history, *service_history],
+                    [*_label_cron_history(cron_jobs, history), *service_history],
                     key=lambda row: row["time"],
                     reverse=True,
                 ),

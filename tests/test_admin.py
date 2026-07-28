@@ -4,9 +4,11 @@ import json
 from unittest.mock import patch
 
 from sloperator.admin import (
+    ADMIN_HTML,
     _cron_history,
     _cron_jobs,
     _crontab,
+    _label_cron_history,
     _systemd_scheduler_history,
     _systemd_scheduler_job,
 )
@@ -56,6 +58,34 @@ SHELL=/bin/bash
     ]
 
 
+def test_cron_history_is_labelled_for_calendar() -> None:
+    jobs = [
+        {
+            "name": "health",
+            "schedule": "*/30 * * * *",
+            "command": "cd /repo && run-health",
+        }
+    ]
+
+    assert _label_cron_history(
+        jobs,
+        [{"time": "2026-07-28 08:00:00 UTC", "command": "cd /repo && run-health"}],
+    ) == [
+        {
+            "time": "2026-07-28 08:00:00 UTC",
+            "command": "cd /repo && run-health",
+            "job": "health",
+            "status": "launched",
+        }
+    ]
+
+
+def test_admin_contains_seven_day_cron_calendar() -> None:
+    assert 'Array.from({length:7}' in ADMIN_HTML
+    assert 'class="cron-calendar"' in ADMIN_HTML
+    assert "renderCronHistory(d.cron_jobs,d.cron_history)" in ADMIN_HTML
+
+
 def test_systemd_scheduler_job_includes_schedule_and_runtime_state() -> None:
     settings = Settings(
         slack_user_id="UOWNER",
@@ -101,3 +131,7 @@ def test_systemd_scheduler_history_extracts_scheduler_events() -> None:
             "2026-07-28T12:00:00+03:00"
         ),
     ]
+    assert [row["status"] for row in rows] == ["started", "scheduled"]
+    assert {row["job"] for row in rows} == {
+        "experiment-finalizer (sloperator.service)"
+    }

@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.admin_codex import AdminCodexManager
 from sloperator.agents import AgentOrchestrator, SubmitResult
 from sloperator.config import Settings
 from sloperator.store import EventStore
@@ -78,14 +79,29 @@ outline:2px solid var(--blue);outline-offset:2px}.cron-day.future{opacity:.32}
 .run-segment{min-width:1px;min-height:1px;border-radius:1px}
 .cron-empty-board{padding:18px;color:var(--muted)}.cron-config,.history-log{margin-top:14px}
 .cron-config .table-wrap,.history-log .table-wrap{overflow:auto}summary{cursor:pointer}
+.codex-shell{display:grid;grid-template-columns:280px minmax(0,1fr);height:min(720px,calc(100vh - 190px));
+min-height:480px;padding:0;overflow:hidden}.codex-sidebar{border-right:1px solid var(--line);display:flex;
+flex-direction:column;min-height:0}.codex-sidebar-head{padding:12px;border-bottom:1px solid var(--line)}
+.codex-session-list{overflow:auto;padding:8px}.codex-session{display:block;width:100%;text-align:left;
+padding:10px;margin-bottom:6px}.codex-session.active{border-color:var(--blue);background:var(--surface)}
+.codex-session-title{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:650}
+.codex-chat{display:flex;flex-direction:column;min-width:0;min-height:0}.codex-chat-head{padding:12px 14px;
+border-bottom:1px solid var(--line)}.codex-messages{flex:1;overflow:auto;padding:16px}.codex-msg{
+max-width:88%;padding:10px 12px;border-radius:10px;margin:0 0 10px;white-space:pre-wrap;
+word-break:break-word}.codex-msg.user{margin-left:auto;background:#17355f}.codex-msg.assistant{
+background:var(--surface);border:1px solid var(--line)}html[data-theme="light"] .codex-msg.user{
+background:#dbeafe}.codex-compose{padding:12px;border-top:1px solid var(--line)}
+.codex-compose textarea{min-height:74px}.codex-empty{margin:auto;color:var(--muted);text-align:center}
 @media(max-width:700px){main{padding:18px}.cron-grid{grid-template-columns:170px repeat(28,24px);
-min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-index:3}}
+min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-index:3}
+.codex-shell{grid-template-columns:130px minmax(0,1fr)}}
 </style></head><body><main><div class="row spread"><div><h1>Sloperator</h1>
 <div class="sub">localhost admin · access via SSH tunnel</div></div>
 <button id="theme-toggle" onclick="toggleTheme()" aria-label="Переключить тему"></button></div>
 <nav class="tabs" aria-label="Admin sections">
 <button id="tab-agents" onclick="setTab('agents')">Агенты</button>
 <button id="tab-cron" onclick="setTab('cron')">Cron</button>
+<button id="tab-codex" onclick="setTab('codex')">Codex</button>
 </nav>
 <section id="panel-agents" class="panel"><h2>Agent sessions</h2>
 <div id="sessions" class="grid"></div></section>
@@ -97,7 +113,12 @@ min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-
 <span class="legend-item"><i class="run-dot scheduled"></i>Scheduled</span>
 <span class="legend-item"><i class="run-dot missed"></i>No record</span>
 </div></div><div id="history"></div><details class="card cron-config"><summary>Schedules and commands</summary>
-<div id="cron"></div></details></section></main>
+<div id="cron"></div></details></section>
+<section id="panel-codex" class="panel"><h2>Codex sessions</h2><div class="card codex-shell">
+<aside class="codex-sidebar"><div class="codex-sidebar-head"><button onclick="newCodexSession()">
++ Новая</button></div><div id="codex-sessions" class="codex-session-list"></div></aside>
+<div id="codex-chat" class="codex-chat"><div class="codex-empty">Выберите или создайте сессию</div>
+</div></div></section></main>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -107,8 +128,8 @@ function applyTheme(theme){document.documentElement.dataset.theme=theme;
 document.getElementById("theme-toggle").textContent=theme==="light"?"Тёмная тема":"Светлая тема"}
 function toggleTheme(){const next=document.documentElement.dataset.theme==="light"?"dark":"light";
 localStorage.setItem("sloperator-theme",next);applyTheme(next)}
-function setTab(tab){if(!["agents","cron"].includes(tab))tab="agents";
-for(const name of ["agents","cron"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
+function setTab(tab){if(!["agents","cron","codex"].includes(tab))tab="agents";
+for(const name of ["agents","cron","codex"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
 document.getElementById("tab-"+name).classList.toggle("active",name===tab)}
 if(location.hash!=="#"+tab)history.replaceState(null,"","#"+tab)}
 async function api(path,opts={}){opts.headers={...(opts.headers||{}),"X-Admin-CSRF":csrf};
@@ -143,6 +164,47 @@ if(!state)continue;const details=card.querySelector("details");const messages=ca
 const draft=card.querySelector("textarea");if(details)details.open=state.open;if(messages)messages.scrollTop=state.scroll;
 if(draft)draft.value=state.draft}}
 let cronSignature="";
+let codexSignature="",selectedCodex=localStorage.getItem("sloperator-codex-session")||"",
+codexDrafts={};
+function selectCodex(id){if(selectedCodex)codexDrafts[selectedCodex]=
+document.getElementById("codex-input")?.value||"";selectedCodex=id;
+localStorage.setItem("sloperator-codex-session",id);
+codexSignature="";load()}
+async function newCodexSession(){const title=prompt("Название сессии (необязательно)")||"";
+const result=await api("/codex/sessions",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({title})});selectCodex(result.session.session_id)}
+async function deleteCodex(id){if(!confirm("Удалить эту Codex-сессию и её историю?"))return;
+await api("/codex/sessions/"+encodeURIComponent(id)+"/delete",{method:"POST"});
+if(selectedCodex===id){selectedCodex="";localStorage.removeItem("sloperator-codex-session")}
+codexSignature="";await load()}
+async function sendCodex(){const input=document.getElementById("codex-input");const text=input?.value.trim();
+if(!text||!selectedCodex)return;input.value="";codexDrafts[selectedCodex]="";await api("/codex/sessions/"+
+encodeURIComponent(selectedCodex)+"/message",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({text})});codexSignature="";await load()}
+function renderCodex(sessions){if(selectedCodex)codexDrafts[selectedCodex]=
+document.getElementById("codex-input")?.value||codexDrafts[selectedCodex]||"";
+if(selectedCodex&&!sessions.some(s=>s.session_id===selectedCodex))
+selectedCodex="";if(!selectedCodex&&sessions.length)selectedCodex=sessions[0].session_id;
+const list=document.getElementById("codex-sessions");list.innerHTML=sessions.map(s=>
+`<button class="codex-session ${s.session_id===selectedCodex?"active":""}"
+onclick="selectCodex('${esc(s.session_id)}')"><span class="codex-session-title">${esc(s.title)}</span>
+<span class="meta">${esc(s.status)} · ${esc(s.updated_at)}</span></button>`).join("")||
+'<div class="sub">Нет сессий</div>';const session=sessions.find(s=>s.session_id===selectedCodex);
+const chat=document.getElementById("codex-chat");if(!session){chat.innerHTML=
+'<div class="codex-empty">Выберите или создайте сессию</div>';return}
+const messages=(session.messages||[]).map(m=>`<div class="codex-msg ${esc(m.role)}">
+<div class="meta">${esc(m.role)} · ${esc(m.created_at)}</div>${esc(m.text)}</div>`).join("");
+chat.innerHTML=`<div class="codex-chat-head row spread"><div><b>${esc(session.title)}</b>
+<span class="badge ${esc(session.status)}">${esc(session.status)}</span></div>
+<button class="danger" onclick="deleteCodex('${esc(session.session_id)}')">Удалить</button></div>
+<div class="codex-messages">${messages||'<div class="codex-empty">Напишите первое сообщение</div>'}
+${session.last_error?`<pre>${esc(session.last_error)}</pre>`:""}</div>
+<div class="codex-compose"><textarea id="codex-input" placeholder="Сообщение Codex"
+onkeydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter')sendCodex()"></textarea>
+<div class="row spread"><span class="meta">Ctrl/⌘ + Enter — отправить</span>
+<button onclick="sendCodex()">Отправить</button></div></div>`;
+const input=document.getElementById("codex-input");if(input)input.value=codexDrafts[selectedCodex]||"";
+const box=chat.querySelector(".codex-messages");if(box)box.scrollTop=box.scrollHeight}
 function utcDate(value){return new Date(value.replace(" UTC","Z").replace(" ","T"))}
 function calendarDays(){const today=new Date();const end=new Date(Date.UTC(today.getUTCFullYear(),
 today.getUTCMonth(),today.getUTCDate()));return Array.from({length:28},(_,index)=>{
@@ -199,6 +261,8 @@ root.innerHTML+=`<details class="card history-log"><summary>Event log</summary><
 '<tr><td colspan="4" class="sub">No events in the last 28 days</td></tr>'}</tbody></table></div></details>`}
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
+const nextCodexSignature=JSON.stringify([d.codex_sessions,selectedCodex]);
+if(nextCodexSignature!==codexSignature){renderCodex(d.codex_sessions);codexSignature=nextCodexSignature}
 const nextCronSignature=JSON.stringify([d.cron_jobs,d.cron_history,d.crontab]);
 if(nextCronSignature!==cronSignature){const config=document.querySelector(".cron-config");
 const history=document.querySelector(".history-log");const scroll=document.querySelector(".cron-scroll");
@@ -502,6 +566,12 @@ def create_admin_routes(
 ) -> None:
     """Attach loopback admin routes to the existing HTTP application."""
     csrf = secrets.token_urlsafe(32)
+    codex_manager = AdminCodexManager(orchestrator.settings, store)
+
+    async def close_codex_manager(_: web.Application) -> None:
+        await codex_manager.close()
+
+    app.on_cleanup.append(close_codex_manager)
 
     def require_local(request: web.Request) -> None:
         if request.remote not in {"127.0.0.1", "::1"}:
@@ -554,6 +624,7 @@ def create_admin_routes(
         return web.json_response(
             {
                 "sessions": sessions,
+                "codex_sessions": await asyncio.to_thread(store.list_admin_codex_sessions),
                 "crontab": crontab,
                 "cron_jobs": [service_job, *cron_jobs],
                 "cron_history": sorted(
@@ -607,8 +678,39 @@ def create_admin_routes(
         await asyncio.to_thread(store.record_admin_agent_message, channel, thread, text.strip())
         return web.json_response({"result": result.value})
 
+    async def create_codex_session(request: web.Request) -> web.Response:
+        require_csrf(request)
+        body = await request.json()
+        session = await codex_manager.create(str(body.get("title", "")))
+        return web.json_response({"session": session})
+
+    async def send_codex_message(request: web.Request) -> web.Response:
+        require_csrf(request)
+        body = await request.json()
+        try:
+            result = await codex_manager.submit(
+                request.match_info["session_id"], str(body.get("text", ""))
+            )
+        except KeyError:
+            raise web.HTTPNotFound(text="Unknown Codex session") from None
+        except (ValueError, RuntimeError) as error:
+            raise web.HTTPConflict(text=str(error)) from error
+        return web.json_response({"result": result})
+
+    async def delete_codex_session(request: web.Request) -> web.Response:
+        require_csrf(request)
+        deleted = await codex_manager.delete(request.match_info["session_id"])
+        return web.json_response({"deleted": deleted})
+
     app.router.add_get("/admin", page)
     app.router.add_get("/admin/api/state", state)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/stop", stop)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/close", close)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/message", message)
+    app.router.add_post("/admin/api/codex/sessions", create_codex_session)
+    app.router.add_post(
+        "/admin/api/codex/sessions/{session_id}/message", send_codex_message
+    )
+    app.router.add_post(
+        "/admin/api/codex/sessions/{session_id}/delete", delete_codex_session
+    )

@@ -168,6 +168,16 @@ def test_admin_supports_headless_agent_runs() -> None:
     assert "PID ${esc(s.process_id)} + subprocess tree" in ADMIN_HTML
 
 
+def test_admin_contains_codex_session_chat_ui() -> None:
+    assert 'id="tab-codex"' in ADMIN_HTML
+    assert 'id="panel-codex"' in ADMIN_HTML
+    assert "newCodexSession()" in ADMIN_HTML
+    assert "sendCodex()" in ADMIN_HTML
+    assert "deleteCodex(" in ADMIN_HTML
+    assert 'localStorage.getItem("sloperator-codex-session")' in ADMIN_HTML
+    assert 'document.getElementById("codex-input")?.value' in ADMIN_HTML
+
+
 def test_systemd_scheduler_job_includes_schedule_and_runtime_state() -> None:
     settings = Settings(
         slack_user_id="UOWNER",

@@ -117,6 +117,24 @@ CREATE TABLE IF NOT EXISTS admin_agent_messages (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS admin_codex_sessions (
+    session_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    external_thread_id TEXT,
+    status TEXT NOT NULL DEFAULT 'idle',
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS admin_codex_messages (
+    message_id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES admin_codex_sessions(session_id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS subscription_flow_incidents (
     nature_key TEXT PRIMARY KEY,
     active INTEGER NOT NULL CHECK(active IN (0, 1)),
@@ -201,7 +219,16 @@ class EventStore:
                     """
                 )
             connection.execute(
-                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '4')"
+                """
+                UPDATE admin_codex_sessions
+                SET status = 'failed',
+                    last_error = 'Service restarted during an active turn',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'running'
+                """
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '5')"
             )
         os.chmod(self.path, 0o600)
 
@@ -466,6 +493,99 @@ class EventStore:
                 """,
                 (channel_id, thread_ts, text),
             )
+
+    def create_admin_codex_session(self, session_id: str, title: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO admin_codex_sessions(session_id, title) VALUES (?, ?)",
+                (session_id, title),
+            )
+
+    def list_admin_codex_sessions(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            sessions = connection.execute(
+                """
+                SELECT session_id, title, external_thread_id, status, last_error,
+                       created_at, updated_at
+                FROM admin_codex_sessions
+                ORDER BY datetime(updated_at) DESC
+                """
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for session in sessions:
+                item = dict(session)
+                messages = connection.execute(
+                    """
+                    SELECT message_id, role, text, created_at
+                    FROM admin_codex_messages
+                    WHERE session_id = ?
+                    ORDER BY message_id
+                    """,
+                    (item["session_id"],),
+                ).fetchall()
+                item["messages"] = [dict(message) for message in messages]
+                result.append(item)
+        return result
+
+    def get_admin_codex_session(self, session_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                session
+                for session in self.list_admin_codex_sessions()
+                if session["session_id"] == session_id
+            ),
+            None,
+        )
+
+    def add_admin_codex_message(self, session_id: str, role: str, text: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO admin_codex_messages(session_id, role, text)
+                VALUES (?, ?, ?)
+                """,
+                (session_id, role, text),
+            )
+            connection.execute(
+                """
+                UPDATE admin_codex_sessions
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )
+
+    def update_admin_codex_session(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        external_thread_id: str | None = None,
+        last_error: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE admin_codex_sessions
+                SET status = ?,
+                    external_thread_id = COALESCE(?, external_thread_id),
+                    last_error = ?,
+                    title = COALESCE(?, title),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE session_id = ?
+                """,
+                (status, external_thread_id, last_error, title, session_id),
+            )
+
+    def delete_admin_codex_session(self, session_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM admin_codex_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+        return cursor.rowcount == 1
 
     def close_agent_session(self, channel_id: str, thread_ts: str) -> bool:
         """Permanently close a session while retaining its audit history."""

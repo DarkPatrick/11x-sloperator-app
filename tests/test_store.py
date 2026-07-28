@@ -70,6 +70,30 @@ def test_store_tracks_channels_threads_and_deletions(tmp_path: Path) -> None:
     assert not store.contains_channel("C999")
 
 
+def test_store_persists_and_deletes_admin_codex_chat(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "archive.sqlite3")
+    store.initialize()
+    store.create_admin_codex_session("session-1", "My session")
+    store.add_admin_codex_message("session-1", "user", "Hello")
+    store.add_admin_codex_message("session-1", "assistant", "Hi")
+    store.update_admin_codex_session(
+        "session-1",
+        status="idle",
+        external_thread_id="thread-1",
+    )
+
+    session = store.get_admin_codex_session("session-1")
+
+    assert session is not None
+    assert session["external_thread_id"] == "thread-1"
+    assert [(item["role"], item["text"]) for item in session["messages"]] == [
+        ("user", "Hello"),
+        ("assistant", "Hi"),
+    ]
+    assert store.delete_admin_codex_session("session-1")
+    assert store.get_admin_codex_session("session-1") is None
+
+
 def test_store_tracks_agent_sessions_and_deduplicates_requests(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "archive.sqlite3")
     store.initialize()

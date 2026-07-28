@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from sloperator.agents import (
+    AGENT_RETRY_DELAYS,
     AgentExecutionError,
     AgentOrchestrator,
     extract_artifact,
@@ -50,6 +51,10 @@ def test_parse_agent_request_rejects_empty_prompt(settings: Settings) -> None:
 def test_thread_key_starts_new_session_for_top_level_message() -> None:
     assert thread_key("100.1", None) == "100.1"
     assert thread_key("100.2", "100.1") == "100.1"
+
+
+def test_agent_service_retry_delays_grow_to_one_hour() -> None:
+    assert AGENT_RETRY_DELAYS == (60, 300, 900, 1_800, 3_600)
 
 
 async def test_agent_service_errors_retry_with_progressive_backoff(

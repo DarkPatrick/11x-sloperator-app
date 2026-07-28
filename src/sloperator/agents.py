@@ -25,7 +25,7 @@ from sloperator.store import AgentSession, EventStore
 from sloperator.vpn import VpnManager, VpnState
 
 LOGGER = logging.getLogger(__name__)
-AGENT_RETRY_DELAYS = (15, 30, 60, 120, 240)
+AGENT_RETRY_DELAYS = (60, 300, 900, 1_800, 3_600)
 DIRECTIVE_RE = re.compile(
     r"^\[(?P<provider>claude|codex)(?::(?P<model>[A-Za-z0-9._:-]{1,100}))?\]\s*",
     re.IGNORECASE,

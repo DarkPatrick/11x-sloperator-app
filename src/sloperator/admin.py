@@ -200,7 +200,7 @@ def _systemd_scheduler_job(settings: Settings) -> dict[str, str]:
     return {
         "name": "experiment-finalizer (sloperator.service)",
         "schedule": (
-            f"daily {settings.experiment_finalizer_hour:02d}:00 "
+            f"weekdays Mon-Fri {settings.experiment_finalizer_hour:02d}:00 "
             f"{settings.experiment_finalizer_timezone}"
         ),
         "command": f"embedded asyncio scheduler · {state} · PID {pid}",

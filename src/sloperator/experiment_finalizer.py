@@ -125,11 +125,13 @@ def next_run_at(
     timezone_name: str = "Asia/Nicosia",
     hour: int = 12,
 ) -> dt.datetime:
-    """Return the next daily wall-clock run time, preserving Cyprus DST."""
+    """Return the next weekday wall-clock run time, preserving Cyprus DST."""
     timezone = ZoneInfo(timezone_name)
     local_now = now.astimezone(timezone)
     candidate = local_now.replace(hour=hour, minute=0, second=0, microsecond=0)
     if candidate <= local_now:
+        candidate += dt.timedelta(days=1)
+    while candidate.weekday() >= 5:
         candidate += dt.timedelta(days=1)
     return candidate
 
@@ -163,7 +165,7 @@ async def run_daily(
     agent: AgentSubmitter,
     settings: Settings,
 ) -> None:
-    """Run forever at the configured local wall-clock hour."""
+    """Run forever at the configured local wall-clock hour on weekdays."""
     while True:
         now = dt.datetime.now(dt.UTC)
         target = next_run_at(

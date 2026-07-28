@@ -69,7 +69,7 @@ def test_systemd_scheduler_job_includes_schedule_and_runtime_state() -> None:
 
     assert job == {
         "name": "experiment-finalizer (sloperator.service)",
-        "schedule": "daily 12:00 Asia/Nicosia",
+        "schedule": "weekdays Mon-Fri 12:00 Asia/Nicosia",
         "command": "embedded asyncio scheduler · active · PID 123",
     }
 

@@ -21,6 +21,18 @@ def test_next_run_uses_cyprus_wall_clock_and_dst() -> None:
     assert second == dt.datetime(2026, 7, 28, 12, 0, tzinfo=ZoneInfo("Asia/Nicosia"))
 
 
+def test_next_run_skips_weekends() -> None:
+    friday_after_noon = dt.datetime(2026, 7, 31, 10, 0, tzinfo=dt.UTC)
+    saturday = dt.datetime(2026, 8, 1, 8, 0, tzinfo=dt.UTC)
+    sunday = dt.datetime(2026, 8, 2, 8, 0, tzinfo=dt.UTC)
+
+    expected = dt.datetime(2026, 8, 3, 12, 0, tzinfo=ZoneInfo("Asia/Nicosia"))
+
+    assert next_run_at(friday_after_noon) == expected
+    assert next_run_at(saturday) == expected
+    assert next_run_at(sunday) == expected
+
+
 def test_prompt_has_selection_pipeline_and_test_routing() -> None:
     assert "oldest by actual end timestamp" in FINALIZATION_PROMPT
     assert "at least one configured segment" in FINALIZATION_PROMPT

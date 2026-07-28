@@ -21,6 +21,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.admin_codex import AdminCodexManager
 from sloperator.agents import AgentOrchestrator, SubmitResult
+from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
 from sloperator.store import EventStore
 
@@ -165,11 +166,14 @@ const draft=card.querySelector("textarea");if(details)details.open=state.open;if
 if(draft)draft.value=state.draft}}
 let cronSignature="";
 let codexSignature="",selectedCodex=localStorage.getItem("sloperator-codex-session")||"",
-codexDrafts={};
-function selectCodex(id){if(selectedCodex)codexDrafts[selectedCodex]=
+codexDrafts={},codexDetail=null;
+async function selectCodex(id){if(selectedCodex)codexDrafts[selectedCodex]=
 document.getElementById("codex-input")?.value||"";selectedCodex=id;
 localStorage.setItem("sloperator-codex-session",id);
-codexSignature="";load()}
+codexDetail=null;codexSignature="";await loadCodexDetail(id)}
+async function loadCodexDetail(id){if(!id)return;try{codexDetail=await api(
+"/codex/sessions/"+encodeURIComponent(id));renderCodex(window.codexSessions||[])}
+catch(error){codexDetail=null}}
 async function newCodexSession(){const title=prompt("Название сессии (необязательно)")||"";
 const result=await api("/codex/sessions",{method:"POST",headers:{"Content-Type":"application/json"},
 body:JSON.stringify({title})});selectCodex(result.session.session_id)}
@@ -183,17 +187,18 @@ encodeURIComponent(selectedCodex)+"/message",{method:"POST",headers:{"Content-Ty
 body:JSON.stringify({text})});codexSignature="";await load()}
 function renderCodex(sessions){if(selectedCodex)codexDrafts[selectedCodex]=
 document.getElementById("codex-input")?.value||codexDrafts[selectedCodex]||"";
-if(selectedCodex&&!sessions.some(s=>s.session_id===selectedCodex))
+window.codexSessions=sessions;if(selectedCodex&&!sessions.some(s=>s.session_id===selectedCodex))
 selectedCodex="";if(!selectedCodex&&sessions.length)selectedCodex=sessions[0].session_id;
 const list=document.getElementById("codex-sessions");list.innerHTML=sessions.map(s=>
 `<button class="codex-session ${s.session_id===selectedCodex?"active":""}"
 onclick="selectCodex('${esc(s.session_id)}')"><span class="codex-session-title">${esc(s.title)}</span>
 <span class="meta">${esc(s.status)} · ${esc(s.updated_at)}</span></button>`).join("")||
-'<div class="sub">Нет сессий</div>';const session=sessions.find(s=>s.session_id===selectedCodex);
+'<div class="sub">Нет сессий</div>';const summary=sessions.find(s=>s.session_id===selectedCodex);
+const session=codexDetail?.session_id===selectedCodex?{...summary,...codexDetail}:summary;
 const chat=document.getElementById("codex-chat");if(!session){chat.innerHTML=
 '<div class="codex-empty">Выберите или создайте сессию</div>';return}
 const messages=(session.messages||[]).map(m=>`<div class="codex-msg ${esc(m.role)}">
-<div class="meta">${esc(m.role)} · ${esc(m.created_at)}</div>${esc(m.text)}</div>`).join("");
+<div class="meta">${esc(m.role)} · ${esc(m.created_at)}</div>${esc(m.content)}</div>`).join("");
 chat.innerHTML=`<div class="codex-chat-head row spread"><div><b>${esc(session.title)}</b>
 <span class="badge ${esc(session.status)}">${esc(session.status)}</span></div>
 <button class="danger" onclick="deleteCodex('${esc(session.session_id)}')">Удалить</button></div>
@@ -262,7 +267,8 @@ root.innerHTML+=`<details class="card history-log"><summary>Event log</summary><
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
 const nextCodexSignature=JSON.stringify([d.codex_sessions,selectedCodex]);
-if(nextCodexSignature!==codexSignature){renderCodex(d.codex_sessions);codexSignature=nextCodexSignature}
+if(nextCodexSignature!==codexSignature){renderCodex(d.codex_sessions);codexSignature=nextCodexSignature;
+if(selectedCodex)await loadCodexDetail(selectedCodex)}
 const nextCronSignature=JSON.stringify([d.cron_jobs,d.cron_history,d.crontab]);
 if(nextCronSignature!==cronSignature){const config=document.querySelector(".cron-config");
 const history=document.querySelector(".history-log");const scroll=document.querySelector(".cron-scroll");
@@ -624,7 +630,7 @@ def create_admin_routes(
         return web.json_response(
             {
                 "sessions": sessions,
-                "codex_sessions": await asyncio.to_thread(store.list_admin_codex_sessions),
+                "codex_sessions": await codex_manager.list_threads(),
                 "crontab": crontab,
                 "cron_jobs": [service_job, *cron_jobs],
                 "cron_history": sorted(
@@ -684,6 +690,14 @@ def create_admin_routes(
         session = await codex_manager.create(str(body.get("title", "")))
         return web.json_response({"session": session})
 
+    async def read_codex_session(request: web.Request) -> web.Response:
+        require_local(request)
+        try:
+            session = await codex_manager.read(request.match_info["session_id"])
+        except CodexAppServerError as error:
+            raise web.HTTPNotFound(text=str(error)) from error
+        return web.json_response(session)
+
     async def send_codex_message(request: web.Request) -> web.Response:
         require_csrf(request)
         body = await request.json()
@@ -708,6 +722,9 @@ def create_admin_routes(
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/close", close)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/message", message)
     app.router.add_post("/admin/api/codex/sessions", create_codex_session)
+    app.router.add_get(
+        "/admin/api/codex/sessions/{session_id}", read_codex_session
+    )
     app.router.add_post(
         "/admin/api/codex/sessions/{session_id}/message", send_codex_message
     )

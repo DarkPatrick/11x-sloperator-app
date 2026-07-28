@@ -29,12 +29,15 @@ class CodexAppServer:
         model: str,
         timeout_seconds: int,
         environment_overrides: Mapping[str, str] | None = None,
+        *,
+        lock_workspace: bool = True,
     ) -> None:
         self.executable = executable
         self.workspace = workspace
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.environment_overrides = dict(environment_overrides or {})
+        self.lock_workspace = lock_workspace
         self.process: asyncio.subprocess.Process | None = None
         self.thread_id: str | None = None
         self.turn_id: str | None = None
@@ -55,13 +58,12 @@ class CodexAppServer:
         environment.update(self.environment_overrides)
         return environment
 
-    async def start(self, existing_thread_id: str | None) -> str:
-        """Start the server and create or resume its Codex thread."""
+    async def connect(self) -> None:
+        """Start and initialize the App Server without opening a thread."""
+        if self.process is not None and self.process.returncode is None:
+            return
         lock_path = self.workspace / ".git" / "sloperator-agent.lock"
         command = [
-            "/usr/bin/flock",
-            "-x",
-            str(lock_path),
             str(self.executable),
             "-c",
             'approval_policy="never"',
@@ -73,6 +75,8 @@ class CodexAppServer:
             "--listen",
             "stdio://",
         ]
+        if self.lock_workspace:
+            command = ["/usr/bin/flock", "-x", str(lock_path), *command]
         self.process = await asyncio.create_subprocess_exec(
             *command,
             cwd=str(self.workspace),
@@ -81,6 +85,7 @@ class CodexAppServer:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            limit=16 * 1024 * 1024,
         )
         self._reader_task = asyncio.create_task(self._read_stdout(), name="codex-app-server-read")
         self._stderr_task = asyncio.create_task(self._read_stderr(), name="codex-app-server-stderr")
@@ -97,6 +102,10 @@ class CodexAppServer:
             },
         )
         await self._notify("initialized", {})
+
+    async def start(self, existing_thread_id: str | None) -> str:
+        """Start the server and create or resume its Codex thread."""
+        await self.connect()
         if existing_thread_id is None:
             response = await self._request(
                 "thread/start",
@@ -124,6 +133,52 @@ class CodexAppServer:
             raise CodexAppServerError("Codex did not return a thread ID")
         self.thread_id = thread["id"]
         return self.thread_id
+
+    async def list_threads(
+        self, source_kinds: list[str] | None = None, limit: int = 100
+    ) -> list[Mapping[str, Any]]:
+        """Return persisted Codex threads, following App Server pagination."""
+        await self.connect()
+        threads: list[Mapping[str, Any]] = []
+        cursor: str | None = None
+        while len(threads) < limit:
+            params: dict[str, Any] = {"limit": min(100, limit - len(threads))}
+            if source_kinds:
+                params["sourceKinds"] = source_kinds
+            if cursor:
+                params["cursor"] = cursor
+            response = await self._request("thread/list", params)
+            data = response.get("data")
+            if isinstance(data, list):
+                threads.extend(item for item in data if isinstance(item, Mapping))
+            next_cursor = response.get("nextCursor")
+            if not isinstance(next_cursor, str) or not next_cursor:
+                break
+            cursor = next_cursor
+        return threads
+
+    async def read_thread(
+        self, thread_id: str, *, include_turns: bool = True
+    ) -> Mapping[str, Any]:
+        """Read one persisted thread, optionally including its turns."""
+        await self.connect()
+        response = await self._request(
+            "thread/read", {"threadId": thread_id, "includeTurns": include_turns}
+        )
+        thread = response.get("thread")
+        if not isinstance(thread, Mapping):
+            raise CodexAppServerError("Codex did not return a thread")
+        return thread
+
+    async def delete_thread(self, thread_id: str) -> None:
+        """Delete one persisted Codex thread."""
+        await self.connect()
+        await self._request("thread/delete", {"threadId": thread_id})
+
+    async def set_thread_name(self, thread_id: str, name: str) -> None:
+        """Assign a display name to a persisted Codex thread."""
+        await self.connect()
+        await self._request("thread/name/set", {"threadId": thread_id, "name": name})
 
     async def run_turn(self, prompt: str) -> str:
         """Run a turn while accepting concurrent calls to :meth:`steer`."""

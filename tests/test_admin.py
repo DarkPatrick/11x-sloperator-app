@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from sloperator.admin import (
     ADMIN_HTML,
+    _cron_execution_history,
     _cron_history,
     _cron_jobs,
     _crontab,
@@ -85,15 +87,73 @@ def test_cron_history_is_labelled_for_calendar() -> None:
     ]
 
 
+def test_cron_execution_history_uses_real_retry_child_results(tmp_path: Path) -> None:
+    log = tmp_path / "health.log"
+    log.write_text(
+        "\n".join(
+            (
+                "[2026-07-27 10:05:00] [cron_retry:health] child exited rc=0",
+                "[2026-07-27 11:00:00] [cron_retry:health] not the scheduled fire: skipping",
+                "[2026-07-28 10:05:00] [cron_retry:health] child exited rc=1",
+            )
+        )
+    )
+    jobs = [
+        {
+            "name": "health",
+            "schedule": "0 7,8 * * *",
+            "command": (
+                f"TZ=Asia/Nicosia python cron_retry.py --only-at 10:00 "
+                f"--log-out {log} -- child.py"
+            ),
+        }
+    ]
+
+    rows, authoritative = _cron_execution_history(jobs)
+
+    assert authoritative == {"health"}
+    assert [row["status"] for row in rows] == ["failed", "completed"]
+    assert [row["time"] for row in rows] == [
+        "2026-07-28 07:05:00 UTC",
+        "2026-07-27 07:05:00 UTC",
+    ]
+
+
+def test_cron_execution_history_reads_jsonl_job_outcomes(tmp_path: Path) -> None:
+    script = tmp_path / "probe.py"
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "probe.jsonl").write_text(
+        "\n".join(
+            (
+                '{"ts":"2026-07-28T08:00:00+00:00","status":"ok"}',
+                '{"ts":"2026-07-28T08:30:00+00:00","status":"data_unavailable"}',
+            )
+        )
+    )
+    jobs = [
+        {
+            "name": "probe",
+            "schedule": "*/30 * * * *",
+            "command": f"python {script}",
+        }
+    ]
+
+    rows, authoritative = _cron_execution_history(jobs)
+
+    assert authoritative == {"probe"}
+    assert [row["status"] for row in rows] == ["failed", "completed"]
+
+
 def test_admin_contains_airflow_style_28_day_cron_grid() -> None:
     assert "Array.from({length:28}" in ADMIN_HTML
     assert 'class="cron-grid"' in ADMIN_HTML
     assert "function cronRow(job,events,days,today)" in ADMIN_HTML
     assert "Last 28 days · UTC" in ADMIN_HTML
     assert "renderCronHistory(d.cron_jobs,d.cron_history)" in ADMIN_HTML
-    assert ".cron-day.launched{background:var(--blue)}" in ADMIN_HTML
-    assert ".cron-day.completed{background:var(--green)}" in ADMIN_HTML
-    assert 'data-count="${runs.length>1?esc(runs.length):""}"' in ADMIN_HTML
+    assert "function plannedRuns(job,date)" in ADMIN_HTML
+    assert 'class="run-segment ${esc(status)}"' in ADMIN_HTML
+    assert "cronFieldValues(fields[0],0,59).size*cronFieldValues(fields[1],0,23).size" in ADMIN_HTML
 
 
 def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:

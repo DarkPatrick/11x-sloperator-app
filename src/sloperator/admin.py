@@ -5,11 +5,16 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
+import re
 import secrets
+import shlex
 import subprocess
 import time
 from html import escape
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from slack_sdk.web.async_client import AsyncWebClient
@@ -51,10 +56,10 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;bord
 .cron-toolbar{margin-bottom:12px}.cron-legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);
 font-size:12px}.legend-item{display:flex;align-items:center;gap:6px}.run-dot{width:10px;height:10px;
 border-radius:3px;background:var(--blue);box-shadow:inset 0 0 0 1px #ffffff24}.run-dot.success,
-.cron-day.success,.cron-day.completed{background:var(--green)}.run-dot.running,
-.cron-day.running{background:#f5a524}
-.cron-day.launched{background:var(--blue)}.run-dot.scheduled,.cron-day.scheduled{background:#697386}
-.run-dot.failed,.cron-day.failed{background:var(--red)}
+.run-segment.completed{background:var(--green)}.run-dot.running,.run-segment.running{background:#f5a524}
+.run-segment.launched{background:var(--blue)}.run-dot.scheduled,.run-segment.scheduled{background:#697386}
+.run-dot.failed,.run-segment.failed{background:var(--red)}.run-dot.missed,.run-segment.missed{
+background:var(--surface);border:1px solid var(--line)}
 .cron-board{padding:0;overflow:hidden}.cron-board-head{padding:13px 16px;border-bottom:1px solid var(--line)}
 .cron-scroll{overflow-x:auto}.cron-grid{display:grid;grid-template-columns:220px repeat(28,24px);
 column-gap:5px;row-gap:0;min-width:1048px;padding:12px 16px 16px;align-items:center}
@@ -65,11 +70,12 @@ border-top:1px solid var(--line)}.cron-job-label b{display:block;white-space:now
 text-overflow:ellipsis}.cron-job-stats{font-size:11px;color:var(--muted);margin-top:2px}
 .cron-day-slot{height:38px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:center}
 .cron-day{position:relative;width:22px;height:22px;border-radius:5px;background:var(--surface);
-border:1px solid var(--line);transition:transform .12s,border-color .12s}.cron-day.has-runs{border-color:#ffffff20}
+border:1px solid var(--line);transition:transform .12s,border-color .12s;display:grid;
+grid-template-columns:repeat(var(--segment-cols,1),1fr);grid-auto-rows:1fr;gap:1px;padding:2px;
+overflow:hidden}.cron-day.has-runs{border-color:#ffffff20}
 .cron-day:hover{transform:scale(1.18);z-index:2;border-color:var(--text)}.cron-day.today{
 outline:2px solid var(--blue);outline-offset:2px}.cron-day.future{opacity:.32}
-.cron-day.multi:after{content:attr(data-count);position:absolute;inset:0;display:grid;place-items:center;
-color:#fff;font-size:9px;font-weight:750;text-shadow:0 1px 2px #0008}.cron-day.failed{border-color:var(--red)}
+.run-segment{min-width:1px;min-height:1px;border-radius:1px}
 .cron-empty-board{padding:18px;color:var(--muted)}.cron-config,.history-log{margin-top:14px}
 .cron-config .table-wrap,.history-log .table-wrap{overflow:auto}summary{cursor:pointer}
 @media(max-width:700px){main{padding:18px}.cron-grid{grid-template-columns:170px repeat(28,24px);
@@ -87,8 +93,9 @@ min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-
 <span class="sub">Last 28 days · UTC</span><div class="cron-legend">
 <span class="legend-item"><i class="run-dot success"></i>Completed</span>
 <span class="legend-item"><i class="run-dot running"></i>Running</span>
-<span class="legend-item"><i class="run-dot"></i>Launched</span>
+<span class="legend-item"><i class="run-dot failed"></i>Failed</span>
 <span class="legend-item"><i class="run-dot scheduled"></i>Scheduled</span>
+<span class="legend-item"><i class="run-dot missed"></i>No record</span>
 </div></div><div id="history"></div><details class="card cron-config"><summary>Schedules and commands</summary>
 <div id="cron"></div></details></section></main>
 <script>
@@ -143,16 +150,33 @@ const date=new Date(end);date.setUTCDate(end.getUTCDate()-27+index);return date}
 function dayKey(date){return date.toISOString().slice(0,10)}
 function statusLabel(status){return {completed:"completed",started:"running",launched:"launched",
 scheduled:"scheduled"}[status]||status}
-const statusRank={failed:5,running:4,completed:3,launched:2,scheduled:1};
-function dayStatus(runs){return runs.reduce((best,event)=>statusRank[statusLabel(event.status)]>
-(statusRank[best]||0)?statusLabel(event.status):best,"")}
-function cronRow(job,events,days,today){const cells=days.map(date=>{const key=dayKey(date);
-const runs=events.filter(event=>dayKey(utcDate(event.time))===key);const status=dayStatus(runs);
-const details=runs.length?runs.map(event=>`${event.time} — ${statusLabel(event.status)}`).join("\\n"):
-`${key} — no runs`;return `<div class="cron-day-slot"><div class="cron-day ${esc(status)}
-${runs.length?"has-runs":""} ${runs.length>1?"multi":""} ${key===today?"today":""}"
-data-count="${runs.length>1?esc(runs.length):""}" title="${esc(details)}"
-aria-label="${esc(details)}"></div></div>`}).join("");
+function cronFieldValues(field,min,max){const values=new Set();for(const part of field.split(",")){
+const [base,stepRaw]=part.split("/"),step=Math.max(1,Number(stepRaw)||1);let start=min,end=max;
+if(base!=="*"){if(base.includes("-"))[start,end]=base.split("-").map(Number);else start=end=Number(base)}
+for(let value=start;value<=end;value+=step)if(value>=min&&value<=max)values.add(value)}return values}
+function plannedRuns(job,date){if(job.schedule.startsWith("weekdays "))return date.getUTCDay()>=1&&
+date.getUTCDay()<=5?1:0;const fields=job.schedule.trim().split(/\\s+/);if(fields.length!==5)return 0;
+const [, ,dom,month,dow]=fields;if(!cronFieldValues(month,1,12).has(date.getUTCMonth()+1))return 0;
+if(dom!=="*"&&!cronFieldValues(dom,1,31).has(date.getUTCDate()))return 0;
+if(dow!=="*"&&!cronFieldValues(dow,0,7).has(date.getUTCDay())&&
+!(date.getUTCDay()===0&&cronFieldValues(dow,0,7).has(7)))return 0;
+if(job.command.includes("--only-at"))return 1;
+return cronFieldValues(fields[0],0,59).size*cronFieldValues(fields[1],0,23).size}
+function cronRow(job,events,days,today){const firstEvent=events.length?
+[...events].sort((a,b)=>a.time.localeCompare(b.time))[0].time.slice(0,10):today;
+const cells=days.map(date=>{const key=dayKey(date);
+const runs=events.filter(event=>dayKey(utcDate(event.time))===key).sort((a,b)=>a.time.localeCompare(b.time));
+const planned=key>=firstEvent?plannedRuns(job,date):0;const displayedRuns=planned===1&&runs.length?
+[runs[runs.length-1]]:runs.slice(0,planned);
+const segments=Array.from({length:planned},(_,index)=>{const status=index<displayedRuns.length?
+statusLabel(displayedRuns[index].status):(key===today?"scheduled":"missed");
+return `<i class="run-segment ${esc(status)}" title="${esc(index<displayedRuns.length?
+displayedRuns[index].time+" — "+status:"planned — "+status)}"></i>`}).join("");
+const details=`${key} · planned ${planned} · recorded ${runs.length}`+
+(runs.length?"\\n"+runs.map(event=>`${event.time} — ${statusLabel(event.status)}`).join("\\n"):"");
+const cols=Math.max(1,Math.ceil(Math.sqrt(planned)));return `<div class="cron-day-slot"><div
+class="cron-day ${runs.length?"has-runs":""} ${key===today?"today":""}"
+style="--segment-cols:${cols}" title="${esc(details)}" aria-label="${esc(details)}">${segments}</div></div>`}).join("");
 const completed=events.filter(event=>statusLabel(event.status)==="completed").length;
 return `<div class="cron-job-label" title="${esc(job.name)} · ${esc(job.schedule)}"><b>${esc(job.name)}</b>
 <div class="cron-job-stats">${esc(job.schedule)} · ${events.length} events${completed?` · ${completed} done`:""}</div>
@@ -282,6 +306,104 @@ def _label_cron_history(
         )
         labelled.append({**row, "job": job, "status": "launched"})
     return labelled
+
+
+_RETRY_RESULT = re.compile(
+    r"^\[(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] "
+    r"\[cron_retry:[^\]]+\] child exited rc=(?P<rc>\d+)$"
+)
+
+
+def _utc_string(value: dt.datetime) -> str:
+    return value.astimezone(dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _cron_execution_history(
+    jobs: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], set[str]]:
+    """Read actual child outcomes from each managed job's own execution logs.
+
+    The system CRON journal records scheduler invocations, including the second
+    DST-candidate invocation rejected by ``--only-at``.  ``cron_retry`` logs the
+    child exit exactly once per real attempt.  Non-wrapper jobs use the shared
+    ``scripts/logs/<script-stem>.jsonl`` convention.
+    """
+    rows: list[dict[str, str]] = []
+    authoritative: set[str] = set()
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=28)
+
+    for job in jobs:
+        command = job["command"]
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+
+        timezone_match = re.search(r"(?:^|\s)TZ=([A-Za-z0-9_+./-]+)", command)
+        timezone = ZoneInfo(timezone_match.group(1)) if timezone_match else dt.UTC
+        if "--log-out" in tokens:
+            authoritative.add(job["name"])
+            try:
+                log_path = Path(tokens[tokens.index("--log-out") + 1])
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except (IndexError, OSError):
+                lines = []
+            for line in lines:
+                match = _RETRY_RESULT.match(line)
+                if not match:
+                    continue
+                timestamp = dt.datetime.strptime(
+                    match.group("time"), "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone)
+                if timestamp.astimezone(dt.UTC) < cutoff:
+                    continue
+                rc = int(match.group("rc"))
+                rows.append(
+                    {
+                        "time": _utc_string(timestamp),
+                        "command": f"execution log · child rc={rc}",
+                        "job": job["name"],
+                        "status": "completed" if rc == 0 else "failed",
+                    }
+                )
+            continue
+
+        script_paths = [
+            Path(token)
+            for token in tokens
+            if token.endswith(".py") and Path(token).name != "cron_retry.py"
+        ]
+        if not script_paths:
+            continue
+        script_path = script_paths[-1]
+        jsonl_path = script_path.parent / "logs" / f"{script_path.stem}.jsonl"
+        if not jsonl_path.is_file():
+            continue
+        authoritative.add(job["name"])
+        try:
+            lines = jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                item = json.loads(line)
+                timestamp = dt.datetime.fromisoformat(str(item["ts"]).replace("Z", "+00:00"))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if timestamp.astimezone(dt.UTC) < cutoff:
+                continue
+            status = str(item.get("status", "")).lower()
+            rows.append(
+                {
+                    "time": _utc_string(timestamp),
+                    "command": f"execution log · status={status or 'unknown'}",
+                    "job": job["name"],
+                    "status": "completed" if status in {"ok", "completed", "success"} else "failed",
+                }
+            )
+
+    rows.sort(key=lambda row: row["time"], reverse=True)
+    return rows, authoritative
 
 
 def _systemd_scheduler_job(settings: Settings) -> dict[str, str]:
@@ -421,13 +543,21 @@ def create_admin_routes(
             asyncio.to_thread(_systemd_scheduler_history),
         )
         cron_jobs = _cron_jobs(crontab)
+        execution_history, authoritative_jobs = await asyncio.to_thread(
+            _cron_execution_history, cron_jobs
+        )
+        journal_history = [
+            row
+            for row in _label_cron_history(cron_jobs, history)
+            if row["job"] not in authoritative_jobs
+        ]
         return web.json_response(
             {
                 "sessions": sessions,
                 "crontab": crontab,
                 "cron_jobs": [service_job, *cron_jobs],
                 "cron_history": sorted(
-                    [*_label_cron_history(cron_jobs, history), *service_history],
+                    [*execution_history, *journal_history, *service_history],
                     key=lambda row: row["time"],
                     reverse=True,
                 ),

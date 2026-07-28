@@ -48,18 +48,30 @@ padding:10px;border-radius:8px;
 max-height:320px;overflow:auto}.messages{max-height:300px;overflow:auto;margin:10px 0}.msg{border-left:2px
 solid var(--line);padding:5px 9px;margin:4px 0}.meta{font-size:12px;color:var(--muted)}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
-.cron-history{display:grid;gap:14px}.cron-run{padding:0;overflow:hidden}.cron-run-head{padding:15px 16px;
-border-bottom:1px solid var(--line)}.cron-calendar-wrap{overflow-x:auto;padding:14px 16px 16px}
-.cron-calendar{display:grid;grid-template-columns:repeat(7,minmax(112px,1fr));gap:8px;min-width:820px}
-.cron-day{min-height:92px;background:var(--surface);border:1px solid var(--line);border-radius:9px;
-padding:9px}.cron-day.today{border-color:var(--blue)}.cron-date{display:flex;justify-content:space-between;
-color:var(--muted);font-size:12px}.cron-date b{color:var(--text)}.run-dots{display:flex;gap:5px;
-flex-wrap:wrap;align-content:flex-start;margin-top:12px}.run-dot{width:11px;height:11px;border-radius:3px;
-background:var(--blue);box-shadow:inset 0 0 0 1px #ffffff24}.run-dot.success{background:var(--green)}
-.run-dot.running{background:#f5a524}.run-dot.scheduled{background:var(--muted)}
-.run-count{margin-top:8px;font-size:12px;color:var(--muted)}.cron-empty{margin-top:12px;color:var(--muted);
-font-size:12px}.cron-legend{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 12px}.legend-item{display:flex;
-align-items:center;gap:6px}.history-log{margin-top:16px}.history-log .table-wrap{overflow:auto}
+.cron-toolbar{margin-bottom:12px}.cron-legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);
+font-size:12px}.legend-item{display:flex;align-items:center;gap:6px}.run-dot{width:10px;height:10px;
+border-radius:3px;background:var(--blue);box-shadow:inset 0 0 0 1px #ffffff24}.run-dot.success,
+.cron-day.success{background:var(--green)}.run-dot.running,.cron-day.running{background:#f5a524}
+.run-dot.scheduled,.cron-day.scheduled{background:#697386}.run-dot.failed,.cron-day.failed{background:var(--red)}
+.cron-board{padding:0;overflow:hidden}.cron-board-head{padding:13px 16px;border-bottom:1px solid var(--line)}
+.cron-scroll{overflow-x:auto}.cron-grid{display:grid;grid-template-columns:220px repeat(28,24px);
+column-gap:5px;row-gap:0;min-width:1048px;padding:12px 16px 16px;align-items:center}
+.cron-grid-head{display:contents}.cron-axis-label{font-size:11px;color:var(--muted);padding-bottom:7px}
+.cron-axis-day{text-align:center;font-size:9px;color:var(--muted);padding-bottom:7px;line-height:1.1}
+.cron-axis-day.week-start{color:var(--text)}.cron-job-label{min-width:0;padding:10px 14px 10px 0;
+border-top:1px solid var(--line)}.cron-job-label b{display:block;white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis}.cron-job-stats{font-size:11px;color:var(--muted);margin-top:2px}
+.cron-day-slot{height:38px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:center}
+.cron-day{position:relative;width:22px;height:22px;border-radius:5px;background:var(--surface);
+border:1px solid var(--line);transition:transform .12s,border-color .12s}.cron-day.has-runs{border-color:#ffffff20}
+.cron-day:hover{transform:scale(1.18);z-index:2;border-color:var(--text)}.cron-day.today{
+outline:2px solid var(--blue);outline-offset:2px}.cron-day.future{opacity:.32}
+.cron-day.multi:after{content:"";position:absolute;right:2px;bottom:2px;width:4px;height:4px;
+border-radius:50%;background:#fff;box-shadow:0 0 0 1px #0004}.cron-day.failed{border-color:var(--red)}
+.cron-empty-board{padding:18px;color:var(--muted)}.cron-config,.history-log{margin-top:14px}
+.cron-config .table-wrap,.history-log .table-wrap{overflow:auto}summary{cursor:pointer}
+@media(max-width:700px){main{padding:18px}.cron-grid{grid-template-columns:170px repeat(28,24px);
+min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-index:3}}
 </style></head><body><main><div class="row spread"><div><h1>Sloperator</h1>
 <div class="sub">localhost admin · access via SSH tunnel</div></div>
 <button id="theme-toggle" onclick="toggleTheme()" aria-label="Переключить тему"></button></div>
@@ -69,13 +81,14 @@ align-items:center;gap:6px}.history-log{margin-top:16px}.history-log .table-wrap
 </nav>
 <section id="panel-agents" class="panel"><h2>Agent sessions</h2>
 <div id="sessions" class="grid"></div></section>
-<section id="panel-cron" class="panel"><h2>Scheduled jobs</h2><div id="cron" class="card"></div>
-<h2>Launch history</h2><div class="cron-legend">
+<section id="panel-cron" class="panel"><h2>Cron runs</h2><div class="cron-toolbar row spread">
+<span class="sub">Last 28 days · UTC</span><div class="cron-legend">
 <span class="legend-item"><i class="run-dot success"></i>Completed</span>
 <span class="legend-item"><i class="run-dot running"></i>Running</span>
 <span class="legend-item"><i class="run-dot"></i>Launched</span>
 <span class="legend-item"><i class="run-dot scheduled"></i>Scheduled</span>
-</div><div id="history" class="cron-history"></div></section></main>
+</div></div><div id="history"></div><details class="card cron-config"><summary>Schedules and commands</summary>
+<div id="cron"></div></details></section></main>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -120,35 +133,42 @@ for(const card of root.querySelectorAll("[data-session]")){const state=previous.
 if(!state)continue;const details=card.querySelector("details");const messages=card.querySelector(".messages");
 const draft=card.querySelector("textarea");if(details)details.open=state.open;if(messages)messages.scrollTop=state.scroll;
 if(draft)draft.value=state.draft}}
-const weekdays=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 function utcDate(value){return new Date(value.replace(" UTC","Z").replace(" ","T"))}
 function calendarDays(){const today=new Date();const end=new Date(Date.UTC(today.getUTCFullYear(),
-today.getUTCMonth(),today.getUTCDate()));return Array.from({length:7},(_,index)=>{
-const date=new Date(end);date.setUTCDate(end.getUTCDate()-6+index);return date})}
+today.getUTCMonth(),today.getUTCDate()));return Array.from({length:28},(_,index)=>{
+const date=new Date(end);date.setUTCDate(end.getUTCDate()-27+index);return date})}
 function dayKey(date){return date.toISOString().slice(0,10)}
 function statusLabel(status){return {completed:"completed",started:"running",launched:"launched",
 scheduled:"scheduled"}[status]||status}
-function cronCalendar(job,events){const days=calendarDays();const today=dayKey(days[6]);
-const cells=days.map(date=>{const key=dayKey(date);const runs=events.filter(event=>
-dayKey(utcDate(event.time))===key);const dots=runs.slice(0,35).map(event=>
-`<i class="run-dot ${esc(statusLabel(event.status))}" title="${esc(event.time)} ·
-${esc(statusLabel(event.status))}"></i>`).join("");return `<div class="cron-day ${key===today?"today":""}">
-<div class="cron-date"><b>${weekdays[date.getUTCDay()]}</b><span>${date.getUTCDate()} ${date.toLocaleString(
-"en",{month:"short",timeZone:"UTC"})}</span></div>${runs.length?`<div class="run-dots">${dots}</div>
-<div class="run-count">${runs.length} ${runs.length===1?"event":"events"}</div>`:
-'<div class="cron-empty">No runs</div>'}</div>`}).join("");
-return `<section class="card cron-run"><div class="cron-run-head row spread"><div><b>${esc(job.name)}</b>
-<div class="meta">${esc(job.schedule)}</div></div><span class="badge">${events.length} events · 7 days</span>
-</div><div class="cron-calendar-wrap"><div class="cron-calendar">${cells}</div></div></section>`}
+const statusRank={failed:5,running:4,completed:3,launched:2,scheduled:1};
+function dayStatus(runs){return runs.reduce((best,event)=>statusRank[statusLabel(event.status)]>
+(statusRank[best]||0)?statusLabel(event.status):best,"")}
+function cronRow(job,events,days,today){const cells=days.map(date=>{const key=dayKey(date);
+const runs=events.filter(event=>dayKey(utcDate(event.time))===key);const status=dayStatus(runs);
+const details=runs.length?runs.map(event=>`${event.time} — ${statusLabel(event.status)}`).join("\\n"):
+`${key} — no runs`;return `<div class="cron-day-slot"><div class="cron-day ${esc(status)}
+${runs.length?"has-runs":""} ${runs.length>1?"multi":""} ${key===today?"today":""}"
+title="${esc(details)}" aria-label="${esc(details)}"></div></div>`}).join("");
+const completed=events.filter(event=>statusLabel(event.status)==="completed").length;
+return `<div class="cron-job-label" title="${esc(job.name)} · ${esc(job.schedule)}"><b>${esc(job.name)}</b>
+<div class="cron-job-stats">${esc(job.schedule)} · ${events.length} events${completed?` · ${completed} done`:""}</div>
+</div>${cells}`}
 function renderCronHistory(jobs,events){const root=document.getElementById("history");
-const calendars=jobs.map(job=>cronCalendar(job,events.filter(event=>event.job===job.name))).join("");
-const rows=events.map(event=>`<tr><td>${esc(event.time)}</td><td>${esc(event.job||"unknown")}</td>
+const days=calendarDays(),today=dayKey(days[days.length-1]);const axis=days.map(date=>{
+const monday=date.getUTCDay()===1;return `<div class="cron-axis-day ${monday?"week-start":""}"
+title="${dayKey(date)}">${monday?date.toLocaleString("en",{month:"short",day:"numeric",timeZone:"UTC"}):
+date.getUTCDate()}</div>`}).join("");const gridRows=jobs.map(job=>
+cronRow(job,events.filter(event=>event.job===job.name),days,today)).join("");
+const eventRows=events.map(event=>`<tr><td>${esc(event.time)}</td><td>${esc(event.job||"unknown")}</td>
 <td><span class="badge ${esc(statusLabel(event.status))}">${esc(statusLabel(event.status))}</span></td>
 <td><code>${esc(event.command)}</code></td></tr>`).join("");
-root.innerHTML=(calendars||'<div class="card sub">No scheduled jobs</div>')+
-`<details class="card history-log"><summary>Event log</summary><div class="table-wrap"><table><thead>
-<tr><th>Time</th><th>Job</th><th>Status</th><th>Command</th></tr></thead><tbody>${rows||
-'<tr><td colspan="4" class="sub">No events in the last 7 days</td></tr>'}</tbody></table></div></details>`}
+root.innerHTML=jobs.length?`<section class="card cron-board"><div class="cron-board-head row spread">
+<b>Run calendar</b><span class="badge">${jobs.length} jobs</span></div><div class="cron-scroll">
+<div class="cron-grid"><div class="cron-axis-label">Job / schedule</div>${axis}${gridRows}</div></div></section>`:
+'<div class="card cron-empty-board">No scheduled jobs</div>';
+root.innerHTML+=`<details class="card history-log"><summary>Event log</summary><div class="table-wrap"><table><thead>
+<tr><th>Time</th><th>Job</th><th>Status</th><th>Command</th></tr></thead><tbody>${eventRows||
+'<tr><td colspan="4" class="sub">No events in the last 28 days</td></tr>'}</tbody></table></div></details>`}
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
 document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr><th>Job</th>
@@ -206,7 +226,7 @@ def _cron_history() -> list[dict[str, str]]:
             "-t",
             "CRON",
             "--since",
-            "7 days ago",
+            "28 days ago",
             "-n",
             "200",
         ],
@@ -293,7 +313,7 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
             "-u",
             "sloperator",
             "--since",
-            "7 days ago",
+            "28 days ago",
             "-n",
             "300",
         ],

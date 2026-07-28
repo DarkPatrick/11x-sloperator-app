@@ -80,9 +80,11 @@ def test_cron_history_is_labelled_for_calendar() -> None:
     ]
 
 
-def test_admin_contains_seven_day_cron_calendar() -> None:
-    assert "Array.from({length:7}" in ADMIN_HTML
-    assert 'class="cron-calendar"' in ADMIN_HTML
+def test_admin_contains_airflow_style_28_day_cron_grid() -> None:
+    assert "Array.from({length:28}" in ADMIN_HTML
+    assert 'class="cron-grid"' in ADMIN_HTML
+    assert "function cronRow(job,events,days,today)" in ADMIN_HTML
+    assert "Last 28 days · UTC" in ADMIN_HTML
     assert "renderCronHistory(d.cron_jobs,d.cron_history)" in ADMIN_HTML
 
 

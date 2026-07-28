@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from sloperator.agents import (
+    AgentExecutionError,
     AgentOrchestrator,
     extract_artifact,
     parse_agent_request,
+    retry_agent_service_errors,
     split_slack_message,
     thread_key,
 )
@@ -48,6 +50,48 @@ def test_parse_agent_request_rejects_empty_prompt(settings: Settings) -> None:
 def test_thread_key_starts_new_session_for_top_level_message() -> None:
     assert thread_key("100.1", None) == "100.1"
     assert thread_key("100.2", "100.1") == "100.1"
+
+
+async def test_agent_service_errors_retry_with_progressive_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = AsyncMock(
+        side_effect=(
+            AgentExecutionError("overloaded"),
+            AgentExecutionError("service unavailable"),
+            "completed",
+        )
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("sloperator.agents.asyncio.sleep", sleep)
+
+    result = await retry_agent_service_errors(
+        operation,
+        context="test turn",
+        delays=(15, 30, 60),
+    )
+
+    assert result == "completed"
+    assert operation.await_count == 3
+    assert [call.args[0] for call in sleep.await_args_list] == [15, 30]
+
+
+async def test_agent_service_error_is_raised_only_after_all_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = AsyncMock(side_effect=AgentExecutionError("unavailable"))
+    sleep = AsyncMock()
+    monkeypatch.setattr("sloperator.agents.asyncio.sleep", sleep)
+
+    with pytest.raises(AgentExecutionError, match="unavailable"):
+        await retry_agent_service_errors(
+            operation,
+            context="test turn",
+            delays=(15, 30),
+        )
+
+    assert operation.await_count == 3
+    assert [call.args[0] for call in sleep.await_args_list] == [15, 30]
 
 
 def test_split_slack_message_preserves_all_text() -> None:

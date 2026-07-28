@@ -9,21 +9,23 @@ import os
 import re
 import signal
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-from sloperator.codex_app_server import CodexAppServer
+from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
 from sloperator.config import Settings
 from sloperator.store import AgentSession, EventStore
 from sloperator.vpn import VpnManager, VpnState
 
 LOGGER = logging.getLogger(__name__)
+AGENT_RETRY_DELAYS = (15, 30, 60, 120, 240)
 DIRECTIVE_RE = re.compile(
     r"^\[(?P<provider>claude|codex)(?::(?P<model>[A-Za-z0-9._:-]{1,100}))?\]\s*",
     re.IGNORECASE,
@@ -63,6 +65,29 @@ class AgentExecutionError(RuntimeError):
 
 class AgentSteeringInterrupt(RuntimeError):
     """Raised after a Claude process was interrupted for new user guidance."""
+
+
+async def retry_agent_service_errors[AgentResult](
+    operation: Callable[[], Awaitable[AgentResult]],
+    *,
+    context: str,
+    delays: Sequence[float] = AGENT_RETRY_DELAYS,
+) -> AgentResult:
+    """Retry transient agent-provider failures with exponential backoff."""
+    for retry_number, delay in enumerate(delays, start=1):
+        try:
+            return await operation()
+        except AgentExecutionError as error:
+            LOGGER.warning(
+                "Agent service failure during %s; retry %d/%d in %.0f seconds: %s",
+                context,
+                retry_number,
+                len(delays),
+                delay,
+                type(error).__name__,
+            )
+            await asyncio.sleep(delay)
+    return await operation()
 
 
 class SubmitResult(StrEnum):
@@ -392,9 +417,7 @@ async def run_codex(
                 session_id,
             )
         effective_prompt = (
-            f"{INITIAL_INSTRUCTION}{prompt}"
-            if session.external_session_id is None
-            else prompt
+            f"{INITIAL_INSTRUCTION}{prompt}" if session.external_session_id is None else prompt
         )
         text = await server.run_turn(effective_prompt)
         return AgentRunResult(session_id=session_id, text=text)
@@ -402,6 +425,8 @@ async def run_codex(
         raise AgentExecutionError(
             f"Agent turn exceeded the {settings.agent_timeout_seconds}-second timeout"
         ) from None
+    except CodexAppServerError as error:
+        raise AgentExecutionError("Codex agent service request failed") from error
     finally:
         control.codex = None
         await server.close()
@@ -424,6 +449,18 @@ class AgentOrchestrator:
         self._tasks: set[asyncio.Task[None]] = set()
         self._thread_tasks: dict[tuple[str, str], set[asyncio.Task[None]]] = {}
         self._active_runs: dict[tuple[str, str], ActiveAgentRun] = {}
+
+    async def _run_with_retries[AgentResult](
+        self,
+        operation: Callable[[], Awaitable[AgentResult]],
+        *,
+        context: str,
+    ) -> AgentResult:
+        async def run_with_capacity() -> AgentResult:
+            async with self._semaphore:
+                return await operation()
+
+        return await retry_agent_service_errors(run_with_capacity, context=context)
 
     async def submit(
         self,
@@ -508,7 +545,8 @@ class AgentOrchestrator:
         )
         run_settings = replace(self.settings, agent_timeout_seconds=timeout_seconds)
         control = ActiveAgentRun(session.provider)
-        async with self._semaphore:
+
+        async def execute_provider() -> AgentRunResult:
             environment_overrides = (
                 self.vpn.agent_environment()
                 if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
@@ -531,6 +569,12 @@ class AgentOrchestrator:
                     self.store,
                     environment_overrides,
                 )
+            return result
+
+        result = await self._run_with_retries(
+            execute_provider,
+            context="scheduled agent turn",
+        )
         response, artifact = extract_artifact(result.text, self.settings.agent_workspace)
         if artifact is not None:
             LOGGER.warning(
@@ -671,7 +715,7 @@ class AgentOrchestrator:
         lock = self._locks.setdefault(key, asyncio.Lock())
         request_status = "failed"
         try:
-            async with lock, self._semaphore:
+            async with lock:
                 session = await asyncio.to_thread(
                     self.store.get_agent_session,
                     channel_id,
@@ -729,8 +773,7 @@ class AgentOrchestrator:
                 self._active_runs[key] = control
                 environment_overrides = (
                     self.vpn.agent_environment()
-                    if self.vpn is not None
-                    and await self.vpn.state() is VpnState.CONNECTED
+                    if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
                     else None
                 )
                 try:
@@ -739,19 +782,23 @@ class AgentOrchestrator:
                         force_resume = False
                         while True:
                             try:
-                                result = await run_claude(
-                                    replace(
-                                        self.settings,
-                                        agent_timeout_seconds=(
-                                            timeout_seconds
-                                            or self.settings.agent_timeout_seconds
+                                result = await self._run_with_retries(
+                                    partial(
+                                        run_claude,
+                                        replace(
+                                            self.settings,
+                                            agent_timeout_seconds=(
+                                                timeout_seconds
+                                                or self.settings.agent_timeout_seconds
+                                            ),
                                         ),
+                                        session,
+                                        prompt,
+                                        control,
+                                        force_resume=force_resume,
+                                        environment_overrides=environment_overrides,
                                     ),
-                                    session,
-                                    prompt,
-                                    control,
-                                    force_resume=force_resume,
-                                    environment_overrides=environment_overrides,
+                                    context=f"Slack thread {thread_ts}",
                                 )
                             except AgentSteeringInterrupt:
                                 additions = control.take_claude_steering()
@@ -772,19 +819,21 @@ class AgentOrchestrator:
                             prompt = _claude_steering_prompt(additions)
                             force_resume = True
                     else:
-                        result = await run_codex(
-                            replace(
-                                self.settings,
-                                agent_timeout_seconds=(
-                                    timeout_seconds
-                                    or self.settings.agent_timeout_seconds
+                        result = await self._run_with_retries(
+                            lambda: run_codex(
+                                replace(
+                                    self.settings,
+                                    agent_timeout_seconds=(
+                                        timeout_seconds or self.settings.agent_timeout_seconds
+                                    ),
                                 ),
+                                session,
+                                parsed.prompt,
+                                control,
+                                self.store,
+                                environment_overrides,
                             ),
-                            session,
-                            parsed.prompt,
-                            control,
-                            self.store,
-                            environment_overrides,
+                            context=f"Slack thread {thread_ts}",
                         )
                 finally:
                     if self._active_runs.get(key) is control:

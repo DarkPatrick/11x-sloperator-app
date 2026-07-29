@@ -17,6 +17,7 @@ from slack_sdk.web.async_slack_response import AsyncSlackResponse
 from sloperator.store import EventStore
 
 LOGGER = logging.getLogger(__name__)
+NewMessageHandler = Callable[[str, Mapping[str, Any]], Awaitable[None]]
 CHANNEL_METADATA_EVENTS = {
     "channel_archive",
     "channel_created",
@@ -103,9 +104,12 @@ async def _list_conversations(
 
 
 async def synchronize_archive(
-    client: AsyncWebClient, store: EventStore, backfill_limit: int
+    client: AsyncWebClient,
+    store: EventStore,
+    backfill_limit: int,
+    on_new_message: NewMessageHandler | None = None,
 ) -> None:
-    """Discover visible conversations and backfill bounded accessible history."""
+    """Discover conversations, archive history, and dispatch newly discovered messages."""
     auth = await client.auth_test()
     await asyncio.to_thread(
         store.upsert_workspace,
@@ -153,7 +157,28 @@ async def synchronize_archive(
             continue
         history_data = _response_data(response)
         messages: list[Mapping[str, Any]] = history_data.get("messages", [])
+        new_messages: list[Mapping[str, Any]] = []
+        message_handler = on_new_message
+        if message_handler is not None:
+            for message in messages:
+                message_ts = message.get("ts")
+                if isinstance(message_ts, str) and not await asyncio.to_thread(
+                    store.contains_message,
+                    channel_id,
+                    message_ts,
+                ):
+                    new_messages.append(message)
         await asyncio.to_thread(store.upsert_history_messages, channel_id, messages)
+        for message in new_messages:
+            try:
+                assert message_handler is not None
+                await message_handler(channel_id, message)
+            except Exception:
+                LOGGER.exception(
+                    "New Slack history message handler failed for %s/%s",
+                    channel_id,
+                    message.get("ts"),
+                )
 
         for message in messages:
             latest_reply = message.get("latest_reply")
@@ -192,12 +217,18 @@ async def periodically_synchronize_archive(
     store: EventStore,
     backfill_limit: int,
     interval_seconds: int,
+    on_new_message: NewMessageHandler | None = None,
 ) -> None:
     """Continuously reconcile history so missed events are eventually stored."""
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            await synchronize_archive(client, store, backfill_limit)
+            await synchronize_archive(
+                client,
+                store,
+                backfill_limit,
+                on_new_message=on_new_message,
+            )
         except Exception:
             LOGGER.exception("Periodic Slack archive synchronization failed")
 

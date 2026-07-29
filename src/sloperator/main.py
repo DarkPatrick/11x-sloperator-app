@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from collections.abc import Mapping
 from contextlib import suppress
 
 from aiohttp import web
@@ -19,6 +20,10 @@ from sloperator.config import ConfigurationError, Settings
 from sloperator.experiment_finalizer import cancel_task, run_daily
 from sloperator.health import create_health_app
 from sloperator.store import EventStore
+from sloperator.subscription_flow import (
+    SubscriptionFlowResponder,
+    is_subscription_flow_event,
+)
 from sloperator.vpn import VpnError, VpnManager, VpnState
 
 LOGGER = logging.getLogger(__name__)
@@ -42,7 +47,23 @@ async def serve(settings: Settings) -> None:
         LOGGER.warning("Recovered %d interrupted agent session(s)", recovered)
     vpn = VpnManager(settings)
     orchestrator = AgentOrchestrator(settings, store, vpn)
-    app = create_app(settings, store, orchestrator, vpn)
+    subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
+    app = create_app(
+        settings,
+        store,
+        orchestrator,
+        vpn,
+        subscription_flow_responder=subscription_flow_responder,
+    )
+
+    async def handle_new_history_message(
+        channel_id: str,
+        message: Mapping[str, object],
+    ) -> None:
+        event = {**message, "channel": channel_id}
+        if is_subscription_flow_event(event, settings):
+            await subscription_flow_responder.handle(event, app.client)
+
     slack_handler = AsyncSocketModeHandler(app, settings.app_token)
     http_app = create_health_app()
     create_admin_routes(http_app, store, orchestrator, app.client)
@@ -70,6 +91,7 @@ async def serve(settings: Settings) -> None:
                 store,
                 settings.backfill_limit,
                 settings.sync_interval_seconds,
+                on_new_message=handle_new_history_message,
             ),
             name="slack-archive-sync",
         )

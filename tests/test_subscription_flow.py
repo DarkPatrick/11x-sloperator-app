@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
 from sloperator.config import Settings
+from sloperator.store import EventStore
 from sloperator.subscription_flow import (
+    SubscriptionFlowResponder,
     build_subscription_flow_agent_prompt,
     is_subscription_flow_event,
     parse_recovered_component,
@@ -91,3 +99,33 @@ def test_agent_prompt_contains_detector_context_and_skill() -> None:
     assert "/home/egor/projects/ug-ai-analyst" in prompt
     assert "upstream store/processor signal" in prompt
     assert "SERIOUS — Web renewals" in prompt
+
+
+@pytest.mark.asyncio
+async def test_concurrent_live_and_history_delivery_launches_one_agent(tmp_path) -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+    )
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    agent = SimpleNamespace(submit=AsyncMock())
+    client = SimpleNamespace(
+        auth_test=AsyncMock(return_value={"user_id": "USELF"}),
+    )
+    responder = SubscriptionFlowResponder(settings, store, agent)
+    event = {
+        "channel": settings.subscription_flow_alert_channel,
+        "user": "USELF",
+        "bot_id": "BSELF",
+        "ts": "100.1",
+        "text": _serious_alert("Android recurring charges", "Android"),
+    }
+
+    await asyncio.gather(
+        responder.handle(dict(event), client),
+        responder.handle(dict(event), client),
+    )
+
+    agent.submit.assert_awaited_once()

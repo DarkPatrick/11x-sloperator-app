@@ -5,9 +5,24 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from sloperator.agents import HeadlessAgentRun
 from sloperator.config import Settings
-from sloperator.experiment_finalizer import FINALIZATION_PROMPT, next_run_at, run_once
+from sloperator.experiment_finalizer import (
+    FINALIZATION_PROMPT,
+    InvalidFinalizationNotification,
+    next_run_at,
+    normalize_finalization_notification,
+    run_once,
+)
+
+VALID_NOTIFICATION = (
+    "[Project](https://alice.example/project) — experiment "
+    "[7607](https://www.ultimate-guitar.com/components/ab/experiment/view?id=7607), "
+    "Iteration 3. Results calculated and published.\n\n"
+    "• Conclusion\n"
+)
 
 
 def test_next_run_uses_cyprus_wall_clock_and_dst() -> None:
@@ -55,7 +70,7 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
         provider="claude",
         model="opus",
         session_id="session-1",
-        text="Final result",
+        text=VALID_NOTIFICATION,
     )
     agent = SimpleNamespace(
         execute_once=AsyncMock(return_value=run),
@@ -70,12 +85,37 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
 
     result = await run_once(client, agent, settings)
 
-    assert result == "Final result"
+    assert result == VALID_NOTIFICATION.strip()
     agent.execute_once.assert_awaited_once_with(FINALIZATION_PROMPT, 5_400)
     client.chat_postMessage.assert_awaited_once_with(
         channel="UOWNER",
-        markdown_text="Final result",
+        markdown_text=VALID_NOTIFICATION.strip(),
         unfurl_links=False,
         unfurl_media=False,
     )
-    agent.attach_session.assert_awaited_once_with("DOWNER", "100.1", run)
+    attached_run = agent.attach_session.await_args.args[2]
+    assert attached_run.text == VALID_NOTIFICATION.strip()
+    assert attached_run.session_id == run.session_id
+
+
+def test_notification_normalizer_removes_operational_preamble() -> None:
+    text = (
+        "No pending design-review artifacts. Everything is verified.\n\n"
+        f"{VALID_NOTIFICATION}"
+    )
+
+    assert normalize_finalization_notification(text) == VALID_NOTIFICATION.strip()
+
+
+def test_notification_normalizer_allows_explicit_no_op_and_failure() -> None:
+    assert normalize_finalization_notification(
+        "No eligible experiment after checking the configured window."
+    ).startswith("No eligible experiment")
+    assert normalize_finalization_notification(
+        "Experiment finalisation failed: calculator timed out."
+    ).startswith("Experiment finalisation failed:")
+
+
+def test_notification_normalizer_rejects_unstructured_agent_commentary() -> None:
+    with pytest.raises(InvalidFinalizationNotification):
+        normalize_finalization_notification("Everything is published and verified.")

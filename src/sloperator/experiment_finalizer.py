@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import logging
 from contextlib import suppress
+from dataclasses import replace
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,11 @@ from sloperator.agents import HeadlessAgentRun
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
+NO_OP_PREFIX = "No eligible experiment"
+FAILURE_PREFIXES = (
+    "Experiment finalisation failed:",
+    "Experiment finalization failed:",
+)
 
 FINALIZATION_PROMPT = """\
 This is the authorised daily autonomous experiment-finalisation job. Complete the whole
@@ -88,6 +94,8 @@ Notification:
   the calculation, Confluence publication and verification, and Jira comment verification have
   all completed. Return that notification solely as the final response; do not send it yourself.
 - Return the notification only in your final response; do not send it yourself through Slack tools.
+- Never prefix the notification with artifact, design-review, validation, publication, verification,
+  or other operational commentary. Sloperator rejects text outside the formats below.
 - Do not return `SLOPERATOR_ARTIFACT` and do not attach analysis artifacts to Slack. The analysis
   bundle belongs only on the project page as described above.
 - Start with exactly one compact heading sentence. Render it on one line in this shape:
@@ -103,6 +111,9 @@ Notification:
 - Do not include a separate Project page line, Jira link/key/epic, Execution audit, calculation
   metadata, verification details, artifact list, file paths, or any other operational appendix.
   After the heading, mentions, and at most two conclusion bullets, stop.
+- For the no-eligible-candidate path, start with exactly `No eligible experiment` and give only the
+  short no-op report. For a failed workflow, start with exactly `Experiment finalisation failed:`
+  and give only the concise operator-facing failure. Do not put any text before these prefixes.
 
 Use the current date/time in Asia/Nicosia for all relative-date and completion decisions.
 Never finalise more than one experiment in this run.
@@ -118,6 +129,30 @@ class AgentSubmitter(Protocol):
         thread_ts: str,
         run: HeadlessAgentRun,
     ) -> None: ...
+
+
+class InvalidFinalizationNotification(ValueError):
+    """The scheduled agent returned text that is unsafe to publish directly."""
+
+
+def normalize_finalization_notification(text: str) -> str:
+    """Remove model preamble and enforce one of the production notification shapes."""
+    stripped = text.strip()
+    lines = stripped.splitlines()
+    for index, line in enumerate(lines):
+        candidate = line.strip()
+        if (
+            candidate.startswith(("[", "<http"))
+            and " — experiment " in candidate
+            and "components/ab/experiment/view?id=" in candidate
+            and "Results calculated and published." in candidate
+        ):
+            return "\n".join(lines[index:]).strip()
+    if stripped.startswith((NO_OP_PREFIX, *FAILURE_PREFIXES)):
+        return stripped
+    raise InvalidFinalizationNotification(
+        "Scheduled agent response has no valid completion, no-op, or failure heading"
+    )
 
 
 def next_run_at(
@@ -146,9 +181,11 @@ async def run_once(
         FINALIZATION_PROMPT,
         settings.experiment_finalizer_timeout_seconds,
     )
+    notification = normalize_finalization_notification(run.text)
+    published_run = replace(run, text=notification)
     response = await client.chat_postMessage(
         channel=settings.slack_user_id,
-        markdown_text=run.text,
+        markdown_text=notification,
         unfurl_links=False,
         unfurl_media=False,
     )
@@ -156,9 +193,9 @@ async def run_once(
     await agent.attach_session(
         channel_id,
         response["ts"],
-        run,
+        published_run,
     )
-    return run.text
+    return notification
 
 
 async def run_daily(
@@ -187,7 +224,8 @@ async def run_daily(
             await run_task
             LOGGER.info("Experiment finalizer run completed")
         except asyncio.CancelledError:
-            if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
                 if run_task is not None:
                     run_task.cancel()
                     with suppress(asyncio.CancelledError):

@@ -166,6 +166,7 @@ def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:
 def test_admin_supports_headless_agent_runs() -> None:
     assert "s.headless" in ADMIN_HTML
     assert "PID ${esc(s.process_id)} + subprocess tree" in ADMIN_HTML
+    assert 's.headless?"Prompt and result":"Thread messages"' in ADMIN_HTML
 
 
 def test_admin_contains_codex_session_chat_ui() -> None:

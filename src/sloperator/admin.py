@@ -145,8 +145,8 @@ return `<section class="card" data-session="${esc(k)}"><div class="row spread"><
 ${esc(s.runtime_status)}">${esc(s.runtime_status)}</span></div><div class="meta">${esc(s.provider)}:
 ${esc(s.model)} · turns ${s.turn_count} · updated ${esc(s.updated_at)}
 ${s.process_id?` · PID ${esc(s.process_id)} + subprocess tree`:""}</div>
-${s.last_error?`<pre>${esc(s.last_error)}</pre>`:""}${s.headless?"":`<details><summary>Thread messages</summary>
-<div class="messages">${msgs||'<span class="sub">No archived messages</span>'}</div></details>
+${s.last_error?`<pre>${esc(s.last_error)}</pre>`:""}<details><summary>${s.headless?"Prompt and result":"Thread messages"}</summary>
+<div class="messages">${msgs||'<span class="sub">No archived messages</span>'}</div></details>${s.headless?"":`
 <textarea id="m-${esc(s.thread_ts)}" placeholder="Message or steer this agent"></textarea>
 `}<div class="row">${s.headless?"":`<button onclick="send('${k}','m-${esc(s.thread_ts)}')">Send</button>`}
 <button onclick="action('/sessions/${k}/stop')" ${s.active?"":"disabled"}>Stop process</button>
@@ -600,8 +600,18 @@ def create_admin_routes(
 
     async def state(request: web.Request) -> web.Response:
         require_local(request)
+        runtime_headless = orchestrator.headless_sessions()
+        runtime_keys = {
+            (session["channel_id"], session["thread_ts"]) for session in runtime_headless
+        }
+        persisted_headless = await asyncio.to_thread(store.list_scheduled_agent_runs)
         sessions = [
-            *orchestrator.headless_sessions(),
+            *runtime_headless,
+            *(
+                session
+                for session in persisted_headless
+                if (session["channel_id"], session["thread_ts"]) not in runtime_keys
+            ),
             *await asyncio.to_thread(store.list_agent_sessions),
         ]
         active = orchestrator.active_keys()
@@ -658,7 +668,10 @@ def create_admin_routes(
         key = (request.match_info["channel"], request.match_info["thread"])
         await orchestrator.cancel(*key)
         closed = orchestrator.dismiss_headless(*key)
-        if not closed:
+        if key[0] == "scheduled":
+            deleted = await asyncio.to_thread(store.delete_scheduled_agent_run, key[1])
+            closed = closed or deleted
+        elif not closed:
             closed = await asyncio.to_thread(store.close_agent_session, *key)
         return web.json_response({"closed": closed})
 

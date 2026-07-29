@@ -117,6 +117,20 @@ CREATE TABLE IF NOT EXISTS admin_agent_messages (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS scheduled_agent_runs (
+    run_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL CHECK(provider IN ('claude', 'codex')),
+    model TEXT NOT NULL,
+    external_session_id TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    prompt TEXT NOT NULL,
+    result_text TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS admin_codex_sessions (
     session_id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -493,6 +507,111 @@ class EventStore:
                 """,
                 (channel_id, thread_ts, text),
             )
+
+    def create_scheduled_agent_run(
+        self,
+        run_id: str,
+        provider: str,
+        model: str,
+        external_session_id: str | None,
+        prompt: str,
+    ) -> None:
+        """Persist a headless cron run before the provider starts."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO scheduled_agent_runs(
+                    run_id, provider, model, external_session_id, prompt
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (run_id, provider, model, external_session_id, prompt),
+            )
+
+    def finish_scheduled_agent_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        external_session_id: str | None = None,
+        result_text: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        """Record the terminal state and final provider response of a cron run."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE scheduled_agent_runs
+                SET status = ?,
+                    external_session_id = COALESCE(?, external_session_id),
+                    turn_count = CASE WHEN ? = 'completed' THEN 1 ELSE turn_count END,
+                    result_text = COALESCE(?, result_text),
+                    last_error = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = ?
+                """,
+                (status, external_session_id, status, result_text, last_error, run_id),
+            )
+
+    def list_scheduled_agent_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return durable cron/headless runs in the agent-session UI shape."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT run_id, provider, model, external_session_id, status,
+                       turn_count, last_error, prompt, result_text,
+                       created_at, updated_at
+                FROM scheduled_agent_runs
+                ORDER BY datetime(updated_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            run_id = item.pop("run_id")
+            messages = [
+                {
+                    "message_ts": "prompt",
+                    "user_id": "scheduler",
+                    "bot_id": None,
+                    "text": item.pop("prompt"),
+                    "updated_at": item["created_at"],
+                }
+            ]
+            result_text = item.pop("result_text")
+            if result_text:
+                messages.append(
+                    {
+                        "message_ts": "result",
+                        "user_id": "agent",
+                        "bot_id": None,
+                        "text": result_text,
+                        "updated_at": item["updated_at"],
+                    }
+                )
+            result.append(
+                {
+                    **item,
+                    "channel_id": "scheduled",
+                    "channel_name": "Scheduled experiment finalizer",
+                    "thread_ts": run_id,
+                    "last_activity_at": item["updated_at"],
+                    "headless": True,
+                    "messages": messages,
+                }
+            )
+        return result
+
+    def delete_scheduled_agent_run(self, run_id: str) -> bool:
+        """Permanently remove one completed scheduled run from admin history."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM scheduled_agent_runs WHERE run_id = ?",
+                (run_id,),
+            )
+        return cursor.rowcount == 1
 
     def create_admin_codex_session(self, session_id: str, title: str) -> None:
         with self._connect() as connection:

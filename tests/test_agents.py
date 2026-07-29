@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,6 +18,7 @@ from sloperator.agents import (
     thread_key,
 )
 from sloperator.config import Settings
+from sloperator.store import EventStore
 
 
 @pytest.fixture
@@ -103,10 +105,13 @@ async def test_agent_service_error_is_raised_only_after_all_retries(
 async def test_headless_run_is_visible_and_disables_interactive_hooks(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     run_claude = AsyncMock(return_value=AgentRunResult(session_id="session-1", text="Final result"))
     monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
-    orchestrator = AgentOrchestrator(settings, SimpleNamespace())
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    orchestrator = AgentOrchestrator(settings, store)
 
     result = await orchestrator.execute_once("Automated work", 5_400)
 
@@ -118,7 +123,18 @@ async def test_headless_run_is_visible_and_disables_interactive_hooks(
     assert sessions[0]["headless"] is True
     assert sessions[0]["status"] == "completed"
     assert sessions[0]["active"] is False
-    assert orchestrator.dismiss_headless("scheduled", result.run_id)
+    persisted = store.list_scheduled_agent_runs()
+    assert persisted[0]["thread_ts"] == result.run_id
+    assert [message["text"] for message in persisted[0]["messages"]] == [
+        "Automated work",
+        "Final result",
+    ]
+
+    await orchestrator.attach_session("D123", "100.1", result)
+
+    assert orchestrator.headless_sessions() == []
+    assert store.list_scheduled_agent_runs()[0]["thread_ts"] == result.run_id
+    assert store.get_agent_session("D123", "100.1") is not None
 
 
 def test_split_slack_message_preserves_all_text() -> None:

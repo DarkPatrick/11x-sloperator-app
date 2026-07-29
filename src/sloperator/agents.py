@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -469,7 +470,7 @@ class AgentOrchestrator:
                     "active": active,
                     "runtime_status": "running" if active else session["status"],
                     "process_id": process_id,
-                    "messages": [],
+                    "messages": session.get("messages", []),
                 }
             )
         return sorted(rows, key=lambda row: str(row["updated_at"]), reverse=True)
@@ -593,7 +594,24 @@ class AgentOrchestrator:
             "updated_at": now,
             "last_activity_at": now,
             "headless": True,
+            "messages": [
+                {
+                    "message_ts": "prompt",
+                    "user_id": "scheduler",
+                    "bot_id": None,
+                    "text": parsed.prompt,
+                    "updated_at": now,
+                }
+            ],
         }
+        await asyncio.to_thread(
+            self.store.create_scheduled_agent_run,
+            run_id,
+            session.provider,
+            session.model,
+            session.external_session_id,
+            parsed.prompt,
+        )
         current_task = asyncio.current_task()
         if current_task is not None:
             self._headless_tasks[key] = current_task
@@ -634,9 +652,20 @@ class AgentOrchestrator:
             )
         except asyncio.CancelledError:
             self._headless_sessions[key].update(status="cancelled", last_error=None)
+            await asyncio.to_thread(
+                self.store.finish_scheduled_agent_run,
+                run_id,
+                status="cancelled",
+            )
             raise
         except Exception as error:
             self._headless_sessions[key].update(
+                status="failed",
+                last_error=repr(error),
+            )
+            await asyncio.to_thread(
+                self.store.finish_scheduled_agent_run,
+                run_id,
                 status="failed",
                 last_error=repr(error),
             )
@@ -658,6 +687,24 @@ class AgentOrchestrator:
             LOGGER.warning(
                 "Ignoring headless agent artifact marker; scheduled artifacts belong on Confluence"
             )
+        messages = self._headless_sessions[key]["messages"]
+        assert isinstance(messages, list)
+        messages.append(
+            {
+                "message_ts": "result",
+                "user_id": "agent",
+                "bot_id": None,
+                "text": response,
+                "updated_at": self._headless_sessions[key]["updated_at"],
+            }
+        )
+        await asyncio.to_thread(
+            self.store.finish_scheduled_agent_run,
+            run_id,
+            status="completed",
+            external_session_id=result.session_id,
+            result_text=response,
+        )
         return HeadlessAgentRun(
             provider=parsed.provider,
             model=parsed.model,
@@ -693,9 +740,9 @@ class AgentOrchestrator:
     async def cancel(self, channel_id: str, thread_ts: str) -> bool:
         """Cancel all queued or running turns belonging to one Slack thread."""
         key = (channel_id, thread_ts)
-        tasks = tuple(self._thread_tasks.get(key, ()))
+        tasks: list[asyncio.Task[Any]] = list(self._thread_tasks.get(key, ()))
         if headless_task := self._headless_tasks.get(key):
-            tasks = (*tasks, headless_task)
+            tasks.append(headless_task)
         if not tasks:
             return False
         for task in tasks:

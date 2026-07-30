@@ -179,6 +179,18 @@ def test_admin_contains_codex_session_chat_ui() -> None:
     assert 'document.getElementById("codex-input")?.value' in ADMIN_HTML
 
 
+def test_admin_contains_debounced_two_pane_sql_editor() -> None:
+    assert 'id="tab-sql"' in ADMIN_HTML
+    assert 'class="card sql-workbench"' in ADMIN_HTML
+    assert 'id="sql-input"' in ADMIN_HTML
+    assert 'id="sql-output"' in ADMIN_HTML
+    assert "setTimeout(requestSqlCompletion,7000)" in ADMIN_HTML
+    assert "if(input.value===sqlLastSent)return" in ADMIN_HTML
+    assert 'event.clipboardData?.getData("text")===suggestion' in ADMIN_HTML
+    assert '<option value="claude">Claude</option>' in ADMIN_HTML
+    assert '<option value="codex">Codex</option>' in ADMIN_HTML
+
+
 def test_systemd_scheduler_job_includes_schedule_and_runtime_state() -> None:
     settings = Settings(
         slack_user_id="UOWNER",

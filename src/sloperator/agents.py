@@ -343,6 +343,7 @@ async def run_claude(
     *,
     force_resume: bool = False,
     environment_overrides: dict[str, str] | None = None,
+    initial_instruction: str = INITIAL_INSTRUCTION,
 ) -> AgentRunResult:
     """Run or resume one Claude Code turn."""
     new_session = (
@@ -363,7 +364,7 @@ async def run_claude(
     ]
     if new_session:
         command.extend(("--session-id", session_id))
-        effective_prompt = f"{INITIAL_INSTRUCTION}{prompt}"
+        effective_prompt = f"{initial_instruction}{prompt}"
     else:
         command.extend(("--resume", session_id))
         effective_prompt = prompt
@@ -400,6 +401,7 @@ async def run_codex(
     control: ActiveAgentRun,
     store: EventStore,
     environment_overrides: dict[str, str] | None = None,
+    initial_instruction: str = INITIAL_INSTRUCTION,
 ) -> AgentRunResult:
     """Run or resume one steerable Codex App Server turn."""
     server = CodexAppServer(
@@ -420,7 +422,7 @@ async def run_codex(
                 session_id,
             )
         effective_prompt = (
-            f"{INITIAL_INSTRUCTION}{prompt}" if session.external_session_id is None else prompt
+            f"{initial_instruction}{prompt}" if session.external_session_id is None else prompt
         )
         text = await server.run_turn(effective_prompt)
         return AgentRunResult(session_id=session_id, text=text)

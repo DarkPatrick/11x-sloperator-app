@@ -20,6 +20,7 @@ from aiohttp import web
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.admin_codex import AdminCodexManager
+from sloperator.admin_sql import AdminSqlManager
 from sloperator.agents import AgentOrchestrator, SubmitResult
 from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
@@ -93,9 +94,19 @@ word-break:break-word}.codex-msg.user{margin-left:auto;background:#17355f}.codex
 background:var(--surface);border:1px solid var(--line)}html[data-theme="light"] .codex-msg.user{
 background:#dbeafe}.codex-compose{padding:12px;border-top:1px solid var(--line)}
 .codex-compose textarea{min-height:74px}.codex-empty{margin:auto;color:var(--muted);text-align:center}
+.sql-toolbar{margin-bottom:10px}.sql-workbench{display:grid;grid-template-columns:1fr 1fr;
+height:min(720px,calc(100vh - 235px));min-height:480px;padding:0;overflow:hidden}.sql-pane{
+display:flex;flex-direction:column;min-width:0;min-height:0}.sql-pane:first-child{
+border-right:1px solid var(--line)}.sql-pane-head{padding:10px 12px;border-bottom:1px solid var(--line)}
+.sql-editor{flex:1;resize:none;border:0;border-radius:0;padding:16px;font:13px/1.55
+ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2;outline:none}.sql-editor:focus{
+box-shadow:inset 0 0 0 1px var(--blue)}.sql-output{background:var(--surface)}
+.sql-status.busy{color:#f5a524}.sql-status.error{color:var(--red)}
 @media(max-width:700px){main{padding:18px}.cron-grid{grid-template-columns:170px repeat(28,24px);
 min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-index:3}
-.codex-shell{grid-template-columns:130px minmax(0,1fr)}}
+.codex-shell{grid-template-columns:130px minmax(0,1fr)}.sql-workbench{grid-template-columns:1fr;
+height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--line)}
+.sql-editor{min-height:42vh}}
 </style></head><body><main><div class="row spread"><div><h1>Sloperator</h1>
 <div class="sub">localhost admin · access via SSH tunnel</div></div>
 <button id="theme-toggle" onclick="toggleTheme()" aria-label="Переключить тему"></button></div>
@@ -103,6 +114,7 @@ min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-
 <button id="tab-agents" onclick="setTab('agents')">Агенты</button>
 <button id="tab-cron" onclick="setTab('cron')">Cron</button>
 <button id="tab-codex" onclick="setTab('codex')">Codex</button>
+<button id="tab-sql" onclick="setTab('sql')">SQL editor</button>
 </nav>
 <section id="panel-agents" class="panel"><h2>Agent sessions</h2>
 <div id="sessions" class="grid"></div></section>
@@ -119,7 +131,19 @@ min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-
 <aside class="codex-sidebar"><div class="codex-sidebar-head"><button onclick="newCodexSession()">
 + Новая</button></div><div id="codex-sessions" class="codex-session-list"></div></aside>
 <div id="codex-chat" class="codex-chat"><div class="codex-empty">Выберите или создайте сессию</div>
-</div></div></section></main>
+</div></div></section>
+<section id="panel-sql" class="panel"><h2>SQL editor</h2>
+<div class="row spread sql-toolbar"><div class="row"><label for="sql-provider">Агент</label>
+<select id="sql-provider" onchange="changeSqlProvider()"><option value="claude">Claude</option>
+<option value="codex">Codex</option></select></div>
+<span id="sql-status" class="meta sql-status">Напишите SQL — подсказка появится после паузы</span></div>
+<div class="card sql-workbench"><section class="sql-pane"><div class="sql-pane-head row spread">
+<b>Ваш SQL</b><span class="meta">автосохранение · пауза 7 сек.</span></div>
+<textarea id="sql-input" class="sql-editor" spellcheck="false" placeholder="-- Начните писать запрос…"></textarea>
+</section><section class="sql-pane"><div class="sql-pane-head row spread"><b>Продолжение агента</b>
+<button onclick="copySqlSuggestion()">Копировать</button></div>
+<textarea id="sql-output" class="sql-editor sql-output" readonly spellcheck="false"
+placeholder="Здесь появится готовый SQL для копирования"></textarea></section></div></section></main>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -129,8 +153,8 @@ function applyTheme(theme){document.documentElement.dataset.theme=theme;
 document.getElementById("theme-toggle").textContent=theme==="light"?"Тёмная тема":"Светлая тема"}
 function toggleTheme(){const next=document.documentElement.dataset.theme==="light"?"dark":"light";
 localStorage.setItem("sloperator-theme",next);applyTheme(next)}
-function setTab(tab){if(!["agents","cron","codex"].includes(tab))tab="agents";
-for(const name of ["agents","cron","codex"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
+function setTab(tab){if(!["agents","cron","codex","sql"].includes(tab))tab="agents";
+for(const name of ["agents","cron","codex","sql"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
 document.getElementById("tab-"+name).classList.toggle("active",name===tab)}
 if(location.hash!=="#"+tab)history.replaceState(null,"","#"+tab)}
 async function api(path,opts={}){opts.headers={...(opts.headers||{}),"X-Admin-CSRF":csrf};
@@ -210,6 +234,37 @@ onkeydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter')sendCodex()"><
 <button onclick="sendCodex()">Отправить</button></div></div>`;
 const input=document.getElementById("codex-input");if(input)input.value=codexDrafts[selectedCodex]||"";
 const box=chat.querySelector(".codex-messages");if(box)box.scrollTop=box.scrollHeight}
+const sqlSession=sessionStorage.getItem("sloperator-sql-session")||crypto.randomUUID();
+sessionStorage.setItem("sloperator-sql-session",sqlSession);
+let sqlTimer=null,sqlRequest=0,sqlLastSent="",sqlPastingSuggestion=false;
+function sqlStatus(text,kind=""){const el=document.getElementById("sql-status");el.textContent=text;
+el.className="meta sql-status "+kind}
+function changeSqlProvider(){localStorage.setItem("sloperator-sql-provider",
+document.getElementById("sql-provider").value);sqlLastSent="";scheduleSqlCompletion()}
+function scheduleSqlCompletion(){clearTimeout(sqlTimer);const input=document.getElementById("sql-input");
+localStorage.setItem("sloperator-sql-draft",input.value);if(sqlPastingSuggestion){
+sqlPastingSuggestion=false;sqlLastSent=input.value;sqlStatus("Вставлено предложение агента");return}
+if(!input.value.trim()){sqlStatus("Напишите SQL — подсказка появится после паузы");return}
+if(input.value===sqlLastSent)return;sqlStatus("Жду паузу во вводе…");
+sqlTimer=setTimeout(requestSqlCompletion,7000)}
+async function requestSqlCompletion(){const input=document.getElementById("sql-input");
+const sql=input.value;if(!sql.trim()||sql===sqlLastSent)return;sqlLastSent=sql;
+const requestId=++sqlRequest;sqlStatus("Агент дописывает SQL…","busy");
+try{const result=await api("/sql/complete",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({session_id:sqlSession,provider:document.getElementById("sql-provider").value,sql})});
+if(requestId!==sqlRequest)return;if(input.value===sql){document.getElementById("sql-output").value=result.sql;
+sqlStatus("Готово · измените запрос для новой подсказки")}else{sqlStatus("SQL изменился · жду новую паузу");
+scheduleSqlCompletion()}}catch(error){if(requestId===sqlRequest)sqlStatus("Ошибка агента: "+error.message,"error")}}
+async function copySqlSuggestion(){const value=document.getElementById("sql-output").value;if(!value)return;
+await navigator.clipboard.writeText(value);sqlStatus("SQL скопирован")}
+function initSqlEditor(){const input=document.getElementById("sql-input");
+input.value=localStorage.getItem("sloperator-sql-draft")||"";
+document.getElementById("sql-provider").value=localStorage.getItem("sloperator-sql-provider")||"claude";
+input.addEventListener("input",scheduleSqlCompletion);input.addEventListener("paste",event=>{
+const suggestion=document.getElementById("sql-output").value;
+sqlPastingSuggestion=Boolean(suggestion&&event.clipboardData?.getData("text")===suggestion)});
+input.addEventListener("keydown",event=>{if(event.key==="Tab"){event.preventDefault();const start=input.selectionStart;
+input.setRangeText("  ",start,input.selectionEnd,"end");input.dispatchEvent(new Event("input"))}})}
 function utcDate(value){return new Date(value.replace(" UTC","Z").replace(" ","T"))}
 function calendarDays(){const today=new Date();const end=new Date(Date.UTC(today.getUTCFullYear(),
 today.getUTCMonth(),today.getUTCDate()));return Array.from({length:28},(_,index)=>{
@@ -282,7 +337,7 @@ renderCronHistory(d.cron_jobs,d.cron_history);document.querySelector(".cron-conf
 const nextHistory=document.querySelector(".history-log");if(nextHistory)nextHistory.open=ui.historyOpen;
 const nextScroll=document.querySelector(".cron-scroll");if(nextScroll)nextScroll.scrollLeft=ui.scrollLeft;
 cronSignature=nextCronSignature}}
-applyTheme(preferredTheme());setTab(location.hash.slice(1));
+applyTheme(preferredTheme());initSqlEditor();setTab(location.hash.slice(1));
 addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
 load();setInterval(load,5000);
 </script></body></html>"""
@@ -573,11 +628,13 @@ def create_admin_routes(
     """Attach loopback admin routes to the existing HTTP application."""
     csrf = secrets.token_urlsafe(32)
     codex_manager = AdminCodexManager(orchestrator.settings, store)
+    sql_manager = AdminSqlManager(orchestrator.settings, store)
 
-    async def close_codex_manager(_: web.Application) -> None:
+    async def close_admin_managers(_: web.Application) -> None:
         await codex_manager.close()
+        await sql_manager.close()
 
-    app.on_cleanup.append(close_codex_manager)
+    app.on_cleanup.append(close_admin_managers)
 
     def require_local(request: web.Request) -> None:
         if request.remote not in {"127.0.0.1", "::1"}:
@@ -729,6 +786,22 @@ def create_admin_routes(
         deleted = await codex_manager.delete(request.match_info["session_id"])
         return web.json_response({"deleted": deleted})
 
+    async def complete_sql(request: web.Request) -> web.Response:
+        require_csrf(request)
+        body = await request.json()
+        session_id = str(body.get("session_id", "")).strip()
+        provider = str(body.get("provider", "claude")).strip().lower()
+        sql = str(body.get("sql", ""))
+        if not session_id or len(session_id) > 100:
+            raise web.HTTPBadRequest(text="Valid SQL session ID is required")
+        try:
+            result = await sql_manager.complete(session_id, provider, sql)
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error)) from error
+        except RuntimeError as error:
+            raise web.HTTPBadGateway(text=str(error)) from error
+        return web.json_response({"sql": result})
+
     app.router.add_get("/admin", page)
     app.router.add_get("/admin/api/state", state)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/stop", stop)
@@ -744,3 +817,4 @@ def create_admin_routes(
     app.router.add_post(
         "/admin/api/codex/sessions/{session_id}/delete", delete_codex_session
     )
+    app.router.add_post("/admin/api/sql/complete", complete_sql)

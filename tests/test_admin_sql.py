@@ -3,7 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from sloperator.admin_sql import SQL_INITIAL_INSTRUCTION, AdminSqlManager, _strip_markdown_fence
+import pytest
+
+from sloperator.admin_sql import (
+    SQL_INITIAL_INSTRUCTION,
+    VIZ_INSTRUCTION,
+    AdminSqlManager,
+    _strip_markdown_fence,
+    _validate_read_only_sql,
+)
 from sloperator.agents import AgentRunResult
 from sloperator.config import Settings
 from sloperator.store import EventStore
@@ -21,6 +29,25 @@ def test_sql_agent_prompt_is_sql_only_and_loads_ug_context() -> None:
 def test_strip_markdown_fence_handles_disobedient_provider() -> None:
     assert _strip_markdown_fence("```sql\nSELECT 1;\n```") == "SELECT 1;"
     assert _strip_markdown_fence("SELECT 1;") == "SELECT 1;"
+
+
+def test_sql_execution_accepts_queries_and_rejects_mutations() -> None:
+    _validate_read_only_sql("-- context\nWITH 1 AS value SELECT value;")
+    _validate_read_only_sql("SELECT 'drop table is text' AS harmless")
+    with pytest.raises(ValueError, match="read-only"):
+        _validate_read_only_sql("DROP TABLE important")
+    with pytest.raises(ValueError, match="Mutating"):
+        _validate_read_only_sql("WITH 1 AS value INSERT INTO target SELECT value")
+    with pytest.raises(ValueError, match="one SQL"):
+        _validate_read_only_sql("SELECT 1; SELECT 2")
+
+
+def test_visualization_prompt_uses_sample_and_runtime_data_placeholder() -> None:
+    assert "context/dataviz/principles.md" in VIZ_INSTRUCTION
+    assert "const payload = __SLOPERATOR_DATA__;" in VIZ_INSTRUCTION
+    assert "top 20 sample rows" not in VIZ_INSTRUCTION
+    assert "do not use UG fonts" in VIZ_INSTRUCTION
+    assert "at most three" in VIZ_INSTRUCTION
 
 
 async def test_sql_manager_resumes_provider_session(tmp_path: Path) -> None:

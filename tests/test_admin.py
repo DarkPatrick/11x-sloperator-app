@@ -193,6 +193,12 @@ def test_admin_contains_debounced_two_pane_sql_editor() -> None:
     assert 'event.clipboardData?.getData("text")===suggestion' in ADMIN_HTML
     assert '<option value="claude">Claude</option>' in ADMIN_HTML
     assert '<option value="codex">Codex</option>' in ADMIN_HTML
+    assert 'id="sql-run"' in ADMIN_HTML
+    assert 'id="sql-visualize"' in ADMIN_HTML
+    assert 'id="sql-result-table"' in ADMIN_HTML
+    assert 'id="sql-viz-frame"' in ADMIN_HTML
+    assert "sample_rows:sqlResult.rows.slice(0,20)" in ADMIN_HTML
+    assert 'sandbox="allow-scripts"' in ADMIN_HTML
 
 
 def test_systemd_scheduler_job_includes_schedule_and_runtime_state() -> None:

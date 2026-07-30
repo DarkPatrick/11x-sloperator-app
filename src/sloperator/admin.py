@@ -112,6 +112,13 @@ html[data-theme="light"] .sql-kw{color:#7c3aed}html[data-theme="light"] .sql-fn{
 html[data-theme="light"] .sql-str{color:#22863a}html[data-theme="light"] .sql-num{color:#b31d28}
 html[data-theme="light"] .sql-comment{color:#6a737d}html[data-theme="light"] .sql-param{color:#9a6700}
 .sql-status.busy{color:#f5a524}.sql-status.error{color:var(--red)}
+.sql-actions{margin-left:auto}.sql-results{margin-top:14px}.sql-results-head{margin-bottom:10px}
+.sql-table-wrap{max-height:480px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.sql-table-wrap table{min-width:max-content;background:var(--card)}.sql-table-wrap th{position:sticky;
+top:0;background:var(--button);z-index:1}.sql-table-wrap td{max-width:420px;white-space:pre-wrap;
+word-break:break-word}.sql-empty{padding:28px;text-align:center;color:var(--muted)}
+.sql-viz{margin-top:14px}.sql-viz summary{padding:12px 0;font-weight:650}.sql-viz-frame{
+display:block;width:100%;height:620px;border:1px solid var(--line);border-radius:8px;background:#fff}
 @media(max-width:700px){main{padding:18px}.cron-grid{grid-template-columns:170px repeat(28,24px);
 min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-index:3}
 .codex-shell{grid-template-columns:130px minmax(0,1fr)}.sql-workbench{grid-template-columns:1fr;
@@ -146,6 +153,8 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <div class="row spread sql-toolbar"><div class="row"><label for="sql-provider">Агент</label>
 <select id="sql-provider" onchange="changeSqlProvider()"><option value="claude">Claude</option>
 <option value="codex">Codex</option></select></div>
+<div class="row sql-actions"><button id="sql-run" onclick="executeSql()">▶ Выполнить</button>
+<button id="sql-visualize" onclick="visualizeSql()" disabled>Визуализация</button></div>
 <span id="sql-status" class="meta sql-status">Напишите SQL — подсказка появится после паузы</span></div>
 <div class="card sql-workbench"><section class="sql-pane"><div class="sql-pane-head row spread">
 <b>Ваш SQL</b><span class="meta">автосохранение · пауза 7 сек.</span></div>
@@ -155,7 +164,13 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <button onclick="copySqlSuggestion()">Копировать</button></div>
 <div class="sql-code sql-output-wrap"><pre id="sql-output-highlight" class="sql-highlight"
 aria-hidden="true"></pre><textarea id="sql-output" class="sql-editor" readonly spellcheck="false"
-placeholder="Здесь появится готовый SQL для копирования"></textarea></div></section></div></section></main>
+placeholder="Здесь появится готовый SQL для копирования"></textarea></div></section></div>
+<section class="card sql-results"><div class="row spread sql-results-head"><b>Результат запроса</b>
+<span id="sql-result-meta" class="meta">Запрос ещё не выполнялся</span></div>
+<div id="sql-result-table" class="sql-table-wrap"><div class="sql-empty">Нажмите «Выполнить»</div></div>
+<details id="sql-viz" class="sql-viz" hidden><summary>Полученные визуализации</summary>
+<iframe id="sql-viz-frame" class="sql-viz-frame" sandbox="allow-scripts"
+title="SQL visualizations"></iframe></details></section></section></main>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -249,6 +264,7 @@ const box=chat.querySelector(".codex-messages");if(box)box.scrollTop=box.scrollH
 const sqlSession=sessionStorage.getItem("sloperator-sql-session")||crypto.randomUUID();
 sessionStorage.setItem("sloperator-sql-session",sqlSession);
 let sqlTimer=null,sqlRequest=0,sqlLastSent="",sqlPastingSuggestion=false;
+let sqlResult=null,sqlResultQuery="";
 function sqlStatus(text,kind=""){const el=document.getElementById("sql-status");el.textContent=text;
 el.className="meta sql-status "+kind}
 const sqlKeywords=new Set(("SELECT FROM WHERE WITH AS JOIN LEFT RIGHT FULL INNER OUTER CROSS ON "+
@@ -292,11 +308,38 @@ sqlStatus("Готово · измените запрос для новой по�
 scheduleSqlCompletion()}}catch(error){if(requestId===sqlRequest)sqlStatus("Ошибка агента: "+error.message,"error")}}
 async function copySqlSuggestion(){const value=document.getElementById("sql-output").value;if(!value)return;
 await navigator.clipboard.writeText(value);sqlStatus("SQL скопирован")}
+function setSqlButtons(running){document.getElementById("sql-run").disabled=running;
+document.getElementById("sql-visualize").disabled=running||!sqlResult||
+document.getElementById("sql-input").value!==sqlResultQuery}
+function renderSqlResult(result){const root=document.getElementById("sql-result-table");
+const meta=document.getElementById("sql-result-meta"),columns=result.columns||[],rows=result.rows||[];
+meta.textContent=`${rows.length} строк${result.truncated?" · лимит 1000":""} · ${columns.length} столбцов`;
+if(!columns.length){root.innerHTML='<div class="sql-empty">Запрос не вернул столбцов</div>';return}
+const head=columns.map(column=>`<th>${esc(column)}</th>`).join("");
+const body=rows.map(row=>`<tr>${columns.map((_,index)=>`<td>${esc(row[index]??"NULL")}</td>`).join("")}</tr>`).join("");
+root.innerHTML=`<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`}
+async function executeSql(){const sql=document.getElementById("sql-input").value;if(!sql.trim())return;
+sqlStatus("Выполняю запрос…","busy");setSqlButtons(true);document.getElementById("sql-viz").hidden=true;
+try{const result=await api("/sql/execute",{method:"POST",headers:{"Content-Type":"application/json"},
+body:JSON.stringify({sql})});sqlResult=result;sqlResultQuery=sql;renderSqlResult(result);
+sqlStatus("Запрос выполнен")}catch(error){sqlResult=null;document.getElementById("sql-result-meta").textContent="Ошибка";
+document.getElementById("sql-result-table").innerHTML=`<div class="sql-empty">${esc(error.message)}</div>`;
+sqlStatus("Ошибка запроса: "+error.message,"error")}finally{setSqlButtons(false)}}
+async function visualizeSql(){if(!sqlResult)return;sqlStatus("Агент строит визуализации…","busy");
+setSqlButtons(true);try{const result=await api("/sql/visualize",{method:"POST",
+headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sqlSession,
+provider:document.getElementById("sql-provider").value,sql:sqlResultQuery,columns:sqlResult.columns,
+sample_rows:sqlResult.rows.slice(0,20)})});const data=JSON.stringify(
+{columns:sqlResult.columns,rows:sqlResult.rows}).replaceAll("<","\\\\u003c");
+document.getElementById("sql-viz-frame").srcdoc=result.html.replace("__SLOPERATOR_DATA__",data);
+const details=document.getElementById("sql-viz");details.hidden=false;details.open=true;
+sqlStatus("Визуализации готовы")}catch(error){sqlStatus("Ошибка визуализации: "+error.message,"error")}
+finally{setSqlButtons(false)}}
 function initSqlEditor(){const input=document.getElementById("sql-input");
 input.value=localStorage.getItem("sloperator-sql-draft")||"";
 document.getElementById("sql-provider").value=localStorage.getItem("sloperator-sql-provider")||"claude";
 paintSql("sql-input");paintSql("sql-output");input.addEventListener("input",()=>{paintSql("sql-input");
-scheduleSqlCompletion()});for(const id of ["sql-input","sql-output"]){const editor=document.getElementById(id);
+scheduleSqlCompletion();setSqlButtons(false)});for(const id of ["sql-input","sql-output"]){const editor=document.getElementById(id);
 editor.addEventListener("scroll",()=>paintSql(id))}
 input.addEventListener("paste",event=>{
 const suggestion=document.getElementById("sql-output").value;
@@ -840,6 +883,44 @@ def create_admin_routes(
             raise web.HTTPBadGateway(text=str(error)) from error
         return web.json_response({"sql": result})
 
+    async def execute_sql(request: web.Request) -> web.Response:
+        require_csrf(request)
+        body = await request.json()
+        sql = str(body.get("sql", ""))
+        try:
+            result = await sql_manager.execute(sql)
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error)) from error
+        except RuntimeError as error:
+            raise web.HTTPBadGateway(text=str(error)) from error
+        return web.json_response(result)
+
+    async def visualize_sql(request: web.Request) -> web.Response:
+        require_csrf(request)
+        body = await request.json()
+        session_id = str(body.get("session_id", "")).strip()
+        provider = str(body.get("provider", "claude")).strip().lower()
+        sql = str(body.get("sql", ""))
+        columns = body.get("columns", [])
+        sample_rows = body.get("sample_rows", [])
+        if not session_id or len(session_id) > 100:
+            raise web.HTTPBadRequest(text="Valid SQL session ID is required")
+        if not isinstance(columns, list) or not isinstance(sample_rows, list):
+            raise web.HTTPBadRequest(text="Visualization sample must be tabular")
+        try:
+            html = await sql_manager.visualize(
+                session_id,
+                provider,
+                sql,
+                columns[:100],
+                sample_rows[:20],
+            )
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error)) from error
+        except RuntimeError as error:
+            raise web.HTTPBadGateway(text=str(error)) from error
+        return web.json_response({"html": html})
+
     app.router.add_get("/admin", page)
     app.router.add_get("/admin/api/state", state)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/stop", stop)
@@ -856,3 +937,5 @@ def create_admin_routes(
         "/admin/api/codex/sessions/{session_id}/delete", delete_codex_session
     )
     app.router.add_post("/admin/api/sql/complete", complete_sql)
+    app.router.add_post("/admin/api/sql/execute", execute_sql)
+    app.router.add_post("/admin/api/sql/visualize", visualize_sql)

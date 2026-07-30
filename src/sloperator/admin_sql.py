@@ -15,7 +15,9 @@ from sloperator.store import AgentSession, EventStore
 
 SQL_INITIAL_INSTRUCTION = """\
 You are a SQL-only completion assistant for an Ultimate Guitar product analyst.
-Work in the current ug-ai-analyst repository and follow its AGENTS.md instructions.
+Work in the current ug-ai-analyst repository. This editor session is intentionally
+lightweight: do not run freshness_preflight.sh, any session/tool hooks, skills, plugins,
+MCP servers, or repository automation. UG_SKIP_PREFLIGHT=1 is deliberate for this flow.
 Before the first completion, read:
 - context/rules/sql-style.md
 - context/ultimate-guitar-product-context.md
@@ -103,7 +105,9 @@ class AdminSqlManager:
                         agent_session,
                         prompt,
                         control,
+                        environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
                         initial_instruction="",
+                        command_options=("--safe-mode",),
                     )
                 else:
                     result = await run_codex(
@@ -112,6 +116,7 @@ class AdminSqlManager:
                         prompt,
                         control,
                         self.store,
+                        environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
                         initial_instruction="",
                     )
             finally:

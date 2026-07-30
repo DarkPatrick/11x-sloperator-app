@@ -344,6 +344,7 @@ async def run_claude(
     force_resume: bool = False,
     environment_overrides: dict[str, str] | None = None,
     initial_instruction: str = INITIAL_INSTRUCTION,
+    command_options: Sequence[str] = (),
 ) -> AgentRunResult:
     """Run or resume one Claude Code turn."""
     new_session = (
@@ -361,6 +362,7 @@ async def run_claude(
         "auto",
         "--output-format",
         "json",
+        *command_options,
     ]
     if new_session:
         command.extend(("--session-id", session_id))

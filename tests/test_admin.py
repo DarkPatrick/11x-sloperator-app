@@ -184,6 +184,10 @@ def test_admin_contains_debounced_two_pane_sql_editor() -> None:
     assert 'class="card sql-workbench"' in ADMIN_HTML
     assert 'id="sql-input"' in ADMIN_HTML
     assert 'id="sql-output"' in ADMIN_HTML
+    assert 'id="sql-input-highlight"' in ADMIN_HTML
+    assert 'id="sql-output-highlight"' in ADMIN_HTML
+    assert "function highlightSql(sql)" in ADMIN_HTML
+    assert ".sql-comment{" in ADMIN_HTML
     assert "setTimeout(requestSqlCompletion,7000)" in ADMIN_HTML
     assert "if(input.value===sqlLastSent)return" in ADMIN_HTML
     assert 'event.clipboardData?.getData("text")===suggestion' in ADMIN_HTML

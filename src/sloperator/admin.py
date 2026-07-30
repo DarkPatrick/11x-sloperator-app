@@ -98,9 +98,19 @@ background:#dbeafe}.codex-compose{padding:12px;border-top:1px solid var(--line)}
 height:min(720px,calc(100vh - 235px));min-height:480px;padding:0;overflow:hidden}.sql-pane{
 display:flex;flex-direction:column;min-width:0;min-height:0}.sql-pane:first-child{
 border-right:1px solid var(--line)}.sql-pane-head{padding:10px 12px;border-bottom:1px solid var(--line)}
-.sql-editor{flex:1;resize:none;border:0;border-radius:0;padding:16px;font:13px/1.55
-ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2;outline:none}.sql-editor:focus{
-box-shadow:inset 0 0 0 1px var(--blue)}.sql-output{background:var(--surface)}
+.sql-code{position:relative;flex:1;min-height:0;background:var(--surface);overflow:hidden}
+.sql-highlight,.sql-editor{position:absolute;inset:0;margin:0;border:0;border-radius:0;padding:16px;
+font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2;white-space:pre-wrap;
+overflow-wrap:normal}.sql-highlight{pointer-events:none;overflow:hidden;max-height:none;color:var(--text)}
+.sql-editor{resize:none;outline:none;background:transparent;color:transparent;caret-color:var(--text);
+-webkit-text-fill-color:transparent;overflow:auto}.sql-editor::placeholder{-webkit-text-fill-color:var(--muted);
+color:var(--muted)}.sql-editor::selection{background:#6ea8fe55}.sql-code:focus-within{
+box-shadow:inset 0 0 0 1px var(--blue)}.sql-output-wrap{background:var(--surface)}
+.sql-kw{color:#c792ea;font-weight:650}.sql-fn{color:#82aaff}.sql-str{color:#c3e88d}
+.sql-num{color:#f78c6c}.sql-comment{color:#7f8c98;font-style:italic}.sql-param{color:#ffcb6b}
+html[data-theme="light"] .sql-kw{color:#7c3aed}html[data-theme="light"] .sql-fn{color:#005cc5}
+html[data-theme="light"] .sql-str{color:#22863a}html[data-theme="light"] .sql-num{color:#b31d28}
+html[data-theme="light"] .sql-comment{color:#6a737d}html[data-theme="light"] .sql-param{color:#9a6700}
 .sql-status.busy{color:#f5a524}.sql-status.error{color:var(--red)}
 @media(max-width:700px){main{padding:18px}.cron-grid{grid-template-columns:170px repeat(28,24px);
 min-width:998px}.cron-job-label{position:sticky;left:0;background:var(--card);z-index:3}
@@ -139,11 +149,13 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <span id="sql-status" class="meta sql-status">Напишите SQL — подсказка появится после паузы</span></div>
 <div class="card sql-workbench"><section class="sql-pane"><div class="sql-pane-head row spread">
 <b>Ваш SQL</b><span class="meta">автосохранение · пауза 7 сек.</span></div>
-<textarea id="sql-input" class="sql-editor" spellcheck="false" placeholder="-- Начните писать запрос…"></textarea>
+<div class="sql-code"><pre id="sql-input-highlight" class="sql-highlight" aria-hidden="true"></pre>
+<textarea id="sql-input" class="sql-editor" spellcheck="false" placeholder="-- Начните писать запрос…"></textarea></div>
 </section><section class="sql-pane"><div class="sql-pane-head row spread"><b>Продолжение агента</b>
 <button onclick="copySqlSuggestion()">Копировать</button></div>
-<textarea id="sql-output" class="sql-editor sql-output" readonly spellcheck="false"
-placeholder="Здесь появится готовый SQL для копирования"></textarea></section></div></section></main>
+<div class="sql-code sql-output-wrap"><pre id="sql-output-highlight" class="sql-highlight"
+aria-hidden="true"></pre><textarea id="sql-output" class="sql-editor" readonly spellcheck="false"
+placeholder="Здесь появится готовый SQL для копирования"></textarea></div></section></div></section></main>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -239,6 +251,28 @@ sessionStorage.setItem("sloperator-sql-session",sqlSession);
 let sqlTimer=null,sqlRequest=0,sqlLastSent="",sqlPastingSuggestion=false;
 function sqlStatus(text,kind=""){const el=document.getElementById("sql-status");el.textContent=text;
 el.className="meta sql-status "+kind}
+const sqlKeywords=new Set(("SELECT FROM WHERE WITH AS JOIN LEFT RIGHT FULL INNER OUTER CROSS ON "+
+"AND OR NOT IN IS NULL GROUP BY ORDER HAVING LIMIT OFFSET UNION ALL DISTINCT CASE WHEN THEN ELSE END "+
+"OVER PARTITION ROWS RANGE BETWEEN PRECEDING FOLLOWING CURRENT ASC DESC INSERT INTO UPDATE DELETE CREATE "+
+"TABLE VIEW MATERIALIZED DROP ALTER ARRAY JOIN GLOBAL PREWHERE SAMPLE SETTINGS FORMAT QUALIFY").split(" "));
+const sqlFunctions=new Set(("count countIf countDistinct uniq uniqExact sum sumIf avg avgIf min max argMin "+
+"argMax if multiIf coalesce nullIf toDate toDateTime toStartOfDay toStartOfWeek toStartOfMonth dateDiff "+
+"dateAdd dateSub formatDateTime lower upper trim replaceRegexpAll match extract has hasAny arrayMap arrayFilter "+
+"arrayJoin groupArray quantile median round floor ceil cast assumeNotNull").toLowerCase().split(" "));
+function highlightSql(sql){let out="",i=0;const add=(kind,value)=>out+=kind?`<span class="${kind}">${esc(value)}</span>`:esc(value);
+while(i<sql.length){const rest=sql.slice(i),line=rest.match(/^--[^\\n]*/),block=rest.match(/^\\/\\*[\\s\\S]*?\\*\\//);
+if(line){add("sql-comment",line[0]);i+=line[0].length;continue}if(block){add("sql-comment",block[0]);
+i+=block[0].length;continue}const quote=sql[i];if(quote==="'"||quote==='"'||quote==="`"){let j=i+1;
+while(j<sql.length){if(sql[j]===quote){if(sql[j+1]===quote){j+=2;continue}j++;break}j++}
+add("sql-str",sql.slice(i,j));i=j;continue}const param=rest.match(/^\\{\\{[^}]+\\}\\}|^\\{[A-Za-z_]\\w*:[^}]+\\}/);
+if(param){add("sql-param",param[0]);i+=param[0].length;continue}const number=rest.match(/^\\b\\d+(?:\\.\\d+)?\\b/);
+if(number){add("sql-num",number[0]);i+=number[0].length;continue}const word=rest.match(/^[A-Za-z_]\\w*/);
+if(word){const upper=word[0].toUpperCase(),lower=word[0].toLowerCase();
+add(sqlKeywords.has(upper)?"sql-kw":sqlFunctions.has(lower)?"sql-fn":"",word[0]);i+=word[0].length;
+continue}add("",sql[i]);i++}return out+(sql.endsWith("\\n")?" ":"\\n")}
+function paintSql(id){const editor=document.getElementById(id),highlight=document.getElementById(id+"-highlight");
+highlight.innerHTML=highlightSql(editor.value);highlight.scrollTop=editor.scrollTop;
+highlight.scrollLeft=editor.scrollLeft}
 function changeSqlProvider(){localStorage.setItem("sloperator-sql-provider",
 document.getElementById("sql-provider").value);sqlLastSent="";scheduleSqlCompletion()}
 function scheduleSqlCompletion(){clearTimeout(sqlTimer);const input=document.getElementById("sql-input");
@@ -253,6 +287,7 @@ const requestId=++sqlRequest;sqlStatus("Агент дописывает SQL…",
 try{const result=await api("/sql/complete",{method:"POST",headers:{"Content-Type":"application/json"},
 body:JSON.stringify({session_id:sqlSession,provider:document.getElementById("sql-provider").value,sql})});
 if(requestId!==sqlRequest)return;if(input.value===sql){document.getElementById("sql-output").value=result.sql;
+paintSql("sql-output");
 sqlStatus("Готово · измените запрос для новой подсказки")}else{sqlStatus("SQL изменился · жду новую паузу");
 scheduleSqlCompletion()}}catch(error){if(requestId===sqlRequest)sqlStatus("Ошибка агента: "+error.message,"error")}}
 async function copySqlSuggestion(){const value=document.getElementById("sql-output").value;if(!value)return;
@@ -260,7 +295,10 @@ await navigator.clipboard.writeText(value);sqlStatus("SQL скопирован")
 function initSqlEditor(){const input=document.getElementById("sql-input");
 input.value=localStorage.getItem("sloperator-sql-draft")||"";
 document.getElementById("sql-provider").value=localStorage.getItem("sloperator-sql-provider")||"claude";
-input.addEventListener("input",scheduleSqlCompletion);input.addEventListener("paste",event=>{
+paintSql("sql-input");paintSql("sql-output");input.addEventListener("input",()=>{paintSql("sql-input");
+scheduleSqlCompletion()});for(const id of ["sql-input","sql-output"]){const editor=document.getElementById(id);
+editor.addEventListener("scroll",()=>paintSql(id))}
+input.addEventListener("paste",event=>{
 const suggestion=document.getElementById("sql-output").value;
 sqlPastingSuggestion=Boolean(suggestion&&event.clipboardData?.getData("text")===suggestion)});
 input.addEventListener("keydown",event=>{if(event.key==="Tab"){event.preventDefault();const start=input.selectionStart;

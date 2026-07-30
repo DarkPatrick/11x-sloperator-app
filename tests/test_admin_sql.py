@@ -49,3 +49,7 @@ async def test_sql_manager_resumes_provider_session(tmp_path: Path) -> None:
     assert first_session.external_session_id is None
     assert second_session.external_session_id == "provider-session"
     assert second_session.turn_count == 1
+    assert runner.call_args_list[0].kwargs["command_options"] == ("--safe-mode",)
+    assert runner.call_args_list[0].kwargs["environment_overrides"] == {
+        "UG_SKIP_PREFLIGHT": "1"
+    }

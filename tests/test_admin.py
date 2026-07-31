@@ -11,6 +11,7 @@ from sloperator.admin import (
     _cron_jobs,
     _crontab,
     _label_cron_history,
+    _slack_trigger_definitions,
     _systemd_scheduler_history,
     _systemd_scheduler_job,
 )
@@ -154,6 +155,33 @@ def test_admin_contains_airflow_style_28_day_cron_grid() -> None:
     assert "function plannedRuns(job,date)" in ADMIN_HTML
     assert 'class="run-segment ${esc(status)}"' in ADMIN_HTML
     assert "cronFieldValues(fields[0],0,59).size*cronFieldValues(fields[1],0,23).size" in ADMIN_HTML
+
+
+def test_admin_contains_slack_trigger_calendar_and_session_links() -> None:
+    assert 'id="tab-triggers"' in ADMIN_HTML
+    assert 'id="panel-triggers"' in ADMIN_HTML
+    assert "function renderTriggerHistory(triggers,events)" in ADMIN_HTML
+    assert "function openAgentSession(channel,thread)" in ADMIN_HTML
+    assert "Slack thread ↗" in ADMIN_HTML
+    assert "Agent session" in ADMIN_HTML
+
+
+def test_slack_trigger_definitions_include_all_automatic_investigations() -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+    )
+
+    definitions = _slack_trigger_definitions(settings)
+
+    assert [item["key"] for item in definitions] == [
+        "analytics-anomaly",
+        "subscription-flow",
+        "mobile-health",
+    ]
+    assert definitions[2]["channel_id"] == settings.mobile_health_alert_channel
+    assert definitions[2]["limit"] == "at most 5 metrics per report"
 
 
 def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:

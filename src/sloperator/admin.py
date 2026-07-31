@@ -78,9 +78,12 @@ grid-template-columns:repeat(var(--segment-cols,1),1fr);grid-auto-rows:1fr;gap:1
 overflow:hidden}.cron-day.has-runs{border-color:#ffffff20}
 .cron-day:hover{transform:scale(1.18);z-index:2;border-color:var(--text)}.cron-day.today{
 outline:2px solid var(--blue);outline-offset:2px}.cron-day.future{opacity:.32}
-.run-segment{min-width:1px;min-height:1px;border-radius:1px}
+.run-segment{min-width:1px;min-height:1px;border-radius:1px;background:var(--blue)}
 .cron-empty-board{padding:18px;color:var(--muted)}.cron-config,.history-log{margin-top:14px}
 .cron-config .table-wrap,.history-log .table-wrap{overflow:auto}summary{cursor:pointer}
+.trigger-configs{grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:14px}
+.trigger-config h3{margin:0 0 7px}.trigger-condition{font-size:12px;color:var(--muted);line-height:1.5}
+.trigger-links{display:flex;gap:10px;flex-wrap:wrap}.trigger-links a{color:var(--blue);cursor:pointer}
 .codex-shell{display:grid;grid-template-columns:280px minmax(0,1fr);height:min(720px,calc(100vh - 190px));
 min-height:480px;padding:0;overflow:hidden}.codex-sidebar{border-right:1px solid var(--line);display:flex;
 flex-direction:column;min-height:0}.codex-sidebar-head{padding:12px;border-bottom:1px solid var(--line)}
@@ -130,6 +133,7 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <nav class="tabs" aria-label="Admin sections">
 <button id="tab-agents" onclick="setTab('agents')">Агенты</button>
 <button id="tab-cron" onclick="setTab('cron')">Cron</button>
+<button id="tab-triggers" onclick="setTab('triggers')">Slack-триггеры</button>
 <button id="tab-codex" onclick="setTab('codex')">Codex</button>
 <button id="tab-sql" onclick="setTab('sql')">SQL editor</button>
 </nav>
@@ -144,6 +148,10 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <span class="legend-item"><i class="run-dot missed"></i>No record</span>
 </div></div><div id="history"></div><details class="card cron-config"><summary>Schedules and commands</summary>
 <div id="cron"></div></details></section>
+<section id="panel-triggers" class="panel"><h2>Slack triggers</h2>
+<div class="sub cron-toolbar">Configured event-driven launches · last 28 days · UTC</div>
+<div id="trigger-configs" class="grid trigger-configs"></div>
+<div id="trigger-history"></div></section>
 <section id="panel-codex" class="panel"><h2>Codex sessions</h2><div class="card codex-shell">
 <aside class="codex-sidebar"><div class="codex-sidebar-head"><button onclick="newCodexSession()">
 + Новая</button></div><div id="codex-sessions" class="codex-session-list"></div></aside>
@@ -180,8 +188,8 @@ function applyTheme(theme){document.documentElement.dataset.theme=theme;
 document.getElementById("theme-toggle").textContent=theme==="light"?"Тёмная тема":"Светлая тема"}
 function toggleTheme(){const next=document.documentElement.dataset.theme==="light"?"dark":"light";
 localStorage.setItem("sloperator-theme",next);applyTheme(next)}
-function setTab(tab){if(!["agents","cron","codex","sql"].includes(tab))tab="agents";
-for(const name of ["agents","cron","codex","sql"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
+function setTab(tab){if(!["agents","cron","triggers","codex","sql"].includes(tab))tab="agents";
+for(const name of ["agents","cron","triggers","codex","sql"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
 document.getElementById("tab-"+name).classList.toggle("active",name===tab)}
 if(location.hash!=="#"+tab)history.replaceState(null,"","#"+tab)}
 async function api(path,opts={}){opts.headers={...(opts.headers||{}),"X-Admin-CSRF":csrf};
@@ -191,7 +199,7 @@ body:JSON.stringify(body||{})});await load()}
 function sessionCard(s){const k=encodeURIComponent(s.channel_id)+"/"+encodeURIComponent(s.thread_ts);
 const msgs=(s.messages||[]).map(m=>`<div class="msg"><div class="meta">${esc(m.message_ts)} ·
 ${esc(m.user_id||m.bot_id||"unknown")}</div>${esc(m.text)}</div>`).join("");
-return `<section class="card" data-session="${esc(k)}"><div class="row spread"><div><b>${esc(s.channel_name)}</b>
+return `<section class="card" id="session-${esc(k)}" data-session="${esc(k)}"><div class="row spread"><div><b>${esc(s.channel_name)}</b>
 <span class="meta">${esc(s.channel_id)} / ${esc(s.thread_ts)}</span></div><span class="badge
 ${esc(s.runtime_status)}">${esc(s.runtime_status)}</span></div><div class="meta">${esc(s.provider)}:
 ${esc(s.model)} · turns ${s.turn_count} · updated ${esc(s.updated_at)}
@@ -215,7 +223,11 @@ for(const card of root.querySelectorAll("[data-session]")){const state=previous.
 if(!state)continue;const details=card.querySelector("details");const messages=card.querySelector(".messages");
 const draft=card.querySelector("textarea");if(details)details.open=state.open;if(messages)messages.scrollTop=state.scroll;
 if(draft)draft.value=state.draft}}
-let cronSignature="";
+function openAgentSession(channel,thread){setTab("agents");const key=encodeURIComponent(channel)+"/"+
+encodeURIComponent(thread);requestAnimationFrame(()=>{const card=document.getElementById("session-"+key);
+if(card){card.scrollIntoView({behavior:"smooth",block:"start"});card.style.outline="2px solid var(--blue)";
+setTimeout(()=>card.style.outline="",1800)}});return false}
+let cronSignature="",triggerSignature="";
 let codexSignature="",selectedCodex=localStorage.getItem("sloperator-codex-session")||"",
 codexDrafts={},codexDetail=null;
 async function selectCodex(id){if(selectedCodex)codexDrafts[selectedCodex]=
@@ -400,6 +412,41 @@ root.innerHTML=jobs.length?`<section class="card cron-board"><div class="cron-bo
 root.innerHTML+=`<details class="card history-log"><summary>Event log</summary><div class="table-wrap"><table><thead>
 <tr><th>Time</th><th>Job</th><th>Status</th><th>Command</th></tr></thead><tbody>${eventRows||
 '<tr><td colspan="4" class="sub">No events in the last 28 days</td></tr>'}</tbody></table></div></details>`}
+function triggerRunStatus(event){return event.session_status==="running"?"running":event.status||"queued"}
+function renderTriggerHistory(triggers,events){const configs=document.getElementById("trigger-configs");
+configs.innerHTML=triggers.map(trigger=>`<section class="card trigger-config"><div class="row spread">
+<h3>${esc(trigger.name)}</h3><span class="badge">${events.filter(e=>e.trigger===trigger.key).length} runs</span>
+</div><div class="trigger-condition">${esc(trigger.channel_name)} · <code>${esc(trigger.channel_id)}</code><br>
+Source: <code>${esc(trigger.source)}</code><br>${esc(trigger.condition)}<br>
+Limit: ${esc(trigger.limit||"one session per matched incident")}</div></section>`).join("")||
+'<div class="card sub">No configured Slack triggers</div>';
+const root=document.getElementById("trigger-history"),days=calendarDays(),today=dayKey(days[days.length-1]);
+const axis=days.map(date=>{const monday=date.getUTCDay()===1;return `<div class="cron-axis-day
+${monday?"week-start":""}" title="${dayKey(date)}">${monday?date.toLocaleString("en",
+{month:"short",day:"numeric",timeZone:"UTC"}):date.getUTCDate()}</div>`}).join("");
+const rows=triggers.map(trigger=>{const triggerEvents=events.filter(e=>e.trigger===trigger.key);
+const cells=days.map(date=>{const key=dayKey(date),runs=triggerEvents.filter(e=>e.created_at.slice(0,10)===key);
+const segments=runs.map(run=>`<i class="run-segment ${esc(triggerRunStatus(run))}"
+title="${esc(run.created_at+" — "+triggerRunStatus(run))}"></i>`).join("");
+const cols=Math.max(1,Math.ceil(Math.sqrt(runs.length)));return `<div class="cron-day-slot"><div
+class="cron-day ${runs.length?"has-runs":""} ${key===today?"today":""}" style="--segment-cols:${cols}"
+title="${esc(key+" · "+runs.length+" trigger(s)")}" aria-label="${esc(key+" · "+runs.length+
+" trigger(s)")}">${segments}</div></div>`}).join("");
+return `<div class="cron-job-label"><b>${esc(trigger.name)}</b><div class="cron-job-stats">
+event-driven · ${triggerEvents.length} launches</div></div>${cells}`}).join("");
+const eventRows=events.map(event=>`<tr><td>${esc(event.created_at)} UTC</td><td>${esc(
+triggers.find(t=>t.key===event.trigger)?.name||event.trigger)}</td><td><span class="badge ${esc(
+triggerRunStatus(event))}">${esc(triggerRunStatus(event))}</span></td><td>${esc(event.channel_name)}</td>
+<td><div class="trigger-links">${event.session_exists?`<a href="#agents" onclick="return openAgentSession(
+'${esc(event.channel_id)}','${esc(event.thread_ts)}')">Agent session</a>`:"<span class='sub'>No session</span>"}
+<a href="${esc(event.slack_url)}" target="_blank" rel="noreferrer">Slack thread ↗</a></div></td></tr>`).join("");
+root.innerHTML=`<section class="card cron-board"><div class="cron-board-head row spread">
+<b>Trigger calendar</b><span class="badge">${events.length} launches</span></div><div class="cron-scroll">
+<div class="cron-grid"><div class="cron-axis-label">Trigger</div>${axis}${rows}</div></div></section>
+<details class="card history-log" open><summary>Trigger log</summary><div class="table-wrap"><table>
+<thead><tr><th>Time</th><th>Trigger</th><th>Status</th><th>Channel</th><th>Links</th></tr></thead>
+<tbody>${eventRows||'<tr><td colspan="5" class="sub">No launches in the last 28 days</td></tr>'}
+</tbody></table></div></details>`}
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
 const nextCodexSignature=JSON.stringify([d.codex_sessions,selectedCodex]);
@@ -417,7 +464,10 @@ document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr>
 renderCronHistory(d.cron_jobs,d.cron_history);document.querySelector(".cron-config").open=ui.configOpen;
 const nextHistory=document.querySelector(".history-log");if(nextHistory)nextHistory.open=ui.historyOpen;
 const nextScroll=document.querySelector(".cron-scroll");if(nextScroll)nextScroll.scrollLeft=ui.scrollLeft;
-cronSignature=nextCronSignature}}
+cronSignature=nextCronSignature}
+const nextTriggerSignature=JSON.stringify([d.slack_triggers,d.slack_trigger_runs]);
+if(nextTriggerSignature!==triggerSignature){renderTriggerHistory(d.slack_triggers,d.slack_trigger_runs);
+triggerSignature=nextTriggerSignature}}
 applyTheme(preferredTheme());initSqlEditor();setTab(location.hash.slice(1));
 addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
 load();setInterval(load,5000);
@@ -700,6 +750,41 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
     return list(reversed(rows))
 
 
+def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
+    """Describe the event-driven Slack automations shown in the admin UI."""
+    return [
+        {
+            "key": "analytics-anomaly",
+            "name": "Analytics anomaly analysis",
+            "channel_id": settings.anomaly_alert_channel,
+            "channel_name": "ug-analytics-monitoring",
+            "source": settings.anomaly_bot_id,
+            "condition": (
+                "Analytics Bot mentions the operator; confirmed UG monetisation anomaly"
+            ),
+            "limit": "24h cooldown per metric/platform/type",
+        },
+        {
+            "key": "subscription-flow",
+            "name": "Subscription flow incident",
+            "channel_id": settings.subscription_flow_alert_channel,
+            "channel_name": "ug-analytics-monitoring",
+            "source": "Sloperator subscription_flow_monitor",
+            "condition": "New SERIOUS incident nature; recovery closes affected components",
+            "limit": "one session per active incident nature",
+        },
+        {
+            "key": "mobile-health",
+            "name": "Mobile health critical drops",
+            "channel_id": settings.mobile_health_alert_channel,
+            "channel_name": "ug-monetization-metrics-monitoring",
+            "source": settings.mobile_health_bot_id,
+            "condition": "Red critical metrics in Android/iOS report sections",
+            "limit": "at most 5 metrics per report",
+        },
+    ]
+
+
 def create_admin_routes(
     app: web.Application,
     store: EventStore,
@@ -779,6 +864,10 @@ def create_admin_routes(
             {
                 "sessions": sessions,
                 "codex_sessions": await codex_manager.list_threads(),
+                "slack_triggers": _slack_trigger_definitions(orchestrator.settings),
+                "slack_trigger_runs": await asyncio.to_thread(
+                    store.list_slack_trigger_runs
+                ),
                 "crontab": crontab,
                 "cron_jobs": [service_job, *cron_jobs],
                 "cron_history": sorted(

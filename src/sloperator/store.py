@@ -466,6 +466,51 @@ class EventStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_slack_trigger_runs(self, days: int = 28) -> list[dict[str, Any]]:
+        """Return recent event-driven agent launches for the admin trigger calendar."""
+        suffixes = {
+            ":monetisation-analysis": "analytics-anomaly",
+            ":subscription-flow-analysis": "subscription-flow",
+            ":mobile-health-analysis": "mobile-health",
+        }
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT r.channel_id, COALESCE(c.name, r.channel_id) AS channel_name,
+                       r.message_ts, r.thread_ts, r.status, r.created_at, r.updated_at,
+                       s.status AS session_status, s.provider, s.model,
+                       s.external_session_id
+                FROM agent_requests AS r
+                LEFT JOIN agent_sessions AS s
+                  ON s.channel_id = r.channel_id AND s.thread_ts = r.thread_ts
+                LEFT JOIN channels AS c ON c.channel_id = r.channel_id
+                WHERE datetime(r.created_at) >= datetime('now', ?)
+                  AND (
+                    r.message_ts LIKE '%:monetisation-analysis'
+                    OR r.message_ts LIKE '%:subscription-flow-analysis'
+                    OR r.message_ts LIKE '%:mobile-health-analysis'
+                  )
+                ORDER BY datetime(r.created_at) DESC
+                """,
+                (f"-{days} days",),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            message_ts = item["message_ts"]
+            trigger = next(
+                key for suffix, key in suffixes.items() if message_ts.endswith(suffix)
+            )
+            item["trigger"] = trigger
+            item["session_exists"] = item["session_status"] is not None
+            item["slack_url"] = (
+                f"https://slack.com/archives/{item['channel_id']}/"
+                f"p{item['thread_ts'].replace('.', '')}"
+            )
+            result.append(item)
+        return result
+
     def thread_messages(
         self, channel_id: str, thread_ts: str, limit: int = 30
     ) -> list[dict[str, Any]]:

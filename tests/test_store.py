@@ -300,6 +300,30 @@ def test_anomaly_analysis_cooldown_filters_only_recent_metric_keys(
     assert store.claim_anomaly_analyses([purchase]) == {purchase}
 
 
+def test_slack_trigger_runs_link_requests_to_agent_sessions(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.create_agent_session("CMOBILE", "100.1", "claude", "opus")
+    assert store.claim_agent_request(
+        "CMOBILE",
+        "100.1:mobile-health-analysis",
+        "100.1",
+    )
+    store.finish_agent_request(
+        "CMOBILE",
+        "100.1:mobile-health-analysis",
+        "completed",
+    )
+
+    runs = store.list_slack_trigger_runs()
+
+    assert len(runs) == 1
+    assert runs[0]["trigger"] == "mobile-health"
+    assert runs[0]["session_exists"] is True
+    assert runs[0]["session_status"] == "idle"
+    assert runs[0]["slack_url"] == "https://slack.com/archives/CMOBILE/p1001"
+
+
 def test_store_redacts_vpn_otp_from_event_and_message(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "archive.sqlite3")
     store.initialize()

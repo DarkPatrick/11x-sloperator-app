@@ -108,6 +108,24 @@ def test_trusted_channel_thread_supports_experiment_finalizer_channel() -> None:
     assert is_trusted_channel_thread(event, settings)
 
 
+def test_trusted_channel_thread_supports_mobile_health_channel() -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        slack_allowed_conversation_users=frozenset({"UOWNER"}),
+    )
+    event = {
+        "user": "UOWNER",
+        "channel": settings.mobile_health_alert_channel,
+        "thread_ts": "100.1",
+        "ts": "100.2",
+        "text": "Проверь влияние версии приложения",
+    }
+
+    assert is_trusted_channel_thread(event, settings)
+
+
 def test_settings_without_explicit_conversation_users_fall_back_to_owner() -> None:
     settings = Settings(
         slack_user_id="UOWNER",

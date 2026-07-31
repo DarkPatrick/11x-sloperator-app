@@ -17,6 +17,8 @@ def test_settings_load_valid_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.port == 9000
     assert settings.anomaly_alert_channel == "C06FADPMGKT"
     assert settings.subscription_flow_alert_channel == "C06FADPMGKT"
+    assert settings.mobile_health_alert_channel == "C0AJKHFHVHV"
+    assert settings.mobile_health_bot_id == "B0AM51CS2H5"
     assert settings.slack_allowed_conversation_users == {"U1234567890"}
     assert settings.experiment_finalizer_enabled is True
     assert settings.experiment_finalizer_timezone == "Asia/Nicosia"

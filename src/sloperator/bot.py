@@ -15,6 +15,7 @@ from sloperator.agents import AgentOrchestrator, SubmitResult, thread_key
 from sloperator.anomaly_alerts import AnomalyAlertResponder, is_anomaly_trigger
 from sloperator.archive import ArchiveMiddleware
 from sloperator.config import Settings
+from sloperator.mobile_health import MobileHealthResponder, is_mobile_health_trigger
 from sloperator.store import EventStore
 from sloperator.subscription_flow import SubscriptionFlowResponder, is_subscription_flow_event
 from sloperator.vpn import VpnError, VpnManager, VpnState
@@ -80,6 +81,7 @@ def is_trusted_channel_thread(event: Mapping[str, Any], settings: Settings) -> b
             settings.anomaly_alert_channel,
             settings.subscription_flow_alert_channel,
             settings.experiment_finalizer_channel,
+            settings.mobile_health_alert_channel,
         }
         and isinstance(event.get("thread_ts"), str)
         and isinstance(event.get("text"), str)
@@ -98,6 +100,7 @@ def create_app(
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
     app.use(ArchiveMiddleware(store, app.client))
     anomaly_responder = AnomalyAlertResponder(settings, store, orchestrator)
+    mobile_health_responder = MobileHealthResponder(settings, orchestrator)
     subscription_flow_responder = subscription_flow_responder or SubscriptionFlowResponder(
         settings,
         store,
@@ -112,6 +115,9 @@ def create_app(
     ) -> None:
         if is_anomaly_trigger(dict(event), settings):
             await anomaly_responder.handle(dict(event), client)
+            return
+        if is_mobile_health_trigger(dict(event), settings):
+            await mobile_health_responder.handle(dict(event), client)
             return
         if is_subscription_flow_event(dict(event), settings):
             await subscription_flow_responder.handle(dict(event), client)

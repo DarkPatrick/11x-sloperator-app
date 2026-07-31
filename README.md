@@ -108,6 +108,16 @@ upstream/downstream baseline model. The agent runs in `/home/egor/projects/ug-ai
 the `time-series-research` skill, and replies with an evidence-backed likely cause and action.
 The same trusted-user thread continuation and no-channel-status rules apply.
 
+## Mobile health critical-drop investigations
+
+Sloperator watches the UG mobile monetisation health report in
+`#ug-monetization-metrics-monitoring`. For each report it selects at most five Android/iOS
+metrics that are both red (negative direction) and `critical`, then starts a durable Claude
+investigation in the report thread. The prompt requires the analyst to use the detector
+semantics and mobile-health datamart knowledge in `ug-ai-analyst`; replies from allowed users
+in the same thread continue that session. Configure the source with
+`MOBILE_HEALTH_ALERT_CHANNEL` and `MOBILE_HEALTH_BOT_ID`.
+
 Confirmed Analytics Bot anomalies are deduplicated per metric, platform, and metric type.
 Once an agent investigation is launched for a combination, repeated alerts for that same
 combination are excluded from agent analysis for 24 hours; new combinations in a mixed alert

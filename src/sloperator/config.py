@@ -74,6 +74,8 @@ class Settings:
     anomaly_threshold: float = 0.10
     anomaly_days_before: int = 1
     subscription_flow_alert_channel: str = "C06FADPMGKT"
+    mobile_health_alert_channel: str = "C0AJKHFHVHV"
+    mobile_health_bot_id: str = "B0AM51CS2H5"
     clickhouse_host: str | None = None
     clickhouse_port: int = 8443
     clickhouse_username: str | None = None
@@ -146,6 +148,12 @@ class Settings:
         anomaly_bot_id = os.environ.get("ANOMALY_BOT_ID", "B018Q735LSJ").strip()
         subscription_flow_alert_channel = os.environ.get(
             "SUBFLOW_ALERT_CHANNEL", "C06FADPMGKT"
+        ).strip()
+        mobile_health_alert_channel = os.environ.get(
+            "MOBILE_HEALTH_ALERT_CHANNEL", "C0AJKHFHVHV"
+        ).strip()
+        mobile_health_bot_id = os.environ.get(
+            "MOBILE_HEALTH_BOT_ID", "B0AM51CS2H5"
         ).strip()
         clickhouse_host = os.environ.get("CLICKHOUSE_HOST", "").strip() or None
         clickhouse_username = os.environ.get("CLICKHOUSE_USERNAME", "").strip() or None
@@ -235,6 +243,10 @@ class Settings:
             raise ConfigurationError("ANOMALY_DAYS_BEFORE must be positive")
         if not subscription_flow_alert_channel.startswith("C"):
             raise ConfigurationError("SUBFLOW_ALERT_CHANNEL must be a Slack channel ID")
+        if not mobile_health_alert_channel.startswith("C"):
+            raise ConfigurationError("MOBILE_HEALTH_ALERT_CHANNEL must be a Slack channel ID")
+        if not mobile_health_bot_id.startswith("B"):
+            raise ConfigurationError("MOBILE_HEALTH_BOT_ID must be a Slack bot ID")
         if not 1 <= clickhouse_port <= 65_535:
             raise ConfigurationError("CLICKHOUSE_PORT must be between 1 and 65535")
         if bool(clickhouse_host) != bool(clickhouse_username):
@@ -287,6 +299,8 @@ class Settings:
             anomaly_threshold=anomaly_threshold,
             anomaly_days_before=anomaly_days_before,
             subscription_flow_alert_channel=subscription_flow_alert_channel,
+            mobile_health_alert_channel=mobile_health_alert_channel,
+            mobile_health_bot_id=mobile_health_bot_id,
             clickhouse_host=clickhouse_host,
             clickhouse_port=clickhouse_port,
             clickhouse_username=clickhouse_username,

@@ -48,11 +48,13 @@ def test_next_run_skips_weekends() -> None:
     assert next_run_at(sunday) == expected
 
 
-def test_prompt_has_selection_pipeline_and_test_routing() -> None:
+def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "oldest by actual end timestamp" in FINALIZATION_PROMPT
     assert "at least one configured segment" in FINALIZATION_PROMPT
     assert "Results → Insights → Decision / Next steps" in FINALIZATION_PROMPT
-    assert "one top-level direct message" in FINALIZATION_PROMPT
+    assert "one top-level message in the" in FINALIZATION_PROMPT
+    assert "configured production channel" in FINALIZATION_PROMPT
+    assert "direct message" not in FINALIZATION_PROMPT
     assert "Produce exactly one Slack-facing notification" in FINALIZATION_PROMPT
     assert "DRI / Project owner" in FINALIZATION_PROMPT
     assert "calculate_exp_info(exp_id, config=cfg, update_rollout=True)" in FINALIZATION_PROMPT
@@ -88,7 +90,7 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     assert result == VALID_NOTIFICATION.strip()
     agent.execute_once.assert_awaited_once_with(FINALIZATION_PROMPT, 5_400)
     client.chat_postMessage.assert_awaited_once_with(
-        channel="UOWNER",
+        channel="CFINAL",
         markdown_text=VALID_NOTIFICATION.strip(),
         unfurl_links=False,
         unfurl_media=False,

@@ -86,8 +86,8 @@ Execution for the selected experiment:
    if the exact task cannot be established, report that as an incomplete step.
 
 Notification:
-- Return the final notification to Sloperator; it will publish it as one top-level direct message
-  to the operator and attach this same agent session to the resulting Slack thread.
+- Return the final notification to Sloperator; it will publish it as one top-level message in the
+  configured production channel and attach this same agent session to the resulting Slack thread.
 - Do not send any kickoff, progress, validation, QA, waiting, or completion-soon messages through
   Slack tools. In particular, never post messages such as "starting the daily finalisation" or
   "Validating: running a QA check". Produce exactly one Slack-facing notification, and only after
@@ -184,12 +184,12 @@ async def run_once(
     notification = normalize_finalization_notification(run.text)
     published_run = replace(run, text=notification)
     response = await client.chat_postMessage(
-        channel=settings.slack_user_id,
+        channel=settings.experiment_finalizer_channel,
         markdown_text=notification,
         unfurl_links=False,
         unfurl_media=False,
     )
-    channel_id = response.get("channel", settings.slack_user_id)
+    channel_id = response.get("channel", settings.experiment_finalizer_channel)
     await agent.attach_session(
         channel_id,
         response["ts"],

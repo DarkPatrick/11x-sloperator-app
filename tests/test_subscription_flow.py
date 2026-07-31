@@ -97,6 +97,8 @@ def test_agent_prompt_contains_detector_context_and_skill() -> None:
     prompt = build_subscription_flow_agent_prompt(incident)
     assert "`time-series-research`" in prompt
     assert "/home/egor/projects/ug-ai-analyst" in prompt
+    assert "CLAUDE.md" in prompt
+    assert "AGENTS.md" not in prompt
     assert "upstream store/processor signal" in prompt
     assert "SERIOUS — Web renewals" in prompt
 

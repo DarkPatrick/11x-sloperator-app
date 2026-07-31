@@ -8,6 +8,7 @@ import pytest
 
 from sloperator.agents import (
     AGENT_RETRY_DELAYS,
+    CLAUDE_INITIAL_INSTRUCTION,
     AgentExecutionError,
     AgentOrchestrator,
     AgentRunResult,
@@ -19,6 +20,11 @@ from sloperator.agents import (
 )
 from sloperator.config import Settings
 from sloperator.store import EventStore
+
+
+def test_claude_initial_instruction_references_claude_md() -> None:
+    assert "CLAUDE.md" in CLAUDE_INITIAL_INSTRUCTION
+    assert "AGENTS.md" not in CLAUDE_INITIAL_INSTRUCTION
 
 
 @pytest.fixture

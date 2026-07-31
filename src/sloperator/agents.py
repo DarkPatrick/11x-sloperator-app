@@ -59,6 +59,7 @@ waiting for terminal input.
 
 User request:
 """
+CLAUDE_INITIAL_INSTRUCTION = INITIAL_INSTRUCTION.replace("AGENTS.md", "CLAUDE.md")
 
 
 class AgentExecutionError(RuntimeError):
@@ -343,7 +344,7 @@ async def run_claude(
     *,
     force_resume: bool = False,
     environment_overrides: dict[str, str] | None = None,
-    initial_instruction: str = INITIAL_INSTRUCTION,
+    initial_instruction: str = CLAUDE_INITIAL_INSTRUCTION,
     command_options: Sequence[str] = (),
 ) -> AgentRunResult:
     """Run or resume one Claude Code turn."""

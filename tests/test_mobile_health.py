@@ -97,6 +97,8 @@ def test_prompt_requires_mobile_knowledge_and_detector_evidence() -> None:
     )
 
     assert "`time-series-research`" in prompt
+    assert "CLAUDE.md" in prompt
+    assert "AGENTS.md" not in prompt
     assert "context/data-warehouse/anomaly-detection.md" in prompt
     assert "context/data-warehouse/tables/ug_mobile_health_monitoring.md" in prompt
     assert "at most five across Android and iOS" in prompt

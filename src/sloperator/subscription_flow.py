@@ -145,7 +145,7 @@ def build_subscription_flow_agent_prompt(incident: SubscriptionFlowIncident) -> 
     components = ", ".join(sorted(incident.components))
     return f"""\
 Use the `time-series-research` skill to investigate this SERIOUS UG subscription-flow alert.
-Work from `/home/egor/projects/ug-ai-analyst`, follow AGENTS.md and its freshness preflight,
+Work from `/home/egor/projects/ug-ai-analyst`, follow CLAUDE.md and its freshness preflight,
 and use the repository's analytics context and data tools.
 
 Detector context:

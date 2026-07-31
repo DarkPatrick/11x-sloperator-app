@@ -164,6 +164,10 @@ def test_admin_contains_slack_trigger_calendar_and_session_links() -> None:
     assert "function openAgentSession(channel,thread)" in ADMIN_HTML
     assert "Slack thread ↗" in ADMIN_HTML
     assert "Agent session" in ADMIN_HTML
+    assert 'id="prompt-modal"' in ADMIN_HTML
+    assert "function openPrompt(trigger)" in ADMIN_HTML
+    assert "function renderMarkdown(markdown)" in ADMIN_HTML
+    assert "Click to view prompt" in ADMIN_HTML
 
 
 def test_slack_trigger_definitions_include_all_automatic_investigations() -> None:
@@ -182,6 +186,9 @@ def test_slack_trigger_definitions_include_all_automatic_investigations() -> Non
     ]
     assert definitions[2]["channel_id"] == settings.mobile_health_alert_channel
     assert definitions[2]["limit"] == "at most 5 metrics per report"
+    assert "`time-series-research`" in definitions[0]["prompt"]
+    assert "{{ exact SERIOUS Slack alert }}" in definitions[1]["prompt"]
+    assert "context/data-warehouse/anomaly-detection.md" in definitions[2]["prompt"]
 
 
 def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:

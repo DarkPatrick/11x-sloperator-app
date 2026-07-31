@@ -22,9 +22,15 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sloperator.admin_codex import AdminCodexManager
 from sloperator.admin_sql import AdminSqlManager
 from sloperator.agents import AgentOrchestrator, SubmitResult
+from sloperator.anomaly_alerts import Alert, AlertBatch, build_monetisation_agent_prompt
 from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
+from sloperator.mobile_health import MobileCriticalMetric, build_mobile_health_agent_prompt
 from sloperator.store import EventStore
+from sloperator.subscription_flow import (
+    SubscriptionFlowIncident,
+    build_subscription_flow_agent_prompt,
+)
 
 ADMIN_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -82,8 +88,19 @@ outline:2px solid var(--blue);outline-offset:2px}.cron-day.future{opacity:.32}
 .cron-empty-board{padding:18px;color:var(--muted)}.cron-config,.history-log{margin-top:14px}
 .cron-config .table-wrap,.history-log .table-wrap{overflow:auto}summary{cursor:pointer}
 .trigger-configs{grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:14px}
-.trigger-config h3{margin:0 0 7px}.trigger-condition{font-size:12px;color:var(--muted);line-height:1.5}
+.trigger-config{cursor:pointer;transition:border-color .12s,transform .12s}.trigger-config:hover{
+border-color:var(--blue);transform:translateY(-1px)}.trigger-config h3{margin:0 0 7px}
+.trigger-condition{font-size:12px;color:var(--muted);line-height:1.5}
 .trigger-links{display:flex;gap:10px;flex-wrap:wrap}.trigger-links a{color:var(--blue);cursor:pointer}
+.modal-backdrop{position:fixed;inset:0;z-index:20;background:#0009;display:flex;align-items:center;
+justify-content:center;padding:24px}.modal-backdrop[hidden]{display:none}.prompt-modal{width:min(920px,100%);
+max-height:min(860px,92vh);display:flex;flex-direction:column;padding:0;box-shadow:0 24px 80px #0008}
+.prompt-modal-head{padding:14px 18px;border-bottom:1px solid var(--line)}.prompt-modal-head h2{
+margin:0}.prompt-modal-body{padding:18px;overflow:auto}.prompt-markdown{font-size:14px;line-height:1.6}
+.prompt-markdown p{margin:0 0 14px}.prompt-markdown ul{margin:0 0 14px;padding-left:24px}
+.prompt-markdown pre{max-height:none}.prompt-markdown code{background:var(--surface);padding:2px 5px;
+border-radius:4px}.prompt-markdown blockquote{margin:0 0 16px;padding:10px 14px;border-left:3px solid
+var(--blue);background:var(--surface);color:var(--muted)}
 .codex-shell{display:grid;grid-template-columns:280px minmax(0,1fr);height:min(720px,calc(100vh - 190px));
 min-height:480px;padding:0;overflow:hidden}.codex-sidebar{border-right:1px solid var(--line);display:flex;
 flex-direction:column;min-height:0}.codex-sidebar-head{padding:12px;border-bottom:1px solid var(--line)}
@@ -179,6 +196,13 @@ placeholder="Здесь появится готовый SQL для копиро�
 <details id="sql-viz" class="sql-viz" hidden><summary>Полученные визуализации</summary>
 <iframe id="sql-viz-frame" class="sql-viz-frame" sandbox="allow-scripts"
 title="SQL visualizations"></iframe></details></section></section></main>
+<div id="prompt-modal" class="modal-backdrop" hidden onclick="if(event.target===this)closePrompt()">
+<section class="card prompt-modal" role="dialog" aria-modal="true" aria-labelledby="prompt-modal-title">
+<div class="row spread prompt-modal-head"><div><h2 id="prompt-modal-title">Agent prompt</h2>
+<div class="sub">Current initialization prompt · representative dynamic values</div></div>
+<button onclick="closePrompt()" aria-label="Close prompt">✕</button></div>
+<div class="prompt-modal-body"><div id="prompt-markdown" class="prompt-markdown"></div></div>
+</section></div>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -227,6 +251,25 @@ function openAgentSession(channel,thread){setTab("agents");const key=encodeURICo
 encodeURIComponent(thread);requestAnimationFrame(()=>{const card=document.getElementById("session-"+key);
 if(card){card.scrollIntoView({behavior:"smooth",block:"start"});card.style.outline="2px solid var(--blue)";
 setTimeout(()=>card.style.outline="",1800)}});return false}
+function inlineMarkdown(text){return esc(text).replace(/`([^`]+)`/g,"<code>$1</code>")
+.replace(/\\*\\*([^*]+)\\*\\*/g,"<strong>$1</strong>")}
+function renderMarkdown(markdown){const lines=String(markdown||"").split("\\n"),parts=[];let list=[];
+const flushList=()=>{if(list.length){parts.push("<ul>"+list.map(x=>"<li>"+inlineMarkdown(x)+
+"</li>").join("")+"</ul>");list=[]}};for(let i=0;i<lines.length;i++){const line=lines[i];
+if(line.startsWith("```")){flushList();const code=[];for(i++;i<lines.length&&!lines[i].startsWith(
+"```");i++)code.push(lines[i]);parts.push("<pre><code>"+esc(code.join("\\n"))+"</code></pre>");
+continue}if(line.startsWith("- ")){list.push(line.slice(2));continue}flushList();
+if(!line.trim())continue;if(line.startsWith("> "))parts.push("<blockquote>"+inlineMarkdown(
+line.slice(2))+"</blockquote>");else if(line.startsWith("### "))parts.push("<h3>"+
+inlineMarkdown(line.slice(4))+"</h3>");else if(line.startsWith("## "))parts.push("<h2>"+
+inlineMarkdown(line.slice(3))+"</h2>");else parts.push("<p>"+inlineMarkdown(line)+"</p>")}
+flushList();return parts.join("")}
+function openPrompt(trigger){document.getElementById("prompt-modal-title").textContent=trigger.name;
+document.getElementById("prompt-markdown").innerHTML=renderMarkdown(trigger.prompt);
+const modal=document.getElementById("prompt-modal");modal.hidden=false;document.body.style.overflow="hidden";
+modal.querySelector("button").focus()}
+function closePrompt(){document.getElementById("prompt-modal").hidden=true;document.body.style.overflow=""}
+addEventListener("keydown",event=>{if(event.key==="Escape")closePrompt()});
 let cronSignature="",triggerSignature="";
 let codexSignature="",selectedCodex=localStorage.getItem("sloperator-codex-session")||"",
 codexDrafts={},codexDetail=null;
@@ -414,11 +457,15 @@ root.innerHTML+=`<details class="card history-log"><summary>Event log</summary><
 '<tr><td colspan="4" class="sub">No events in the last 28 days</td></tr>'}</tbody></table></div></details>`}
 function triggerRunStatus(event){return event.session_status==="running"?"running":event.status||"queued"}
 function renderTriggerHistory(triggers,events){const configs=document.getElementById("trigger-configs");
-configs.innerHTML=triggers.map(trigger=>`<section class="card trigger-config"><div class="row spread">
+window.slackTriggers=triggers;configs.innerHTML=triggers.map((trigger,index)=>`<section
+class="card trigger-config" tabindex="0" role="button" onclick="openPrompt(window.slackTriggers[${index}])"
+onkeydown="if(event.key==='Enter'||event.key===' ')openPrompt(window.slackTriggers[${index}])">
+<div class="row spread">
 <h3>${esc(trigger.name)}</h3><span class="badge">${events.filter(e=>e.trigger===trigger.key).length} runs</span>
 </div><div class="trigger-condition">${esc(trigger.channel_name)} · <code>${esc(trigger.channel_id)}</code><br>
 Source: <code>${esc(trigger.source)}</code><br>${esc(trigger.condition)}<br>
-Limit: ${esc(trigger.limit||"one session per matched incident")}</div></section>`).join("")||
+Limit: ${esc(trigger.limit||"one session per matched incident")}<br><b>Click to view prompt</b>
+</div></section>`).join("")||
 '<div class="card sub">No configured Slack triggers</div>';
 const root=document.getElementById("trigger-history"),days=calendarDays(),today=dayKey(days[days.length-1]);
 const axis=days.map(date=>{const monday=date.getUTCDay()===1;return `<div class="cron-axis-day
@@ -752,6 +799,51 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
 
 def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
     """Describe the event-driven Slack automations shown in the admin UI."""
+    analytics_prompt = build_monetisation_agent_prompt(
+        AlertBatch("{{ alert timestamp }}", "{{ Slack message timestamp }}"),
+        [
+            (
+                Alert(
+                    "{{ metric }}",
+                    "{{ platform }}",
+                    "{{ events or uniques }}",
+                    "{{ prophet delta }}",
+                    0,
+                    0,
+                    "{{ p-value }}",
+                ),
+                {
+                    "value": 120,
+                    "last_week": 100,
+                    "wow": 0.20,
+                    "peak_wow": 0.25,
+                },
+            )
+        ],
+    )
+    subscription_prompt = build_subscription_flow_agent_prompt(
+        SubscriptionFlowIncident(
+            "{{ incident nature key }}",
+            frozenset({"{{ platform:flow-kind }}"}),
+            "{{ exact SERIOUS Slack alert }}",
+        )
+    )
+    mobile_prompt = build_mobile_health_agent_prompt(
+        "{{ source report header and summary }}",
+        [
+            MobileCriticalMetric(
+                "{{ Android or iOS }}",
+                "{{ Metabase card title }}",
+                "https://metabase.mu.se/question/{{ card id }}",
+                ":red_circle: {{ critical metric line with detector evidence }}",
+                ("{{ optional segment or numerator/denominator diagnostics }}",),
+            )
+        ],
+    )
+    preview_note = (
+        "> Preview: values in `{{ double braces }}` are filled from the triggering Slack "
+        "report. The surrounding instructions are the current production prompt.\n\n"
+    )
     return [
         {
             "key": "analytics-anomaly",
@@ -763,6 +855,7 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
                 "Analytics Bot mentions the operator; confirmed UG monetisation anomaly"
             ),
             "limit": "24h cooldown per metric/platform/type",
+            "prompt": preview_note + analytics_prompt,
         },
         {
             "key": "subscription-flow",
@@ -772,6 +865,7 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             "source": "Sloperator subscription_flow_monitor",
             "condition": "New SERIOUS incident nature; recovery closes affected components",
             "limit": "one session per active incident nature",
+            "prompt": preview_note + subscription_prompt,
         },
         {
             "key": "mobile-health",
@@ -781,6 +875,7 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             "source": settings.mobile_health_bot_id,
             "condition": "Red critical metrics in Android/iOS report sections",
             "limit": "at most 5 metrics per report",
+            "prompt": preview_note + mobile_prompt,
         },
     ]
 

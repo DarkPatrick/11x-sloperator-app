@@ -198,6 +198,11 @@ def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:
     assert "scrollLeft:scroll?.scrollLeft" in ADMIN_HTML
 
 
+def test_cron_calendar_does_not_let_next_schedule_hide_completed_run() -> None:
+    assert 'executionRuns=runs.filter(event=>statusLabel(event.status)!=="scheduled")' in ADMIN_HTML
+    assert "[executionRuns[executionRuns.length-1]]" in ADMIN_HTML
+
+
 def test_admin_supports_headless_agent_runs() -> None:
     assert "s.headless" in ADMIN_HTML
     assert "PID ${esc(s.process_id)} + subprocess tree" in ADMIN_HTML
@@ -279,3 +284,7 @@ def test_systemd_scheduler_history_extracts_scheduler_events() -> None:
     ]
     assert [row["status"] for row in rows] == ["started", "scheduled"]
     assert {row["job"] for row in rows} == {"experiment-finalizer (sloperator.service)"}
+    args = run.call_args.args[0]
+    assert "--grep=sloperator\\.experiment_finalizer:" in args
+    assert "--case-sensitive=yes" in args
+    assert "-n" not in args

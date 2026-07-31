@@ -424,8 +424,9 @@ function cronRow(job,events,days,today){const firstEvent=events.length?
 [...events].sort((a,b)=>a.time.localeCompare(b.time))[0].time.slice(0,10):today;
 const cells=days.map(date=>{const key=dayKey(date);
 const runs=events.filter(event=>dayKey(utcDate(event.time))===key).sort((a,b)=>a.time.localeCompare(b.time));
-const planned=key>=firstEvent?plannedRuns(job,date):0;const displayedRuns=planned===1&&runs.length?
-[runs[runs.length-1]]:runs.slice(0,planned);
+const executionRuns=runs.filter(event=>statusLabel(event.status)!=="scheduled");
+const planned=key>=firstEvent?plannedRuns(job,date):0;const displayedRuns=planned===1&&executionRuns.length?
+[executionRuns[executionRuns.length-1]]:executionRuns.slice(0,planned);
 const segments=Array.from({length:planned},(_,index)=>{const status=index<displayedRuns.length?
 statusLabel(displayedRuns[index].status):(key===today?"scheduled":"missed");
 return `<i class="run-segment ${esc(status)}" title="${esc(index<displayedRuns.length?
@@ -749,8 +750,8 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
             "sloperator",
             "--since",
             "28 days ago",
-            "-n",
-            "300",
+            "--grep=sloperator\\.experiment_finalizer:",
+            "--case-sensitive=yes",
         ],
         capture_output=True,
         text=True,

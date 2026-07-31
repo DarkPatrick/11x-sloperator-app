@@ -146,10 +146,38 @@ datamart/raw-source workflow to determine whether the movement is a real product
 a segment or composition shift, an experiment/release effect, or a freshness/pipeline artifact.
 Look for a shared cause when several metrics move together; do not force one if evidence differs.
 
-Reply in this Slack thread with a concise, self-contained investigation: findings by affected
-platform/metric, evidence, likely cause, confidence, impact, and concrete recommended next
-action. Say plainly when the evidence is inconclusive or points to a transient deviation.
-Do not merely paraphrase the alert or repeat the detector calculations.
+Do the full investigation, but separate the detailed deliverable from the Slack response:
+- Create a detailed self-contained HTML report with the evidence walkthrough, charts, diagnostic
+  cuts, calculations, rejected hypotheses, limitations, and source links needed to audit the
+  conclusion. Preserve useful detail; do not shorten the report to match the Slack TL;DR.
+- Package that report and the useful supporting SQL, scripts, and reader-safe data extracts into
+  the required ZIP archive. Return the normal `SLOPERATOR_ARTIFACT` marker so Sloperator attaches
+  the archive to this thread. The archive remains mandatory even when the conclusion is simple.
+- Put evidence walkthroughs, "what it is not" inventories, and multi-step action lists only in the
+  attached report, never in the visible Slack text.
+
+Reply in this Slack thread with a TL;DR only, not a report. For each affected metric, use one bold
+Slack header line in the form `*platform | metric name*`, followed by exactly these five one-line
+fields in this order, with no sub-bullets and no extra prose under or between them:
+`Alert: <real, noise, mean-reversion, or transient — one plain sentence>`
+`Cause: <underlying issue, or "none found — alert fully explained by the above">`
+`Confidence: <high/medium/low> (<one short reason>)`
+`Impact: <one concrete number> (<optional one-clause context>)`
+`Next: <one sentence containing 1-2 concrete next steps>`
+
+Budget exactly six visible lines per metric: one header plus the five fields. This compact format
+is intentional: surface only the alert interpretation, the real issue beneath it, one impact
+number, and the action; keep the supporting analysis in the attachment. Do not merely paraphrase
+the alert or repeat detector calculations. If evidence is inconclusive, say so in `Alert` or
+`Cause`, keep confidence/impact/next minimal and factual, and do not add speculation.
+
+Target style:
+*iOS | Client NOT First Day Accesses — Settings Pro*
+Alert: mean-reversion — current volume is normal after the strongest week in three months.
+Cause: build 7.3.19 converts lapsed-Pro users ~11pp worse, likely around trial eligibility.
+Confidence: high (same-day and matched-rollout-age comparisons agree)
+Impact: -$46/day net revenue (~-$1.4k/month if sustained; higher traffic masks it on the dashboard)
+Next: diff and reproduce 7.3.18→7.3.19 with expired Pro; consider a 7.3.20 hotfix.
 """
 
 

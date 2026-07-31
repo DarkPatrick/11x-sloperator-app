@@ -104,6 +104,17 @@ def test_prompt_requires_mobile_knowledge_and_detector_evidence() -> None:
     assert "at most five across Android and iOS" in prompt
     assert "critical one" in prompt
     assert "critical six" not in prompt
+    assert "TL;DR only, not a report" in prompt
+    assert "exactly six visible lines per metric" in prompt
+    assert "`Alert:" in prompt
+    assert "`Cause:" in prompt
+    assert "`Confidence:" in prompt
+    assert "`Impact:" in prompt
+    assert "`Next:" in prompt
+    assert "detailed self-contained HTML report" in prompt
+    assert "required ZIP archive" in prompt
+    assert "SLOPERATOR_ARTIFACT" in prompt
+    assert '"what it is not" inventories' in prompt
 
 
 @pytest.mark.asyncio

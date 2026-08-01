@@ -131,6 +131,7 @@ class AgentSubmitter(Protocol):
         thread_ts: str,
         text: str,
         show_status: bool = True,
+        require_artifact: bool = False,
     ) -> Awaitable[object]: ...
 
 
@@ -261,6 +262,7 @@ class AnomalyAlertResponder:
                     thread_ts=trigger_ts,
                     text=build_monetisation_agent_prompt(batch, monetisation),
                     show_status=False,
+                    require_artifact=True,
                 )
         finally:
             self._in_flight.discard(trigger_ts)

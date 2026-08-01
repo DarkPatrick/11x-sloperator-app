@@ -210,6 +210,7 @@ class MobileHealthResponder:
                 thread_ts=message_ts,
                 text=build_mobile_health_agent_prompt(report_text, metrics),
                 show_status=False,
+                require_artifact=True,
             )
         finally:
             self._in_flight.discard(message_ts)

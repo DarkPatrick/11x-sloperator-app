@@ -34,6 +34,13 @@ DIRECTIVE_RE = re.compile(
 )
 NEXT_RE = re.compile(r"^next:\s*", re.IGNORECASE)
 ARTIFACT_RE = re.compile(r"^SLOPERATOR_ARTIFACT:\s*(?P<path>\S+)\s*$")
+FINAL_ARTIFACT_RECOVERY_PROMPT = """\
+Your previous response was an internal review/status note, not the deliverable requested by
+Sloperator. Do not run any more tools, reviews, polls, or analysis. Return the already prepared
+final Slack answer now, followed by the existing archive marker on its own final line:
+`SLOPERATOR_ARTIFACT: relative/path/to/archive.zip`. The response must be self-contained and
+must not mention internal review rounds, approvals, critics, orchestration, or this correction.
+"""
 INITIAL_INSTRUCTION = """\
 Act as a pragmatic product analyst embedded in the Ultimate Guitar monetisation team.
 Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
@@ -511,6 +518,7 @@ class AgentOrchestrator:
         timeout_seconds: int | None = None,
         disable_link_previews: bool = False,
         optional_reply: bool = False,
+        require_artifact: bool = False,
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
         claim = await asyncio.to_thread(
@@ -550,6 +558,7 @@ class AgentOrchestrator:
                 timeout_seconds=timeout_seconds,
                 disable_link_previews=disable_link_previews,
                 optional_reply=optional_reply,
+                require_artifact=require_artifact,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
@@ -848,6 +857,7 @@ class AgentOrchestrator:
         timeout_seconds: int | None,
         disable_link_previews: bool,
         optional_reply: bool,
+        require_artifact: bool,
     ) -> None:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -956,6 +966,45 @@ class AgentOrchestrator:
                             )
                             prompt = _claude_steering_prompt(additions)
                             force_resume = True
+                        if require_artifact and not any(
+                            ARTIFACT_RE.fullmatch(line.strip())
+                            for line in result.text.splitlines()
+                        ):
+                            LOGGER.warning(
+                                "Claude result for thread %s missed the required artifact "
+                                "contract; requesting the prepared final deliverable",
+                                thread_ts,
+                            )
+                            session = replace(
+                                session,
+                                external_session_id=result.session_id,
+                                status="cancelled",
+                            )
+                            result = await self._run_with_retries(
+                                partial(
+                                    run_claude,
+                                    replace(
+                                        self.settings,
+                                        agent_timeout_seconds=(
+                                            timeout_seconds
+                                            or self.settings.agent_timeout_seconds
+                                        ),
+                                    ),
+                                    session,
+                                    FINAL_ARTIFACT_RECOVERY_PROMPT,
+                                    control,
+                                    force_resume=True,
+                                    environment_overrides=environment_overrides,
+                                ),
+                                context=f"Slack thread {thread_ts} final deliverable recovery",
+                            )
+                            if not any(
+                                ARTIFACT_RE.fullmatch(line.strip())
+                                for line in result.text.splitlines()
+                            ):
+                                raise AgentExecutionError(
+                                    "Claude did not return the required final artifact contract"
+                                )
                     else:
                         result = await self._run_with_retries(
                             lambda: run_codex(

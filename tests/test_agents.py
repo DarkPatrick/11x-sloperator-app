@@ -9,6 +9,7 @@ import pytest
 from sloperator.agents import (
     AGENT_RETRY_DELAYS,
     CLAUDE_INITIAL_INSTRUCTION,
+    FINAL_ARTIFACT_RECOVERY_PROMPT,
     AgentExecutionError,
     AgentOrchestrator,
     AgentRunResult,
@@ -251,3 +252,58 @@ async def test_agent_reply_uploads_artifact_to_same_thread(tmp_path) -> None:
         filename="analysis.zip",
         title="Артефакты анализа",
     )
+
+
+async def test_required_artifact_recovers_from_internal_claude_review_note(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "output" / "analysis.zip"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"zip")
+    run_claude = AsyncMock(
+        side_effect=(
+            AgentRunResult(
+                session_id="session-1",
+                text="Round-2 approval completed; nothing changes.",
+            ),
+            AgentRunResult(
+                session_id="session-1",
+                text="Actual finding\nSLOPERATOR_ARTIFACT: output/analysis.zip",
+            ),
+        )
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+    )
+    post_message = AsyncMock()
+    upload = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message, files_upload_v2=upload)
+    orchestrator = AgentOrchestrator(settings, store)
+
+    await orchestrator.submit(
+        client,
+        channel_id="C123",
+        message_ts="100.1:analysis",
+        thread_ts="100.1",
+        text="Investigate",
+        show_status=False,
+        require_artifact=True,
+    )
+    await orchestrator.drain()
+
+    assert run_claude.await_count == 2
+    assert run_claude.await_args.args[2] == FINAL_ARTIFACT_RECOVERY_PROMPT
+    assert run_claude.await_args.kwargs["force_resume"] is True
+    post_message.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        markdown_text="Actual finding",
+    )
+    upload.assert_awaited_once()

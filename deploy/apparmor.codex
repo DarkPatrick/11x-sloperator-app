@@ -1,0 +1,13 @@
+# Codex uses bubblewrap user namespaces to enforce workspace-write sandboxes.
+# Ubuntu hosts with kernel.apparmor_restrict_unprivileged_userns=1 need an
+# application profile; keep the process otherwise unconfined because systemd
+# supplies the outer service boundary and Codex supplies the inner sandbox.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile codex /usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-*/vendor/*/bin/codex flags=(unconfined) {
+  userns,
+
+  include if exists <local/codex>
+}

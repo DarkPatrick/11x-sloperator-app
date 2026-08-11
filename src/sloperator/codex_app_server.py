@@ -58,11 +58,9 @@ class CodexAppServer:
         environment.update(self.environment_overrides)
         return environment
 
-    async def connect(self) -> None:
-        """Start and initialize the App Server without opening a thread."""
-        if self.process is not None and self.process.returncode is None:
-            return
-        lock_path = self.workspace / ".git" / "sloperator-agent.lock"
+    def _command(self) -> list[str]:
+        """Build the App Server command with the repository metadata writable."""
+        git_dir = self.workspace / ".git"
         command = [
             str(self.executable),
             "-c",
@@ -71,14 +69,23 @@ class CodexAppServer:
             'sandbox_mode="workspace-write"',
             "-c",
             "sandbox_workspace_write.network_access=true",
+            "-c",
+            f"sandbox_workspace_write.writable_roots={json.dumps([str(git_dir)])}",
             "app-server",
             "--listen",
             "stdio://",
         ]
         if self.lock_workspace:
-            command = ["/usr/bin/flock", "-x", str(lock_path), *command]
+            lock_path = git_dir / "sloperator-agent.lock"
+            return ["/usr/bin/flock", "-x", str(lock_path), *command]
+        return command
+
+    async def connect(self) -> None:
+        """Start and initialize the App Server without opening a thread."""
+        if self.process is not None and self.process.returncode is None:
+            return
         self.process = await asyncio.create_subprocess_exec(
-            *command,
+            *self._command(),
             cwd=str(self.workspace),
             env=self._environment(),
             stdin=asyncio.subprocess.PIPE,

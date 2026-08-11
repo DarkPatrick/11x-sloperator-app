@@ -171,6 +171,15 @@ Build the pinned local image after cloning or whenever its definition changes:
 sudo docker build -t local/openvpn-agent:24.04 deploy/openvpn
 ```
 
+On Ubuntu hosts that restrict unprivileged user namespaces through AppArmor,
+install the included Codex profile so its bubblewrap-based `workspace-write`
+sandbox can start without disabling the host restriction globally:
+
+```bash
+sudo cp deploy/apparmor.codex /etc/apparmor.d/codex
+sudo apparmor_parser -r /etc/apparmor.d/codex
+```
+
 Claude Opus is the default. Select the provider and model in the first message:
 
 ```text

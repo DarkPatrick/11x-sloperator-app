@@ -102,7 +102,10 @@ async def test_admin_codex_manager_uses_shared_threads(tmp_path: Path) -> None:
         assert (await manager.list_threads())[0]["source"] == "appServer"
 
         assert await manager.submit(session["session_id"], "Inspect this") == "started"
-        await asyncio.shield(manager._tasks[session["session_id"]])
+        task = manager._tasks[session["session_id"]]
+        running = await manager.read(session["session_id"])
+        assert running["messages"][-1]["content"] == "Inspect this"
+        await asyncio.shield(task)
         persisted = await manager.read(session["session_id"])
 
         assert [(item["role"], item["content"]) for item in persisted["messages"]] == [

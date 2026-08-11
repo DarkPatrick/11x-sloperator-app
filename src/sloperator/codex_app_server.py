@@ -107,6 +107,7 @@ class CodexAppServer:
                 },
                 "capabilities": {"experimentalApi": True},
             },
+            request_timeout=self.timeout_seconds,
         )
         await self._notify("initialized", {})
 
@@ -276,7 +277,13 @@ class CodexAppServer:
             with suppress(asyncio.CancelledError):
                 await self._stderr_task
 
-    async def _request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        request_timeout: float = 30,
+    ) -> Mapping[str, Any]:
         process = self.process
         if process is None or process.stdin is None or process.returncode is not None:
             raise CodexAppServerError("Codex App Server is not running")
@@ -287,7 +294,7 @@ class CodexAppServer:
         self._pending[request_id] = future
         await self._write({"id": request_id, "method": method, "params": params})
         try:
-            message = await asyncio.wait_for(future, timeout=30)
+            message = await asyncio.wait_for(future, timeout=request_timeout)
         finally:
             self._pending.pop(request_id, None)
         error = message.get("error")

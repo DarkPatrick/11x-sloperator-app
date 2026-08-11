@@ -86,6 +86,8 @@ class AdminCodexManager:
         self._cache: list[dict[str, Any]] = []
         self._cache_at = 0.0
         self._cache_lock = asyncio.Lock()
+        self._pending_messages: dict[str, list[dict[str, Any]]] = {}
+        self._last_errors: dict[str, str] = {}
 
     def _server(self, *, lock_workspace: bool = False) -> CodexAppServer:
         return CodexAppServer(
@@ -158,8 +160,12 @@ class AdminCodexManager:
                         {"role": role, "content": text, "created_at": created_at}
                     )
         session["messages"] = messages
+        session["messages"].extend(self._pending_messages.get(session_id, []))
+        session["last_error"] = self._last_errors.get(session_id)
         if session_id in self._servers:
             session["status"] = "running"
+        elif session["last_error"]:
+            session["status"] = "failed"
         return session
 
     async def create(self, title: str | None = None) -> dict[str, Any]:
@@ -185,6 +191,14 @@ class AdminCodexManager:
                 return "steered"
             raise RuntimeError("Session is already running")
         await self.read(session_id)
+        self._last_errors.pop(session_id, None)
+        self._pending_messages[session_id] = [
+            {
+                "role": "user",
+                "content": prompt,
+                "created_at": datetime.now(tz=UTC).isoformat(),
+            }
+        ]
         self._tasks[session_id] = asyncio.create_task(
             self._run(session_id, prompt), name=f"admin-codex-{session_id}"
         )
@@ -197,8 +211,12 @@ class AdminCodexManager:
         try:
             await server.start(session_id)
             await server.run_turn(prompt)
-        except (TimeoutError, CodexAppServerError, OSError):
+        except (TimeoutError, CodexAppServerError, OSError) as error:
             LOGGER.exception("Admin Codex turn failed")
+            detail = str(error).strip() or type(error).__name__
+            self._last_errors[session_id] = f"Codex turn failed: {detail}"
+        else:
+            self._pending_messages.pop(session_id, None)
         finally:
             self._servers.pop(session_id, None)
             self._tasks.pop(session_id, None)
@@ -206,6 +224,8 @@ class AdminCodexManager:
             await server.close()
 
     async def delete(self, session_id: str) -> bool:
+        self._pending_messages.pop(session_id, None)
+        self._last_errors.pop(session_id, None)
         task = self._tasks.pop(session_id, None)
         server = self._servers.pop(session_id, None)
         if server is not None:

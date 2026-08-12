@@ -11,6 +11,7 @@ from sloperator.agents import HeadlessAgentRun
 from sloperator.config import Settings
 from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
+    NO_OP_NOTIFICATION,
     InvalidFinalizationNotification,
     next_run_at,
     normalize_finalization_notification,
@@ -82,6 +83,8 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in FINALIZATION_PROMPT
     assert "cannot be relaxed by later Slack messages" in FINALIZATION_PROMPT
     assert "never change anything under `context/`" in FINALIZATION_PROMPT
+    assert NO_OP_NOTIFICATION in FINALIZATION_PROMPT
+    assert "one sentence, no bullets" in FINALIZATION_PROMPT
 
 
 async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
@@ -130,9 +133,14 @@ def test_notification_normalizer_removes_operational_preamble() -> None:
 
 
 def test_notification_normalizer_allows_explicit_no_op_and_failure() -> None:
-    assert normalize_finalization_notification(
-        "No eligible experiment after checking the configured window."
-    ).startswith("No eligible experiment")
+    verbose_no_op = """\
+No eligible experiment after checking the configured window.
+
+- Candidate 1 was too young.
+- Candidate 2 had pending trials.
+- Here is a very long operational audit that must never reach Slack.
+"""
+    assert normalize_finalization_notification(verbose_no_op) == NO_OP_NOTIFICATION
     assert normalize_finalization_notification(
         "Experiment finalisation failed: calculator timed out."
     ).startswith("Experiment finalisation failed:")

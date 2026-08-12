@@ -18,6 +18,7 @@ from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_PREFIX = "No eligible experiment"
+NO_OP_NOTIFICATION = "No eligible experiment was found for calculation today."
 FAILURE_PREFIXES = (
     "Experiment finalisation failed:",
     "Experiment finalization failed:",
@@ -54,9 +55,10 @@ Selection rules:
    design table, or results for another iteration for completed итогов.
 5. If no experiment remains after rules 1-4, stop immediately: do not invoke the calculator, do not
    inspect fallback experiments outside these rules, make no Confluence or Jira writes, and return
-   a short `No eligible experiment` report. Otherwise choose only the oldest preliminary candidate
-   by actual end timestamp (then by experiment id as a deterministic tie-breaker). Do not calculate
-   or inspect a later candidate as a fallback during this run.
+   exactly `{NO_OP_NOTIFICATION}` and nothing else.
+   Otherwise choose only the oldest preliminary candidate. Order by actual end timestamp, then by
+   experiment id as a deterministic tie-breaker.
+   Do not calculate or inspect a later candidate as a fallback during this run.
 6. Before that one preliminary candidate can become eligible, obtain freshly calculated maturity
    data for it. Use results produced by this run; if its calculator rows are not demonstrably fresh,
    recalculate it first using the direct-library procedure below and verify the fresh rows. Never
@@ -66,14 +68,14 @@ Selection rules:
    applicable variation row for every configured client and segment. A value equal to or above 5%,
    or a missing, null, stale, failed, or unverifiable value, excludes the experiment before any
    Results/Insights/Decision generation and before any Confluence or Jira write. If it is excluded,
-   stop with a `No eligible experiment` report; do not calculate or select another experiment and do
-   not treat this expected no-op as an error. Pending charges are explicitly not an eligibility
-   condition: report incomplete charge maturity as a caveat in the published Results/Insights, but
-   do not exclude an otherwise eligible experiment for it.
+   return exactly `{NO_OP_NOTIFICATION}` and nothing else; do not calculate or select another
+   experiment and do not treat this expected no-op as an error. Pending charges are explicitly
+   not an eligibility condition: report incomplete charge maturity as a caveat in the published
+   Results/Insights, but do not exclude an otherwise eligible experiment for it.
 7. Immediately before any write, re-check the actual end timestamp/client classification and age
    gate, the admin/page conditions, and the strict pending-trials gate against the same fresh
    calculation. If the experiment is no longer eligible, make no Confluence or Jira writes and
-   return a short no-op report including the age, freshness, and pending-trials filters checked.
+   return exactly `{NO_OP_NOTIFICATION}` and nothing else. Keep filter/audit details internal.
 
 Execution for the selected experiment:
 1. State the selected title, id, end timestamp, clients, segments, target project page, iteration,
@@ -143,9 +145,10 @@ Notification:
 - Do not include a separate Project page line, Jira link/key/epic, Execution audit, calculation
   metadata, verification details, artifact list, file paths, or any other operational appendix.
   After the heading, mentions, and at most two conclusion bullets, stop.
-- For the no-eligible-candidate path, start with exactly `No eligible experiment` and give only the
-  short no-op report. For a failed workflow, start with exactly `Experiment finalisation failed:`
-  and give only the concise operator-facing failure. Do not put any text before these prefixes.
+- For every no-eligible-candidate path, return exactly `{NO_OP_NOTIFICATION}` as the entire
+  response: one sentence, no bullets, candidate list, filter details, audit, explanation, or
+  appendix. For a failed workflow, start with exactly `Experiment finalisation failed:` and give
+  only the concise operator-facing failure. Do not put any text before these formats.
 
 Use the current date/time in Asia/Nicosia for all relative-date and completion decisions.
 Never finalise more than one experiment in this run.
@@ -180,7 +183,9 @@ def normalize_finalization_notification(text: str) -> str:
             and "Results calculated and published." in candidate
         ):
             return "\n".join(lines[index:]).strip()
-    if stripped.startswith((NO_OP_PREFIX, *FAILURE_PREFIXES)):
+    if stripped.startswith(NO_OP_PREFIX):
+        return NO_OP_NOTIFICATION
+    if stripped.startswith(FAILURE_PREFIXES):
         return stripped
     raise InvalidFinalizationNotification(
         "Scheduled agent response has no valid completion, no-op, or failure heading"

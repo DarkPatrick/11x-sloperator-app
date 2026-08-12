@@ -11,6 +11,7 @@ from typing import Any
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.anomaly_alerts import AgentSubmitter
+from sloperator.automated_session_policy import AUTOMATED_SESSION_REPOSITORY_POLICY
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
@@ -126,6 +127,8 @@ Use the `time-series-research` skill to investigate the critical negative anomal
 UG Mobile Monetisation Health Monitoring report below. Work from
 `/home/egor/projects/ug-ai-analyst`, follow its CLAUDE.md and freshness preflight, and use its
 analytics context and data tools.
+
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
 
 Before querying, read these repository knowledge sources:
 - `context/data-warehouse/anomaly-detection.md` for the detector semantics, alert vocabulary,

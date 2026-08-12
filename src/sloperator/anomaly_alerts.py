@@ -16,6 +16,7 @@ from urllib.parse import quote
 import aiohttp
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.automated_session_policy import AUTOMATED_SESSION_REPOSITORY_POLICY
 from sloperator.config import Settings
 from sloperator.store import EventStore
 
@@ -595,6 +596,8 @@ def build_monetisation_agent_prompt(
 Use the `time-series-research` skill to investigate the confirmed UG monetisation anomalies
 below. Work from the current `/home/egor/projects/ug-ai-analyst` repository, follow its
 CLAUDE.md and freshness preflight, and use its analytics context and data tools.
+
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
 
 Alert timestamp: {batch.alert_dt or "unknown"} UTC
 Confirmed monetisation anomalies:

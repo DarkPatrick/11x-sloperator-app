@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import HeadlessAgentRun
+from sloperator.automated_session_policy import AUTOMATED_SESSION_REPOSITORY_POLICY
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
@@ -22,13 +23,15 @@ FAILURE_PREFIXES = (
     "Experiment finalization failed:",
 )
 
-FINALIZATION_PROMPT = """\
+FINALIZATION_PROMPT = f"""\
 This is the authorised daily autonomous experiment-finalisation job. Complete the whole
 workflow in this single turn. The user explicitly pre-approves progression through all three
 publication stages (Results, then Insights, then Decision / Next steps), including the required
 Confluence update and Jira comment. Do not pause to request approval between stages. This
 instruction intentionally overrides only the interactive approval pauses in the skills; keep
 all their data-quality, maturity, verification, language, and publication safeguards.
+
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
 
 Goal: finalise exactly one eligible UG monetisation experiment.
 

@@ -50,6 +50,13 @@ def test_next_run_skips_weekends() -> None:
 
 def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "oldest preliminary candidate" in FINALIZATION_PROMPT
+    assert "strict, fail-closed post-stop age gate" in FINALIZATION_PROMPT
+    assert "8 complete days (8 * 24" in FINALIZATION_PROMPT
+    assert "9 complete days (9 * 24" in FINALIZATION_PROMPT
+    assert "`UG_WEB` or `UG_MOBWEB`" in FINALIZATION_PROMPT
+    assert "mixed app+web experiment use the stricter" in FINALIZATION_PROMPT
+    assert "must not be calculated during this run" in FINALIZATION_PROMPT
+    assert "An exact threshold value passes" in FINALIZATION_PROMPT
     assert "at least one configured segment" in FINALIZATION_PROMPT
     assert "strict, fail-closed pending-trials gate" in FINALIZATION_PROMPT
     assert "strictly below 5%" in FINALIZATION_PROMPT
@@ -60,7 +67,7 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "calculator, do not" in FINALIZATION_PROMPT
     assert "Do not calculate" in FINALIZATION_PROMPT
     assert "treat this expected no-op as an error" in FINALIZATION_PROMPT
-    assert "one preliminary candidate chosen by rule 4" in FINALIZATION_PROMPT
+    assert "one preliminary candidate chosen by rule 5" in FINALIZATION_PROMPT
     assert "Results → Insights → Decision / Next steps" in FINALIZATION_PROMPT
     assert "one top-level message in the" in FINALIZATION_PROMPT
     assert "configured production channel" in FINALIZATION_PROMPT

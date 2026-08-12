@@ -14,6 +14,8 @@ from sloperator.agents import (
     AgentOrchestrator,
     AgentRunResult,
     extract_artifact,
+    fetch_thread_context,
+    optional_reply_instruction,
     parse_agent_request,
     retry_agent_service_errors,
     split_slack_message,
@@ -26,6 +28,53 @@ from sloperator.store import EventStore
 def test_claude_initial_instruction_references_claude_md() -> None:
     assert "CLAUDE.md" in CLAUDE_INITIAL_INSTRUCTION
     assert "AGENTS.md" not in CLAUDE_INITIAL_INSTRUCTION
+
+
+def test_optional_reply_instruction_defaults_to_silence_and_forbids_local_links() -> None:
+    prompt = optional_reply_instruction(
+        "интересно",
+        "[1.0] UOTHER: думаю, это сезонность\n[1.1] UOWNER: интересно",
+        "UOWNER",
+    )
+
+    assert "Silence is the default" in prompt
+    assert "talking to each other" in prompt
+    assert "merely references/links to you" in prompt
+    assert "Never mention or link local/server artifacts" in prompt
+    assert "Do not propose edits to your own repository/project" in prompt
+    assert "tag <@UOWNER>" in prompt
+    assert "corrections to experiment results" in prompt
+    assert "SLOPERATOR_NO_REPLY" in prompt
+    assert "UOTHER: думаю, это сезонность" in prompt
+
+
+@pytest.mark.asyncio
+async def test_fetch_thread_context_reads_all_pages_and_all_authors() -> None:
+    client = SimpleNamespace(
+        conversations_replies=AsyncMock(
+            side_effect=[
+                {
+                    "messages": [
+                        {"ts": "1.0", "user": "UOTHER", "text": "Это не агенту"},
+                    ],
+                    "response_metadata": {"next_cursor": "next"},
+                },
+                {
+                    "messages": [
+                        {"ts": "1.1", "user": "UOWNER", "text": "Что думаешь ты?"},
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            ]
+        )
+    )
+
+    context = await fetch_thread_context(client, "C123", "1.0")
+
+    assert "UOTHER: Это не агенту" in context
+    assert "UOWNER: Что думаешь ты?" in context
+    assert client.conversations_replies.await_count == 2
+    assert client.conversations_replies.await_args_list[1].kwargs["cursor"] == "next"
 
 
 @pytest.fixture

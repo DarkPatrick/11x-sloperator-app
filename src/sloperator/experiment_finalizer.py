@@ -228,6 +228,16 @@ async def run_once(
         FINALIZATION_PROMPT,
         settings.experiment_finalizer_timeout_seconds,
     )
+    return await publish_run(client, agent, settings, run)
+
+
+async def publish_run(
+    client: AsyncWebClient,
+    agent: AgentSubmitter,
+    settings: Settings,
+    run: HeadlessAgentRun,
+) -> str:
+    """Publish and attach a completed or restart-recovered finalizer run."""
     notification = normalize_finalization_notification(run.text)
     published_run = replace(run, text=notification)
     response = await client.chat_postMessage(

@@ -17,7 +17,7 @@ from sloperator.agents import AgentOrchestrator, validate_agent_runtime
 from sloperator.archive import periodically_synchronize_archive, synchronize_archive
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
-from sloperator.experiment_finalizer import cancel_task, run_daily
+from sloperator.experiment_finalizer import cancel_task, publish_run, run_daily
 from sloperator.health import create_health_app
 from sloperator.store import EventStore
 from sloperator.subscription_flow import (
@@ -84,6 +84,20 @@ async def serve(settings: Settings) -> None:
     try:
         await site.start()
         await slack_handler.connect_async()  # type: ignore[no-untyped-call]
+        await orchestrator.resume_interrupted(app.client)
+        recovered_headless = await orchestrator.resume_interrupted_headless(
+            settings.experiment_finalizer_timeout_seconds
+        )
+        for run in recovered_headless:
+            await publish_run(app.client, orchestrator, settings, run)
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status="completed",
+                    external_session_id=run.session_id,
+                    result_text=run.text,
+                )
         await synchronize_archive(app.client, store, settings.backfill_limit)
         archive_task = asyncio.create_task(
             periodically_synchronize_archive(

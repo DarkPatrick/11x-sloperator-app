@@ -51,6 +51,11 @@ artifact archive when the original request required one. Clearly distinguish inc
 from verified ones. Your response will be prefixed with this notice by Sloperator:
 `{TIME_LIMIT_NOTICE}`
 """
+RESTART_RECOVERY_PROMPT = """\
+The Sloperator service restarted while this automated turn was running. Resume the same task from
+the existing session and workspace state. Inspect what has already completed, avoid repeating
+finished expensive calculations, and continue through the originally requested final response.
+"""
 INITIAL_INSTRUCTION = """\
 Act as a pragmatic product analyst embedded in the Ultimate Guitar monetisation team.
 Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
@@ -562,6 +567,7 @@ class AgentOrchestrator:
         self._active_runs: dict[tuple[str, str], ActiveAgentRun] = {}
         self._headless_tasks: dict[tuple[str, str], asyncio.Task[object]] = {}
         self._headless_sessions: dict[tuple[str, str], dict[str, object]] = {}
+        self._manual_cancellations: set[tuple[str, str]] = set()
 
     def headless_sessions(self) -> list[dict[str, object]]:
         """Return cron/headless runs for display and control in the admin UI."""
@@ -644,6 +650,21 @@ class AgentOrchestrator:
             return SubmitResult.STEERED
         if next_match is not None:
             text = text[next_match.end() :].strip()
+        await asyncio.to_thread(
+            self.store.save_durable_agent_run,
+            channel_id,
+            message_ts,
+            thread_ts,
+            text,
+            {
+                "show_status": show_status,
+                "timeout_seconds": timeout_seconds,
+                "disable_link_previews": disable_link_previews,
+                "optional_reply": optional_reply,
+                "require_artifact": require_artifact,
+                "automated": automated,
+            },
+        )
         task = asyncio.create_task(
             self._process(
                 client,
@@ -664,6 +685,41 @@ class AgentOrchestrator:
         self._thread_tasks.setdefault(key, set()).add(task)
         task.add_done_callback(self._task_done)
         return SubmitResult.QUEUED
+
+    async def resume_interrupted(self, client: AsyncWebClient) -> int:
+        """Resume durable automated Slack turns left by a service restart."""
+        rows = await asyncio.to_thread(self.store.list_interrupted_durable_agent_runs)
+        for row in rows:
+            channel_id = str(row["channel_id"])
+            message_ts = str(row["message_ts"])
+            thread_ts = str(row["thread_ts"])
+            original_prompt = str(row["prompt"])
+            options = row["options"]
+            assert isinstance(options, dict)
+            prompt = f"{RESTART_RECOVERY_PROMPT}\n\nOriginal request:\n{original_prompt}"
+            key = (channel_id, thread_ts)
+            task = asyncio.create_task(
+                self._process(
+                    client,
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    thread_ts=thread_ts,
+                    text=prompt,
+                    show_status=bool(options.get("show_status", False)),
+                    timeout_seconds=options.get("timeout_seconds"),
+                    disable_link_previews=bool(options.get("disable_link_previews", False)),
+                    optional_reply=bool(options.get("optional_reply", False)),
+                    require_artifact=bool(options.get("require_artifact", False)),
+                    automated=bool(options.get("automated", False)),
+                ),
+                name=f"recovered-agent-turn-{channel_id}-{message_ts}",
+            )
+            self._tasks.add(task)
+            self._thread_tasks.setdefault(key, set()).add(task)
+            task.add_done_callback(self._task_done)
+        if rows:
+            LOGGER.warning("Resumed %d interrupted automated agent turn(s)", len(rows))
+        return len(rows)
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
@@ -798,11 +854,16 @@ class AgentOrchestrator:
                     ),
                 )
         except asyncio.CancelledError:
-            self._headless_sessions[key].update(status="cancelled", last_error=None)
+            interrupted_status = (
+                "cancelled" if key in self._manual_cancellations else "interrupted"
+            )
+            self._headless_sessions[key].update(
+                status=interrupted_status, last_error=None
+            )
             await asyncio.to_thread(
                 self.store.finish_scheduled_agent_run,
                 run_id,
-                status="cancelled",
+                status=interrupted_status,
             )
             raise
         except Exception as error:
@@ -860,6 +921,133 @@ class AgentOrchestrator:
             run_id=run_id,
         )
 
+    async def resume_interrupted_headless(
+        self, timeout_seconds: int
+    ) -> list[HeadlessAgentRun]:
+        """Resume interrupted cron turns in their original provider sessions."""
+        rows = await asyncio.to_thread(self.store.list_interrupted_scheduled_agent_runs)
+        completed: list[HeadlessAgentRun] = []
+        for row in rows:
+            run_id = str(row["run_id"])
+            if row["status"] == "recovered" and isinstance(row["result_text"], str):
+                completed.append(
+                    HeadlessAgentRun(
+                        provider=str(row["provider"]),
+                        model=str(row["model"]),
+                        session_id=str(row["external_session_id"] or ""),
+                        text=str(row["result_text"]),
+                        run_id=run_id,
+                    )
+                )
+                continue
+            session = AgentSession(
+                channel_id="scheduled",
+                thread_ts=run_id,
+                provider=str(row["provider"]),
+                model=str(row["model"]),
+                external_session_id=(
+                    str(row["external_session_id"])
+                    if row["external_session_id"] is not None
+                    else None
+                ),
+                status="cancelled",
+                turn_count=0,
+                last_error=None,
+            )
+            control = ActiveAgentRun(session.provider)
+            key = (session.channel_id, session.thread_ts)
+            self._active_runs[key] = control
+            recovery_prompt = (
+                f"{RESTART_RECOVERY_PROMPT}\n\nOriginal request:\n{row['prompt']}"
+            )
+            run_settings = replace(
+                self.settings, agent_timeout_seconds=timeout_seconds
+            )
+            environment_overrides = {
+                **(
+                    self.vpn.agent_environment()
+                    if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
+                    else {}
+                ),
+                "UG_SKIP_PREFLIGHT": "1",
+            }
+
+            if session.provider == "claude":
+                resume_provider = partial(
+                    run_claude,
+                    run_settings,
+                    session,
+                    recovery_prompt,
+                    control,
+                    force_resume=True,
+                    environment_overrides=environment_overrides,
+                )
+            else:
+                resume_provider = partial(
+                    run_codex,
+                    run_settings,
+                    session,
+                    recovery_prompt,
+                    control,
+                    self.store,
+                    environment_overrides,
+                )
+
+            try:
+                result = await self._run_with_retries(
+                    resume_provider, context=f"recovered scheduled turn {run_id}"
+                )
+            except AgentTimeoutError:
+                recovery_settings = replace(
+                    run_settings, agent_timeout_seconds=TIMEOUT_RECOVERY_SECONDS
+                )
+                if session.provider == "claude":
+                    result = await run_claude(
+                        recovery_settings,
+                        session,
+                        TIMEOUT_RECOVERY_PROMPT,
+                        control,
+                        force_resume=True,
+                        environment_overrides=environment_overrides,
+                    )
+                else:
+                    result = await run_codex(
+                        recovery_settings,
+                        session,
+                        TIMEOUT_RECOVERY_PROMPT,
+                        control,
+                        self.store,
+                        environment_overrides,
+                    )
+                result = replace(
+                    result,
+                    text=(
+                        "Experiment finalisation failed: agent exhausted its work-time limit. "
+                        f"{result.text.strip()}"
+                    ),
+                )
+            finally:
+                self._active_runs.pop(key, None)
+            await asyncio.to_thread(
+                self.store.finish_scheduled_agent_run,
+                run_id,
+                status="recovered",
+                external_session_id=result.session_id,
+                result_text=result.text,
+            )
+            completed.append(
+                HeadlessAgentRun(
+                    provider=session.provider,
+                    model=session.model,
+                    session_id=result.session_id,
+                    text=result.text,
+                    run_id=run_id,
+                )
+            )
+        if completed:
+            LOGGER.warning("Resumed %d interrupted scheduled turn(s)", len(completed))
+        return completed
+
     async def attach_session(
         self,
         channel_id: str,
@@ -892,9 +1080,11 @@ class AgentOrchestrator:
             tasks.append(headless_task)
         if not tasks:
             return False
+        self._manual_cancellations.add(key)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        self._manual_cancellations.discard(key)
         return True
 
     def active_keys(self) -> set[tuple[str, str]]:
@@ -996,6 +1186,12 @@ class AgentOrchestrator:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
         request_status = "failed"
+        await asyncio.to_thread(
+            self.store.set_durable_agent_run_status,
+            channel_id,
+            message_ts,
+            "running",
+        )
         try:
             async with lock:
                 session = await asyncio.to_thread(
@@ -1227,7 +1423,9 @@ class AgentOrchestrator:
                 channel_id,
                 thread_ts,
             )
-            request_status = "cancelled"
+            request_status = (
+                "cancelled" if key in self._manual_cancellations else "interrupted"
+            )
             raise
         except Exception as error:
             await asyncio.to_thread(
@@ -1252,6 +1450,12 @@ class AgentOrchestrator:
                 await self._set_status(client, channel_id, thread_ts, "")
             await asyncio.to_thread(
                 self.store.finish_agent_request,
+                channel_id,
+                message_ts,
+                request_status,
+            )
+            await asyncio.to_thread(
+                self.store.set_durable_agent_run_status,
                 channel_id,
                 message_ts,
                 request_status,

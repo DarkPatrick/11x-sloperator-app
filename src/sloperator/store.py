@@ -109,6 +109,18 @@ CREATE TABLE IF NOT EXISTS agent_requests (
     PRIMARY KEY (channel_id, message_ts)
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS durable_agent_runs (
+    channel_id TEXT NOT NULL,
+    message_ts TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    options_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (channel_id, message_ts)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS admin_agent_messages (
     message_id INTEGER PRIMARY KEY,
     channel_id TEXT NOT NULL,
@@ -1155,6 +1167,91 @@ class EventStore:
                 """,
                 (status, channel_id, message_ts),
             )
+
+    def save_durable_agent_run(
+        self,
+        channel_id: str,
+        message_ts: str,
+        thread_ts: str,
+        prompt: str,
+        options: Mapping[str, object],
+    ) -> None:
+        """Persist an automated turn so a service restart can resume it."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO durable_agent_runs(
+                    channel_id, message_ts, thread_ts, prompt, options_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(channel_id, message_ts) DO UPDATE SET
+                    thread_ts = excluded.thread_ts,
+                    prompt = excluded.prompt,
+                    options_json = excluded.options_json,
+                    status = 'queued',
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (channel_id, message_ts, thread_ts, prompt, json.dumps(options)),
+            )
+
+    def set_durable_agent_run_status(
+        self, channel_id: str, message_ts: str, status: str
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE durable_agent_runs
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ? AND message_ts = ?
+                """,
+                (status, channel_id, message_ts),
+            )
+
+    def list_interrupted_durable_agent_runs(self) -> list[dict[str, object]]:
+        """Return durable turns that did not reach a terminal result."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT channel_id, message_ts, thread_ts, prompt, options_json
+                FROM durable_agent_runs
+                WHERE status IN ('queued', 'running', 'interrupted')
+                ORDER BY created_at
+                """
+            ).fetchall()
+        return [
+            {
+                "channel_id": row[0],
+                "message_ts": row[1],
+                "thread_ts": row[2],
+                "prompt": row[3],
+                "options": json.loads(row[4]),
+            }
+            for row in rows
+        ]
+
+    def list_interrupted_scheduled_agent_runs(self) -> list[dict[str, object]]:
+        """Return headless cron turns interrupted before producing a result."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT run_id, provider, model, external_session_id, prompt,
+                       status, result_text
+                FROM scheduled_agent_runs
+                WHERE status IN ('running', 'interrupted', 'recovered')
+                ORDER BY created_at
+                """
+            ).fetchall()
+        return [
+            {
+                "run_id": row[0],
+                "provider": row[1],
+                "model": row[2],
+                "external_session_id": row[3],
+                "prompt": row[4],
+                "status": row[5],
+                "result_text": row[6],
+            }
+            for row in rows
+        ]
 
     def channel_map(self) -> list[tuple[str, str | None, str, bool]]:
         """Return channel identifiers and membership without message content."""

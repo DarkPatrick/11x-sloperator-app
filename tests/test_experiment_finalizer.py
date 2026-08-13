@@ -50,6 +50,14 @@ def test_next_run_skips_weekends() -> None:
 
 
 def test_prompt_has_selection_pipeline_and_production_routing() -> None:
+    assert "get_ugm_exps_list(config=cfg)" in FINALIZATION_PROMPT
+    assert "authoritative allowlist" in FINALIZATION_PROMPT
+    assert "never inspect, calculate, select, or publish" in FINALIZATION_PROMPT
+    assert "UG Monetization" in FINALIZATION_PROMPT
+    assert "UG Monetisation" in FINALIZATION_PROMPT
+    assert "монетизац" in FINALIZATION_PROMPT
+    assert "Apply both checks before" in FINALIZATION_PROMPT
+    assert "re-fetch the UGM allowlist" in FINALIZATION_PROMPT
     assert "oldest preliminary candidate" in FINALIZATION_PROMPT
     assert "strict, fail-closed post-stop age gate" in FINALIZATION_PROMPT
     assert "8 complete days (8 * 24" in FINALIZATION_PROMPT
@@ -68,7 +76,7 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "calculator, do not" in FINALIZATION_PROMPT
     assert "Do not calculate" in FINALIZATION_PROMPT
     assert "treat this expected no-op as an error" in FINALIZATION_PROMPT
-    assert "one preliminary candidate chosen by rule 5" in FINALIZATION_PROMPT
+    assert "one preliminary candidate chosen by rule 6" in FINALIZATION_PROMPT
     assert "Results → Insights → Decision / Next steps" in FINALIZATION_PROMPT
     assert "one top-level message in the" in FINALIZATION_PROMPT
     assert "configured production channel" in FINALIZATION_PROMPT

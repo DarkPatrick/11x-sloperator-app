@@ -37,11 +37,20 @@ all their data-quality, maturity, verification, language, and publication safegu
 Goal: finalise exactly one eligible UG monetisation experiment.
 
 Selection rules:
-1. Use the UG experiment admin/source of truth to find experiments whose actual experiment end
+1. Start exclusively from `ug_experiment_calculator.get_ugm_exps_list(config=cfg)`. Treat the
+   returned ids as the authoritative allowlist: never inspect, calculate, select, or publish an
+   experiment whose id is absent from that list. Do not use the general experiment list and then
+   infer the domain from metrics, clients, segments, a project page, or other metadata. If the UGM
+   allowlist lookup fails or cannot be verified, fail closed with no eligible experiment.
+   As an independent sanity check, require the experiment title (case-insensitively) to contain
+   `UG Monetization`, `UG Monetisation`, or the Russian stem `монетизац`. Absence of all
+   three markers makes the experiment ineligible even when its id appears in the UGM allowlist.
+   Apply both checks before inspecting project pages and before invoking the calculator.
+2. Use the UG experiment admin/source of truth to find experiments whose actual experiment end
    timestamp is in the closed interval [now minus one calendar month, now]. Include only
    experiments that have already ended; exclude running, scheduled, paused without an actual
    end, or otherwise unfinished experiments.
-2. Apply a strict, fail-closed post-stop age gate before invoking the calculator or reading any
+3. Apply a strict, fail-closed post-stop age gate before invoking the calculator or reading any
    calculation rows. Compute elapsed age from the experiment's actual end timestamp to the current
    time: every app-only experiment must have been stopped for at least 8 complete days (8 * 24
    hours), while every experiment with a web client (`UG_WEB` or `UG_MOBWEB`) must have been stopped
@@ -49,17 +58,17 @@ Selection rules:
    9-day threshold. An exact threshold value passes. A younger experiment, or one with a missing,
    ambiguous, future, or unverifiable actual end timestamp/client classification, is ineligible and
    must not be calculated during this run.
-3. Keep only experiments that have at least one configured segment in the admin.
-4. Locate each experiment's project page and exclude it if the final Results/Итоги section for
+4. Keep only experiments that have at least one configured segment in the admin.
+5. Locate each experiment's project page and exclude it if the final Results/Итоги section for
    this experiment/iteration is already populated. Do not mistake a template, empty placeholder,
    design table, or results for another iteration for completed итогов.
-5. If no experiment remains after rules 1-4, stop immediately: do not invoke the calculator, do not
+6. If no experiment remains after rules 1-5, stop immediately: do not invoke the calculator, do not
    inspect fallback experiments outside these rules, make no Confluence or Jira writes, and return
    exactly `{NO_OP_NOTIFICATION}` and nothing else.
    Otherwise choose only the oldest preliminary candidate. Order by actual end timestamp, then by
    experiment id as a deterministic tie-breaker.
    Do not calculate or inspect a later candidate as a fallback during this run.
-6. Before that one preliminary candidate can become eligible, obtain freshly calculated maturity
+7. Before that one preliminary candidate can become eligible, obtain freshly calculated maturity
    data for it. Use results produced by this run; if its calculator rows are not demonstrably fresh,
    recalculate it first using the direct-library procedure below and verify the fresh rows. Never
    determine eligibility from stale cached results. Apply a strict, fail-closed pending-trials gate
@@ -72,8 +81,9 @@ Selection rules:
    experiment and do not treat this expected no-op as an error. Pending charges are explicitly
    not an eligibility condition: report incomplete charge maturity as a caveat in the published
    Results/Insights, but do not exclude an otherwise eligible experiment for it.
-7. Immediately before any write, re-check the actual end timestamp/client classification and age
-   gate, the admin/page conditions, and the strict pending-trials gate against the same fresh
+8. Immediately before any write, re-fetch the UGM allowlist and experiment title and re-check both
+   monetisation gates from rule 1, the actual end timestamp/client classification and age gate, the
+   admin/page conditions, and the strict pending-trials gate against the same fresh
    calculation. If the experiment is no longer eligible, make no Confluence or Jira writes and
    return exactly `{NO_OP_NOTIFICATION}` and nothing else. Keep filter/audit details internal.
 
@@ -89,7 +99,7 @@ Execution for the selected experiment:
    `ExperimentCalculatorConfig.from_env()` configuration and the
    `ug_monetization_sloperator_` table prefix. This direct calculation is explicitly authorised for
    this scheduled job, including its documented writes and subscription-source refresh. During
-   selection, run this procedure only for the one preliminary candidate chosen by rule 5; do not
+   selection, run this procedure only for the one preliminary candidate chosen by rule 6; do not
    calculate the selected experiment a second time when its verified calculation is still fresh.
    Wait for each call to finish and verify fresh successful rows in every expected
    result/stat/funnel and raw users table before continuing. Do not silently use stale results. If

@@ -41,6 +41,16 @@ final Slack answer now, followed by the existing archive marker on its own final
 `SLOPERATOR_ARTIFACT: relative/path/to/archive.zip`. The response must be self-contained and
 must not mention internal review rounds, approvals, critics, orchestration, or this correction.
 """
+TIME_LIMIT_NOTICE = "⚠️ Агент исчерпал лимит работы; ниже — всё, что удалось собрать."
+TIMEOUT_RECOVERY_SECONDS = 300
+TIMEOUT_RECOVERY_PROMPT = f"""\
+The previous turn exhausted its work-time limit. Do not continue the investigation, run queries,
+start reviews, or improve the analysis. Immediately return everything useful already established
+or prepared, even if incomplete. Package any existing reader-safe deliverables into the required
+artifact archive when the original request required one. Clearly distinguish incomplete findings
+from verified ones. Your response will be prefixed with this notice by Sloperator:
+`{TIME_LIMIT_NOTICE}`
+"""
 INITIAL_INSTRUCTION = """\
 Act as a pragmatic product analyst embedded in the Ultimate Guitar monetisation team.
 Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
@@ -73,6 +83,10 @@ class AgentExecutionError(RuntimeError):
     """Raised when an agent CLI turn cannot complete successfully."""
 
 
+class AgentTimeoutError(AgentExecutionError):
+    """Raised when an agent turn reaches its configured work-time limit."""
+
+
 class AgentSteeringInterrupt(RuntimeError):
     """Raised after a Claude process was interrupted for new user guidance."""
 
@@ -87,6 +101,8 @@ async def retry_agent_service_errors[AgentResult](
     for retry_number, delay in enumerate(delays, start=1):
         try:
             return await operation()
+        except AgentTimeoutError:
+            raise
         except AgentExecutionError as error:
             LOGGER.warning(
                 "Agent service failure during %s; retry %d/%d in %.0f seconds: %s",
@@ -395,7 +411,7 @@ async def _run_process(
         )
     except TimeoutError:
         await _terminate_process(process)
-        raise AgentExecutionError(
+        raise AgentTimeoutError(
             f"Agent turn exceeded the {timeout_seconds}-second timeout"
         ) from None
     except asyncio.CancelledError:
@@ -517,7 +533,7 @@ async def run_codex(
         text = await server.run_turn(effective_prompt)
         return AgentRunResult(session_id=session_id, text=text)
     except TimeoutError:
-        raise AgentExecutionError(
+        raise AgentTimeoutError(
             f"Agent turn exceeded the {settings.agent_timeout_seconds}-second timeout"
         ) from None
     except CodexAppServerError as error:
@@ -599,6 +615,7 @@ class AgentOrchestrator:
         disable_link_previews: bool = False,
         optional_reply: bool = False,
         require_artifact: bool = False,
+        automated: bool = False,
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
         claim = await asyncio.to_thread(
@@ -639,6 +656,7 @@ class AgentOrchestrator:
                 disable_link_previews=disable_link_previews,
                 optional_reply=optional_reply,
                 require_artifact=require_artifact,
+                automated=automated,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
@@ -710,16 +728,16 @@ class AgentOrchestrator:
         if current_task is not None:
             self._headless_tasks[key] = current_task
         self._active_runs[key] = control
+        environment_overrides = {
+            **(
+                self.vpn.agent_environment()
+                if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
+                else {}
+            ),
+            "UG_SKIP_PREFLIGHT": "1",
+        }
 
         async def execute_provider() -> AgentRunResult:
-            environment_overrides = {
-                **(
-                    self.vpn.agent_environment()
-                    if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
-                    else {}
-                ),
-                "UG_SKIP_PREFLIGHT": "1",
-            }
             if session.provider == "claude":
                 result = await run_claude(
                     run_settings,
@@ -740,10 +758,45 @@ class AgentOrchestrator:
             return result
 
         try:
-            result = await self._run_with_retries(
-                execute_provider,
-                context="scheduled agent turn",
-            )
+            try:
+                result = await self._run_with_retries(
+                    execute_provider,
+                    context="scheduled agent turn",
+                )
+            except AgentTimeoutError:
+                LOGGER.warning(
+                    "Scheduled agent exhausted its work-time limit; requesting partial result"
+                )
+                recovery_settings = replace(
+                    run_settings,
+                    agent_timeout_seconds=TIMEOUT_RECOVERY_SECONDS,
+                )
+                recovery_session = replace(session, status="cancelled")
+                if session.provider == "claude":
+                    result = await run_claude(
+                        recovery_settings,
+                        recovery_session,
+                        TIMEOUT_RECOVERY_PROMPT,
+                        control,
+                        force_resume=True,
+                        environment_overrides=environment_overrides,
+                    )
+                else:
+                    result = await run_codex(
+                        recovery_settings,
+                        recovery_session,
+                        TIMEOUT_RECOVERY_PROMPT,
+                        control,
+                        self.store,
+                        environment_overrides,
+                    )
+                result = replace(
+                    result,
+                    text=(
+                        "Experiment finalisation failed: agent exhausted its work-time limit. "
+                        f"{result.text.strip()}"
+                    ),
+                )
         except asyncio.CancelledError:
             self._headless_sessions[key].update(status="cancelled", last_error=None)
             await asyncio.to_thread(
@@ -938,6 +991,7 @@ class AgentOrchestrator:
         disable_link_previews: bool,
         optional_reply: bool,
         require_artifact: bool,
+        automated: bool,
     ) -> None:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -1107,6 +1161,41 @@ class AgentOrchestrator:
                             ),
                             context=f"Slack thread {thread_ts}",
                         )
+                except AgentTimeoutError:
+                    if not automated:
+                        raise
+                    LOGGER.warning(
+                        "Automated agent in Slack thread %s exhausted its work-time limit; "
+                        "requesting partial result",
+                        thread_ts,
+                    )
+                    recovery_settings = replace(
+                        self.settings,
+                        agent_timeout_seconds=TIMEOUT_RECOVERY_SECONDS,
+                    )
+                    recovery_session = replace(session, status="cancelled")
+                    if session.provider == "claude":
+                        result = await run_claude(
+                            recovery_settings,
+                            recovery_session,
+                            TIMEOUT_RECOVERY_PROMPT,
+                            control,
+                            force_resume=True,
+                            environment_overrides=environment_overrides,
+                        )
+                    else:
+                        result = await run_codex(
+                            recovery_settings,
+                            recovery_session,
+                            TIMEOUT_RECOVERY_PROMPT,
+                            control,
+                            self.store,
+                            environment_overrides,
+                        )
+                    result = replace(
+                        result,
+                        text=f"{TIME_LIMIT_NOTICE}\n\n{result.text.strip()}",
+                    )
                 finally:
                     if self._active_runs.get(key) is control:
                         self._active_runs.pop(key, None)

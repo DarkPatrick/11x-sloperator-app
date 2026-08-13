@@ -61,6 +61,7 @@ class Settings:
     experiment_finalizer_hour: int = 12
     experiment_finalizer_timeout_seconds: int = 5_400
     experiment_finalizer_channel: str = "C07A9FDQ14P"
+    mobile_health_timeout_seconds: int = 3_600
     ldap_username: str | None = None
     ldap_password: str | None = None
     vpn_profile: Path = Path("/home/egor/hz config 2fa.ovpn")
@@ -128,6 +129,9 @@ class Settings:
         experiment_finalizer_channel = os.environ.get(
             "EXPERIMENT_FINALIZER_CHANNEL", "C07A9FDQ14P"
         ).strip()
+        mobile_health_timeout_seconds = int(
+            os.environ.get("MOBILE_HEALTH_TIMEOUT_SECONDS", "3600")
+        )
         ldap_username = os.environ.get("LDAP_USERNAME")
         ldap_password = os.environ.get("LDAP_PASSWORD")
         vpn_profile = Path(
@@ -217,6 +221,10 @@ class Settings:
             raise ConfigurationError(
                 "EXPERIMENT_FINALIZER_TIMEOUT_SECONDS must be between 300 and 86400"
             )
+        if not 300 <= mobile_health_timeout_seconds <= 86_400:
+            raise ConfigurationError(
+                "MOBILE_HEALTH_TIMEOUT_SECONDS must be between 300 and 86400"
+            )
         try:
             from zoneinfo import ZoneInfo
 
@@ -286,6 +294,7 @@ class Settings:
             experiment_finalizer_hour=experiment_finalizer_hour,
             experiment_finalizer_timeout_seconds=experiment_finalizer_timeout_seconds,
             experiment_finalizer_channel=experiment_finalizer_channel,
+            mobile_health_timeout_seconds=mobile_health_timeout_seconds,
             ldap_username=ldap_username,
             ldap_password=ldap_password,
             vpn_profile=vpn_profile,

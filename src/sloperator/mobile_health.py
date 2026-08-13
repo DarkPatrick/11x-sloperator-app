@@ -214,6 +214,8 @@ class MobileHealthResponder:
                 text=build_mobile_health_agent_prompt(report_text, metrics),
                 show_status=False,
                 require_artifact=True,
+                timeout_seconds=self.settings.mobile_health_timeout_seconds,
+                automated=True,
             )
         finally:
             self._in_flight.discard(message_ts)

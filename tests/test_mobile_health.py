@@ -153,3 +153,5 @@ async def test_responder_opens_session_in_source_report_thread(
     agent.submit.assert_awaited_once()
     assert agent.submit.await_args.kwargs["thread_ts"] == "100.1"
     assert agent.submit.await_args.kwargs["show_status"] is False
+    assert agent.submit.await_args.kwargs["timeout_seconds"] == 3_600
+    assert agent.submit.await_args.kwargs["automated"] is True

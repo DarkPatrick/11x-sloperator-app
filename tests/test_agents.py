@@ -10,9 +10,12 @@ from sloperator.agents import (
     AGENT_RETRY_DELAYS,
     CLAUDE_INITIAL_INSTRUCTION,
     FINAL_ARTIFACT_RECOVERY_PROMPT,
+    TIME_LIMIT_NOTICE,
+    TIMEOUT_RECOVERY_PROMPT,
     AgentExecutionError,
     AgentOrchestrator,
     AgentRunResult,
+    AgentTimeoutError,
     extract_artifact,
     fetch_thread_context,
     optional_reply_instruction,
@@ -158,6 +161,64 @@ async def test_agent_service_error_is_raised_only_after_all_retries(
     assert [call.args[0] for call in sleep.await_args_list] == [15, 30]
 
 
+async def test_agent_timeout_is_never_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = AsyncMock(side_effect=AgentTimeoutError("limit reached"))
+    sleep = AsyncMock()
+    monkeypatch.setattr("sloperator.agents.asyncio.sleep", sleep)
+
+    with pytest.raises(AgentTimeoutError, match="limit reached"):
+        await retry_agent_service_errors(operation, context="automated trigger")
+
+    operation.assert_awaited_once()
+    sleep.assert_not_awaited()
+
+
+async def test_automated_trigger_returns_partial_result_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_claude = AsyncMock(
+        side_effect=(
+            AgentTimeoutError("limit reached"),
+            AgentRunResult(session_id="session-1", text="Partial verified finding"),
+        )
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+    )
+    post_message = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message, files_upload_v2=AsyncMock())
+    orchestrator = AgentOrchestrator(settings, store)
+
+    await orchestrator.submit(
+        client,
+        channel_id="C123",
+        message_ts="100.1:analysis",
+        thread_ts="100.1",
+        text="Investigate",
+        show_status=False,
+        automated=True,
+    )
+    await orchestrator.drain()
+
+    assert run_claude.await_count == 2
+    assert run_claude.await_args.args[2] == TIMEOUT_RECOVERY_PROMPT
+    assert run_claude.await_args.kwargs["force_resume"] is True
+    post_message.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        markdown_text=f"{TIME_LIMIT_NOTICE}\n\nPartial verified finding",
+    )
+
+
 async def test_headless_run_is_visible_and_disables_interactive_hooks(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
@@ -191,6 +252,32 @@ async def test_headless_run_is_visible_and_disables_interactive_hooks(
     assert orchestrator.headless_sessions() == []
     assert store.list_scheduled_agent_runs()[0]["thread_ts"] == result.run_id
     assert store.get_agent_session("D123", "100.1") is not None
+
+
+async def test_headless_timeout_returns_partial_failure_without_retry(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_claude = AsyncMock(
+        side_effect=(
+            AgentTimeoutError("limit reached"),
+            AgentRunResult(session_id="session-1", text="Partial calculation details"),
+        )
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    orchestrator = AgentOrchestrator(settings, store)
+
+    result = await orchestrator.execute_once("Automated work", 5_400)
+
+    assert run_claude.await_count == 2
+    assert run_claude.await_args.args[2] == TIMEOUT_RECOVERY_PROMPT
+    assert result.text == (
+        "Experiment finalisation failed: agent exhausted its work-time limit. "
+        "Partial calculation details"
+    )
 
 
 def test_split_slack_message_preserves_all_text() -> None:

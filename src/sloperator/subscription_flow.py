@@ -236,6 +236,7 @@ class SubscriptionFlowResponder:
             thread_ts=message_ts,
             text=build_subscription_flow_agent_prompt(incident),
             show_status=False,
+            automated=True,
         )
 
     async def _is_own_bot(

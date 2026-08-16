@@ -15,6 +15,7 @@ from slack_bolt.async_app import AsyncApp
 from sloperator.admin import create_admin_routes
 from sloperator.agents import AgentOrchestrator, validate_agent_runtime
 from sloperator.archive import periodically_synchronize_archive, synchronize_archive
+from sloperator.automation_controls import AutomationControls
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
 from sloperator.experiment_finalizer import cancel_task, publish_run, run_daily
@@ -47,6 +48,9 @@ async def serve(settings: Settings) -> None:
         LOGGER.warning("Recovered %d interrupted agent session(s)", recovered)
     vpn = VpnManager(settings)
     orchestrator = AgentOrchestrator(settings, store, vpn)
+    automation_controls = AutomationControls(
+        settings.database_path.parent / "automation-controls.json"
+    )
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     app = create_app(
         settings,
@@ -54,6 +58,7 @@ async def serve(settings: Settings) -> None:
         orchestrator,
         vpn,
         subscription_flow_responder=subscription_flow_responder,
+        automation_controls=automation_controls,
     )
 
     async def handle_new_history_message(
@@ -61,12 +66,14 @@ async def serve(settings: Settings) -> None:
         message: Mapping[str, object],
     ) -> None:
         event = {**message, "channel": channel_id}
-        if is_subscription_flow_event(event, settings):
+        if not automation_controls.disabled(
+            "triggers", "subscription-flow"
+        ) and is_subscription_flow_event(event, settings):
             await subscription_flow_responder.handle(event, app.client)
 
     slack_handler = AsyncSocketModeHandler(app, settings.app_token)
     http_app = create_health_app()
-    create_admin_routes(http_app, store, orchestrator, app.client)
+    create_admin_routes(http_app, store, orchestrator, app.client, automation_controls)
     runner = web.AppRunner(http_app, access_log=None)
     stop_event = asyncio.Event()
     archive_task: asyncio.Task[None] | None = None
@@ -116,7 +123,16 @@ async def serve(settings: Settings) -> None:
             )
         if settings.experiment_finalizer_enabled:
             experiment_finalizer_task = asyncio.create_task(
-                run_daily(app.client, orchestrator, settings),
+                run_daily(
+                    app.client,
+                    orchestrator,
+                    settings,
+                    lambda: (
+                        not automation_controls.disabled(
+                            "crons", "experiment-finalizer (sloperator.service)"
+                        )
+                    ),
+                ),
                 name="daily-experiment-finalizer",
             )
         LOGGER.info(
@@ -162,9 +178,7 @@ async def _monitor_vpn(
                     "одноразовый код, напиши `vpn ready` или `готов`. "
                     "Только после этого я начну подключение."
                 )
-                conversation = await client.conversations_open(
-                    users=settings.slack_user_id
-                )
+                conversation = await client.conversations_open(users=settings.slack_user_id)
                 await client.chat_postMessage(
                     channel=conversation["channel"]["id"],
                     text=message,
@@ -175,9 +189,7 @@ async def _monitor_vpn(
                     "VPN запущен, LDAP принят. Нужен одноразовый код: "
                     "пришлите сюда 6-8 цифр отдельным сообщением."
                 )
-                conversation = await client.conversations_open(
-                    users=settings.slack_user_id
-                )
+                conversation = await client.conversations_open(users=settings.slack_user_id)
                 await client.chat_postMessage(
                     channel=conversation["channel"]["id"],
                     text=message,

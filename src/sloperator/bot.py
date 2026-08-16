@@ -14,6 +14,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sloperator.agents import AgentOrchestrator, SubmitResult, thread_key
 from sloperator.anomaly_alerts import AnomalyAlertResponder, is_anomaly_trigger
 from sloperator.archive import ArchiveMiddleware
+from sloperator.automation_controls import AutomationControls
 from sloperator.config import Settings
 from sloperator.mobile_health import MobileHealthResponder, is_mobile_health_trigger
 from sloperator.store import EventStore
@@ -95,6 +96,7 @@ def create_app(
     orchestrator: AgentOrchestrator,
     vpn: VpnManager,
     subscription_flow_responder: SubscriptionFlowResponder | None = None,
+    automation_controls: AutomationControls | None = None,
 ) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(token=settings.bot_token, process_before_response=True)
@@ -113,13 +115,16 @@ def create_app(
         event: Mapping[str, Any],
         client: AsyncWebClient,
     ) -> None:
-        if is_anomaly_trigger(dict(event), settings):
+        def enabled(key: str) -> bool:
+            return automation_controls is None or not automation_controls.disabled("triggers", key)
+
+        if enabled("analytics-anomaly") and is_anomaly_trigger(dict(event), settings):
             await anomaly_responder.handle(dict(event), client)
             return
-        if is_mobile_health_trigger(dict(event), settings):
+        if enabled("mobile-health") and is_mobile_health_trigger(dict(event), settings):
             await mobile_health_responder.handle(dict(event), client)
             return
-        if is_subscription_flow_event(dict(event), settings):
+        if enabled("subscription-flow") and is_subscription_flow_event(dict(event), settings):
             await subscription_flow_responder.handle(dict(event), client)
             return
         if event.get("subtype") is not None or event.get("bot_id") is not None:

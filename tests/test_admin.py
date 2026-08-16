@@ -11,6 +11,7 @@ from sloperator.admin import (
     _cron_jobs,
     _crontab,
     _label_cron_history,
+    _set_cron_enabled,
     _slack_trigger_definitions,
     _systemd_scheduler_history,
     _systemd_scheduler_job,
@@ -62,8 +63,29 @@ SHELL=/bin/bash
             "name": "health",
             "schedule": "*/30 * * * *",
             "command": "cd /repo && run-health",
+            "enabled": True,
         }
     ]
+
+
+def test_cron_jobs_include_stopped_managed_blocks() -> None:
+    crontab = """# >>> ug-ai-analyst:health >>>
+# sloperator-disabled: */30 * * * * run-health
+# <<< ug-ai-analyst:health <<<"""
+    assert _cron_jobs(crontab)[0]["enabled"] is False
+
+
+def test_set_cron_enabled_preserves_block_and_comments_schedule() -> None:
+    crontab = """# >>> ug-ai-analyst:health >>>
+SHELL=/bin/bash
+*/30 * * * * run-health
+# <<< ug-ai-analyst:health <<<"""
+    with patch("sloperator.admin._crontab", return_value=crontab), patch(
+        "sloperator.admin.subprocess.run"
+    ) as run:
+        run.return_value.returncode = 0
+        assert _set_cron_enabled("health", False)
+    assert "# sloperator-disabled: */30 * * * * run-health" in run.call_args.kwargs["input"]
 
 
 def test_cron_history_is_labelled_for_calendar() -> None:
@@ -104,8 +126,7 @@ def test_cron_execution_history_uses_real_retry_child_results(tmp_path: Path) ->
             "name": "health",
             "schedule": "0 7,8 * * *",
             "command": (
-                f"TZ=Asia/Nicosia python cron_retry.py --only-at 10:00 "
-                f"--log-out {log} -- child.py"
+                f"TZ=Asia/Nicosia python cron_retry.py --only-at 10:00 --log-out {log} -- child.py"
             ),
         }
     ]
@@ -168,6 +189,8 @@ def test_admin_contains_slack_trigger_calendar_and_session_links() -> None:
     assert "function openPrompt(trigger)" in ADMIN_HTML
     assert "function renderMarkdown(markdown)" in ADMIN_HTML
     assert "Click to view prompt" in ADMIN_HTML
+    assert 'automationButton("triggers",trigger)' in ADMIN_HTML
+    assert "/automations/${kind}/" in ADMIN_HTML
 
 
 def test_slack_trigger_definitions_include_all_automatic_investigations() -> None:

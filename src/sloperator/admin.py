@@ -14,6 +14,7 @@ import subprocess
 import time
 from html import escape
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
@@ -23,6 +24,7 @@ from sloperator.admin_codex import AdminCodexManager
 from sloperator.admin_sql import AdminSqlManager
 from sloperator.agents import AgentOrchestrator, SubmitResult
 from sloperator.anomaly_alerts import Alert, AlertBatch, build_monetisation_agent_prompt
+from sloperator.automation_controls import AutomationControls
 from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
 from sloperator.mobile_health import MobileCriticalMetric, build_mobile_health_agent_prompt
@@ -420,6 +422,8 @@ if(dow!=="*"&&!cronFieldValues(dow,0,7).has(date.getUTCDay())&&
 !(date.getUTCDay()===0&&cronFieldValues(dow,0,7).has(7)))return 0;
 if(job.command.includes("--only-at"))return 1;
 return cronFieldValues(fields[0],0,59).size*cronFieldValues(fields[1],0,23).size}
+function automationButton(kind,item){const verb=item.enabled?"stop":"start",label=item.enabled?"Stop":"Start";
+return `<button class="${item.enabled?"danger":""}" onclick="event.stopPropagation();action('/automations/${kind}/${encodeURIComponent(item.name||item.key)}/${verb}')">${label}</button>`}
 function cronRow(job,events,days,today){const firstEvent=events.length?
 [...events].sort((a,b)=>a.time.localeCompare(b.time))[0].time.slice(0,10):today;
 const cells=days.map(date=>{const key=dayKey(date);
@@ -437,8 +441,8 @@ const cols=Math.max(1,Math.ceil(Math.sqrt(planned)));return `<div class="cron-da
 class="cron-day ${runs.length?"has-runs":""} ${key===today?"today":""}"
 style="--segment-cols:${cols}" title="${esc(details)}" aria-label="${esc(details)}">${segments}</div></div>`}).join("");
 const completed=events.filter(event=>statusLabel(event.status)==="completed").length;
-return `<div class="cron-job-label" title="${esc(job.name)} · ${esc(job.schedule)}"><b>${esc(job.name)}</b>
-<div class="cron-job-stats">${esc(job.schedule)} · ${events.length} events${completed?` · ${completed} done`:""}</div>
+return `<div class="cron-job-label" title="${esc(job.name)} · ${esc(job.schedule)}"><div class="row spread"><b>${esc(job.name)}</b>${automationButton("crons",job)}</div>
+<div class="cron-job-stats">${job.enabled?"active":"stopped"} · ${esc(job.schedule)} · ${events.length} events${completed?` · ${completed} done`:""}</div>
 </div>${cells}`}
 function renderCronHistory(jobs,events){const root=document.getElementById("history");
 const days=calendarDays(),today=dayKey(days[days.length-1]);const axis=days.map(date=>{
@@ -462,7 +466,7 @@ window.slackTriggers=triggers;configs.innerHTML=triggers.map((trigger,index)=>`<
 class="card trigger-config" tabindex="0" role="button" onclick="openPrompt(window.slackTriggers[${index}])"
 onkeydown="if(event.key==='Enter'||event.key===' ')openPrompt(window.slackTriggers[${index}])">
 <div class="row spread">
-<h3>${esc(trigger.name)}</h3><span class="badge">${events.filter(e=>e.trigger===trigger.key).length} runs</span>
+<h3>${esc(trigger.name)}</h3><div class="row"><span class="badge">${trigger.enabled?"active":"stopped"}</span>${automationButton("triggers",trigger)}</div>
 </div><div class="trigger-condition">${esc(trigger.channel_name)} · <code>${esc(trigger.channel_id)}</code><br>
 Source: <code>${esc(trigger.source)}</code><br>${esc(trigger.condition)}<br>
 Limit: ${esc(trigger.limit||"one session per matched incident")}<br><b>Click to view prompt</b>
@@ -505,8 +509,8 @@ if(nextCronSignature!==cronSignature){const config=document.querySelector(".cron
 const history=document.querySelector(".history-log");const scroll=document.querySelector(".cron-scroll");
 const ui={configOpen:config?.open||false,historyOpen:history?.open||false,scrollLeft:scroll?.scrollLeft||0};
 document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr><th>Job</th>
-<th>Schedule</th><th>Command</th></tr></thead><tbody>${d.cron_jobs.map(x=>`<tr><td>${esc(x.name)}
-</td><td><code>${esc(x.schedule)}</code></td><td><code>${esc(x.command)}</code></td></tr>`).join("")}
+<th>Schedule</th><th>Command</th><th>Control</th></tr></thead><tbody>${d.cron_jobs.map(x=>`<tr><td>${esc(x.name)}
+</td><td><code>${esc(x.schedule)}</code></td><td><code>${esc(x.command)}</code></td><td>${automationButton("crons",x)}</td></tr>`).join("")}
 </tbody></table><details><summary>Raw crontab</summary><pre>${esc(d.crontab)}</pre></details>`:
 '<span class="sub">No user crontab</span>';
 renderCronHistory(d.cron_jobs,d.cron_history);document.querySelector(".cron-config").open=ui.configOpen;
@@ -533,9 +537,9 @@ def _crontab() -> str:
     return f"Unable to read crontab: {result.stderr.strip()}"
 
 
-def _cron_jobs(crontab: str) -> list[dict[str, str]]:
+def _cron_jobs(crontab: str) -> list[dict[str, Any]]:
     """Extract repo-managed job blocks and their schedule lines."""
-    jobs: list[dict[str, str]] = []
+    jobs: list[dict[str, Any]] = []
     current_name: str | None = None
     for raw_line in crontab.splitlines():
         line = raw_line.strip()
@@ -545,14 +549,64 @@ def _cron_jobs(crontab: str) -> list[dict[str, str]]:
         if line.startswith("# <<< ug-ai-analyst:"):
             current_name = None
             continue
+        enabled = True
+        if line.startswith("# sloperator-disabled: "):
+            line = line.removeprefix("# sloperator-disabled: ")
+            enabled = False
         if current_name is None or not line or line.startswith("#") or "=" in line.split()[0]:
             continue
         fields = line.split(maxsplit=5)
         if len(fields) == 6:
             jobs.append(
-                {"name": current_name, "schedule": " ".join(fields[:5]), "command": fields[5]}
+                {
+                    "name": current_name,
+                    "schedule": " ".join(fields[:5]),
+                    "command": fields[5],
+                    "enabled": enabled,
+                }
             )
     return jobs
+
+
+def _set_cron_enabled(name: str, enabled: bool) -> bool:
+    """Comment or uncomment the schedule line in one named managed block."""
+    current = _crontab()
+    if current.startswith("Unable to read crontab:"):
+        raise RuntimeError(current)
+    lines = current.splitlines()
+    in_target = False
+    changed = False
+    found = False
+    for index, raw in enumerate(lines):
+        line = raw.strip()
+        if line == f"# >>> ug-ai-analyst:{name} >>>":
+            in_target = True
+            found = True
+            continue
+        if in_target and line.startswith("# <<< ug-ai-analyst:"):
+            in_target = False
+        if not in_target:
+            continue
+        if enabled and line.startswith("# sloperator-disabled: "):
+            lines[index] = raw.replace("# sloperator-disabled: ", "", 1)
+            changed = True
+        elif not enabled and line and not line.startswith("#") and "=" not in line.split()[0]:
+            lines[index] = f"# sloperator-disabled: {raw}"
+            changed = True
+    if not found:
+        return False
+    if changed:
+        result = subprocess.run(
+            ["crontab", "-"],
+            input="\n".join(lines) + "\n",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or "crontab update failed")
+    return True
 
 
 def _cron_history() -> list[dict[str, str]]:
@@ -656,9 +710,9 @@ def _cron_execution_history(
                 match = _RETRY_RESULT.match(line)
                 if not match:
                     continue
-                timestamp = dt.datetime.strptime(
-                    match.group("time"), "%Y-%m-%d %H:%M:%S"
-                ).replace(tzinfo=timezone)
+                timestamp = dt.datetime.strptime(match.group("time"), "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone
+                )
                 if timestamp.astimezone(dt.UTC) < cutoff:
                     continue
                 rc = int(match.group("rc"))
@@ -710,7 +764,7 @@ def _cron_execution_history(
     return rows, authoritative
 
 
-def _systemd_scheduler_job(settings: Settings) -> dict[str, str]:
+def _systemd_scheduler_job(settings: Settings) -> dict[str, Any]:
     """Describe the experiment scheduler embedded in sloperator.service."""
     result = subprocess.run(
         [
@@ -852,9 +906,7 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             "channel_id": settings.anomaly_alert_channel,
             "channel_name": "ug-analytics-monitoring",
             "source": settings.anomaly_bot_id,
-            "condition": (
-                "Analytics Bot mentions the operator; confirmed UG monetisation anomaly"
-            ),
+            "condition": ("Analytics Bot mentions the operator; confirmed UG monetisation anomaly"),
             "limit": "24h cooldown per metric/platform/type",
             "prompt": preview_note + analytics_prompt,
         },
@@ -886,11 +938,15 @@ def create_admin_routes(
     store: EventStore,
     orchestrator: AgentOrchestrator,
     slack_client: AsyncWebClient,
+    automation_controls: AutomationControls | None = None,
 ) -> None:
     """Attach loopback admin routes to the existing HTTP application."""
     csrf = secrets.token_urlsafe(32)
     codex_manager = AdminCodexManager(orchestrator.settings, store)
     sql_manager = AdminSqlManager(orchestrator.settings, store)
+    automation_controls = automation_controls or AutomationControls(
+        orchestrator.settings.database_path.parent / "automation-controls.json"
+    )
 
     async def close_admin_managers(_: web.Application) -> None:
         await codex_manager.close()
@@ -948,6 +1004,7 @@ def create_admin_routes(
             asyncio.to_thread(_systemd_scheduler_history),
         )
         cron_jobs = _cron_jobs(crontab)
+        service_job["enabled"] = not automation_controls.disabled("crons", service_job["name"])
         execution_history, authoritative_jobs = await asyncio.to_thread(
             _cron_execution_history, cron_jobs
         )
@@ -960,10 +1017,14 @@ def create_admin_routes(
             {
                 "sessions": sessions,
                 "codex_sessions": await codex_manager.list_threads(),
-                "slack_triggers": _slack_trigger_definitions(orchestrator.settings),
-                "slack_trigger_runs": await asyncio.to_thread(
-                    store.list_slack_trigger_runs
-                ),
+                "slack_triggers": [
+                    {
+                        **trigger,
+                        "enabled": not automation_controls.disabled("triggers", trigger["key"]),
+                    }
+                    for trigger in _slack_trigger_definitions(orchestrator.settings)
+                ],
+                "slack_trigger_runs": await asyncio.to_thread(store.list_slack_trigger_runs),
                 "crontab": crontab,
                 "cron_jobs": [service_job, *cron_jobs],
                 "cron_history": sorted(
@@ -985,6 +1046,23 @@ def create_admin_routes(
             request.match_info["channel"], request.match_info["thread"]
         )
         return web.json_response({"stopped": stopped})
+
+    async def set_automation(request: web.Request) -> web.Response:
+        require_csrf(request)
+        kind = request.match_info["kind"]
+        name = request.match_info["name"]
+        enabled = request.match_info["action"] == "start"
+        if kind == "crons" and name != "experiment-finalizer (sloperator.service)":
+            if not await asyncio.to_thread(_set_cron_enabled, name, enabled):
+                raise web.HTTPNotFound(text="Unknown managed cron")
+        elif kind == "triggers":
+            valid = {item["key"] for item in _slack_trigger_definitions(orchestrator.settings)}
+            if name not in valid:
+                raise web.HTTPNotFound(text="Unknown Slack trigger")
+        elif kind != "crons":
+            raise web.HTTPBadRequest(text="Unknown automation kind")
+        automation_controls.set_enabled(kind, name, enabled)
+        return web.json_response({"enabled": enabled})
 
     async def close(request: web.Request) -> web.Response:
         require_csrf(request)
@@ -1109,18 +1187,13 @@ def create_admin_routes(
     app.router.add_get("/admin", page)
     app.router.add_get("/admin/api/state", state)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/stop", stop)
+    app.router.add_post("/admin/api/automations/{kind}/{name}/{action:start|stop}", set_automation)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/close", close)
     app.router.add_post("/admin/api/sessions/{channel}/{thread}/message", message)
     app.router.add_post("/admin/api/codex/sessions", create_codex_session)
-    app.router.add_get(
-        "/admin/api/codex/sessions/{session_id}", read_codex_session
-    )
-    app.router.add_post(
-        "/admin/api/codex/sessions/{session_id}/message", send_codex_message
-    )
-    app.router.add_post(
-        "/admin/api/codex/sessions/{session_id}/delete", delete_codex_session
-    )
+    app.router.add_get("/admin/api/codex/sessions/{session_id}", read_codex_session)
+    app.router.add_post("/admin/api/codex/sessions/{session_id}/message", send_codex_message)
+    app.router.add_post("/admin/api/codex/sessions/{session_id}/delete", delete_codex_session)
     app.router.add_post("/admin/api/sql/complete", complete_sql)
     app.router.add_post("/admin/api/sql/execute", execute_sql)
     app.router.add_post("/admin/api/sql/visualize", visualize_sql)

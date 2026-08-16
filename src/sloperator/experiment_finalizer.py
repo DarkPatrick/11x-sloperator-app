@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
 from typing import Protocol
@@ -259,6 +260,7 @@ async def run_daily(
     client: AsyncWebClient,
     agent: AgentSubmitter,
     settings: Settings,
+    enabled: Callable[[], bool] = lambda: True,
 ) -> None:
     """Run forever at the configured local wall-clock hour on weekdays."""
     while True:
@@ -271,6 +273,9 @@ async def run_daily(
         delay = (target.astimezone(dt.UTC) - now).total_seconds()
         LOGGER.info("Next experiment finalizer run scheduled for %s", target.isoformat())
         await asyncio.sleep(delay)
+        if not enabled():
+            LOGGER.info("Scheduled experiment finalizer run disabled from admin")
+            continue
         run_task: asyncio.Task[str] | None = None
         try:
             LOGGER.info("Starting scheduled experiment finalizer run")

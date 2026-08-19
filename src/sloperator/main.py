@@ -18,8 +18,13 @@ from sloperator.archive import periodically_synchronize_archive, synchronize_arc
 from sloperator.automation_controls import AutomationControls
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
+from sloperator.experiment_config_check import (
+    ExperimentConfigResponder,
+    is_experiment_config_trigger,
+)
 from sloperator.experiment_finalizer import cancel_task, publish_run, run_daily
 from sloperator.health import create_health_app
+from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
 from sloperator.store import EventStore
 from sloperator.subscription_flow import (
     SubscriptionFlowResponder,
@@ -52,12 +57,15 @@ async def serve(settings: Settings) -> None:
         settings.database_path.parent / "automation-controls.json"
     )
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
+    payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
+    experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
     app = create_app(
         settings,
         store,
         orchestrator,
         vpn,
         subscription_flow_responder=subscription_flow_responder,
+        payment_layer_responder=payment_layer_responder,
         automation_controls=automation_controls,
     )
 
@@ -70,10 +78,43 @@ async def serve(settings: Settings) -> None:
             "triggers", "subscription-flow"
         ) and is_subscription_flow_event(event, settings):
             await subscription_flow_responder.handle(event, app.client)
+        if not automation_controls.disabled(
+            "triggers", "payment-layer"
+        ) and is_payment_layer_trigger(event, settings):
+            await payment_layer_responder.handle(event, app.client)
+        if not automation_controls.disabled(
+            "triggers", "experiment-config"
+        ) and is_experiment_config_trigger(event):
+            await experiment_config_responder.handle(event, app.client)
 
     slack_handler = AsyncSocketModeHandler(app, settings.app_token)
     http_app = create_health_app()
     create_admin_routes(http_app, store, orchestrator, app.client, automation_controls)
+
+    async def trigger_experiment_config(request: web.Request) -> web.Response:
+        """Accept a local cron handoff after its Slack top-level message is posted."""
+        if request.remote not in {"127.0.0.1", "::1"}:
+            raise web.HTTPForbidden(text="loopback only")
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError) as error:
+            raise web.HTTPBadRequest(text="invalid JSON") from error
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="JSON object required")
+        try:
+            notified = await experiment_config_responder.review_and_publish(
+                payload,
+                app.client,
+                timeout_seconds=settings.agent_timeout_seconds,
+            )
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error)) from error
+        return web.json_response({"ok": True, "completed": True, "notified": notified})
+
+    http_app.router.add_post(
+        "/internal/experiment-config-check",
+        trigger_experiment_config,
+    )
     runner = web.AppRunner(http_app, access_log=None)
     stop_event = asyncio.Event()
     archive_task: asyncio.Task[None] | None = None

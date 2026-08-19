@@ -28,6 +28,7 @@ from sloperator.automation_controls import AutomationControls
 from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
 from sloperator.mobile_health import MobileCriticalMetric, build_mobile_health_agent_prompt
+from sloperator.payment_layer import build_payment_layer_agent_prompt
 from sloperator.store import EventStore
 from sloperator.subscription_flow import (
     SubscriptionFlowIncident,
@@ -895,6 +896,11 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             )
         ],
     )
+    payment_prompt = build_payment_layer_agent_prompt(
+        ":rotating_light: *Payment path collapsed* — {{ source build `path` }}\n"
+        "{{ current rate vs baseline · estimated loss }}\n"
+        "{{ incident responders }} · investigation in thread"
+    )
     preview_note = (
         "> Preview: values in `{{ double braces }}` are filled from the triggering Slack "
         "report. The surrounding instructions are the current production prompt.\n\n"
@@ -929,6 +935,16 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             "condition": "Red critical metrics in Android/iOS report sections",
             "limit": "at most 5 metrics per report",
             "prompt": preview_note + mobile_prompt,
+        },
+        {
+            "key": "payment-layer",
+            "name": "Payment layer incident",
+            "channel_id": settings.payment_layer_alert_channel,
+            "channel_name": "ug-analytics-monitoring",
+            "source": "Sloperator payment monitors",
+            "condition": "New payment error signature or catastrophic path collapse",
+            "limit": "one open incident per source/path nature; recovery in the source thread",
+            "prompt": preview_note + payment_prompt,
         },
     ]
 

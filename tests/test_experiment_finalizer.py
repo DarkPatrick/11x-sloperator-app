@@ -58,7 +58,11 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "монетизац" in FINALIZATION_PROMPT
     assert "Apply both checks before" in FINALIZATION_PROMPT
     assert "re-fetch the UGM allowlist" in FINALIZATION_PROMPT
-    assert "oldest preliminary candidate" in FINALIZATION_PROMPT
+    assert "preliminary candidate pool" in FINALIZATION_PROMPT
+    assert (
+        "Walk the ordered preliminary candidate pool from oldest to newest"
+        in FINALIZATION_PROMPT
+    )
     assert "strict, fail-closed post-stop age gate" in FINALIZATION_PROMPT
     assert "8 complete days (8 * 24" in FINALIZATION_PROMPT
     assert "9 complete days (9 * 24" in FINALIZATION_PROMPT
@@ -74,9 +78,10 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "not an eligibility" in FINALIZATION_PROMPT
     assert "stop immediately" in FINALIZATION_PROMPT
     assert "calculator, do not" in FINALIZATION_PROMPT
-    assert "Do not calculate" in FINALIZATION_PROMPT
+    assert "continue to the next candidate" in FINALIZATION_PROMPT
+    assert "Only if every candidate in the pool has" in FINALIZATION_PROMPT
     assert "treat this expected no-op as an error" in FINALIZATION_PROMPT
-    assert "one preliminary candidate chosen by rule 6" in FINALIZATION_PROMPT
+    assert "once for each preliminary candidate in rule 7 until one passes" in FINALIZATION_PROMPT
     assert "Results → Insights → Decision / Next steps" in FINALIZATION_PROMPT
     assert "one top-level message in the" in FINALIZATION_PROMPT
     assert "configured production channel" in FINALIZATION_PROMPT

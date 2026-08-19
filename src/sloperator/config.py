@@ -77,6 +77,7 @@ class Settings:
     subscription_flow_alert_channel: str = "C06FADPMGKT"
     mobile_health_alert_channel: str = "C0AJKHFHVHV"
     mobile_health_bot_id: str = "B0AM51CS2H5"
+    payment_layer_alert_channel: str = "C06FADPMGKT"
     clickhouse_host: str | None = None
     clickhouse_port: int = 8443
     clickhouse_username: str | None = None
@@ -158,6 +159,9 @@ class Settings:
         ).strip()
         mobile_health_bot_id = os.environ.get(
             "MOBILE_HEALTH_BOT_ID", "B0AM51CS2H5"
+        ).strip()
+        payment_layer_alert_channel = os.environ.get(
+            "PAYMENT_MONITOR_ALERT_CHANNEL", "C06FADPMGKT"
         ).strip()
         clickhouse_host = os.environ.get("CLICKHOUSE_HOST", "").strip() or None
         clickhouse_username = os.environ.get("CLICKHOUSE_USERNAME", "").strip() or None
@@ -255,6 +259,8 @@ class Settings:
             raise ConfigurationError("MOBILE_HEALTH_ALERT_CHANNEL must be a Slack channel ID")
         if not mobile_health_bot_id.startswith("B"):
             raise ConfigurationError("MOBILE_HEALTH_BOT_ID must be a Slack bot ID")
+        if not payment_layer_alert_channel.startswith("C"):
+            raise ConfigurationError("PAYMENT_MONITOR_ALERT_CHANNEL must be a Slack channel ID")
         if not 1 <= clickhouse_port <= 65_535:
             raise ConfigurationError("CLICKHOUSE_PORT must be between 1 and 65535")
         if bool(clickhouse_host) != bool(clickhouse_username):
@@ -310,6 +316,7 @@ class Settings:
             subscription_flow_alert_channel=subscription_flow_alert_channel,
             mobile_health_alert_channel=mobile_health_alert_channel,
             mobile_health_bot_id=mobile_health_bot_id,
+            payment_layer_alert_channel=payment_layer_alert_channel,
             clickhouse_host=clickhouse_host,
             clickhouse_port=clickhouse_port,
             clickhouse_username=clickhouse_username,

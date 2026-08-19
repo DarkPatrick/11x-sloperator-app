@@ -253,8 +253,9 @@ async def fetch_thread_context(
 class ActiveAgentRun:
     """Mutable control surface for one running provider turn."""
 
-    def __init__(self, provider: str) -> None:
+    def __init__(self, provider: str, *, steerable: bool = True) -> None:
         self.provider = provider
+        self.steerable = steerable
         self.process: asyncio.subprocess.Process | None = None
         self.codex: CodexAppServer | None = None
         self._claude_steering: list[str] = []
@@ -263,6 +264,8 @@ class ActiveAgentRun:
     async def steer(self, text: str) -> bool:
         """Steer Codex natively or interrupt Claude for an immediate resume."""
         async with self._lock:
+            if not self.steerable:
+                return False
             if self.provider == "codex":
                 return self.codex is not None and await self.codex.steer(text)
             self._claude_steering.append(text)
@@ -1252,13 +1255,19 @@ class AgentOrchestrator:
                         self._status_heartbeat(client, channel_id, thread_ts),
                         name=f"agent-status-{channel_id}-{thread_ts}",
                     )
-                control = ActiveAgentRun(session.provider)
+                # An optional-reply turn may still be deciding whether the Slack message was
+                # addressed to the agent. Steering it would replace that safety gate with the
+                # generic continuation prompt. Queue later messages as independent gated turns.
+                control = ActiveAgentRun(session.provider, steerable=not optional_reply)
                 self._active_runs[key] = control
-                environment_overrides = (
-                    self.vpn.agent_environment()
-                    if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
-                    else None
-                )
+                environment_overrides = {
+                    **(
+                        self.vpn.agent_environment()
+                        if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
+                        else {}
+                    ),
+                    **({"UG_SKIP_PREFLIGHT": "1"} if automated else {}),
+                }
                 try:
                     if session.provider == "claude":
                         prompt = parsed.prompt

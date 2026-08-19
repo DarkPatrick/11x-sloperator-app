@@ -63,25 +63,27 @@ Selection rules:
 5. Locate each experiment's project page and exclude it if the final Results/Итоги section for
    this experiment/iteration is already populated. Do not mistake a template, empty placeholder,
    design table, or results for another iteration for completed итогов.
-6. If no experiment remains after rules 1-5, stop immediately: do not invoke the calculator, do not
-   inspect fallback experiments outside these rules, make no Confluence or Jira writes, and return
-   exactly `{NO_OP_NOTIFICATION}` and nothing else.
-   Otherwise choose only the oldest preliminary candidate. Order by actual end timestamp, then by
-   experiment id as a deterministic tie-breaker.
-   Do not calculate or inspect a later candidate as a fallback during this run.
-7. Before that one preliminary candidate can become eligible, obtain freshly calculated maturity
-   data for it. Use results produced by this run; if its calculator rows are not demonstrably fresh,
-   recalculate it first using the direct-library procedure below and verify the fresh rows. Never
-   determine eligibility from stale cached results. Apply a strict, fail-closed pending-trials gate
-   to this candidate. An
+6. The experiments remaining after rules 1-5 form the preliminary candidate pool. Order the whole
+   pool by actual end timestamp, then by experiment id as a deterministic tie-breaker. If the pool
+   is empty, stop immediately: do not invoke the calculator, do not inspect fallback experiments
+   outside these rules, make no Confluence or Jira writes, and return exactly
+   `{NO_OP_NOTIFICATION}` and nothing else.
+7. Walk the ordered preliminary candidate pool from oldest to newest. For each candidate, obtain
+   freshly calculated maturity data. Use results produced by this run; if its calculator rows are
+   not demonstrably fresh, recalculate it first using the direct-library procedure below and verify
+   the fresh rows. Never determine eligibility from stale cached results. Apply a
+   strict, fail-closed pending-trials gate to that candidate. An
    experiment is eligible only when `pending trials, %` is present and strictly below 5% in every
    applicable variation row for every configured client and segment. A value equal to or above 5%,
-   or a missing, null, stale, failed, or unverifiable value, excludes the experiment before any
-   Results/Insights/Decision generation and before any Confluence or Jira write. If it is excluded,
-   return exactly `{NO_OP_NOTIFICATION}` and nothing else; do not calculate or select another
-   experiment and do not treat this expected no-op as an error. Pending charges are explicitly
-   not an eligibility condition: report incomplete charge maturity as a caveat in the published
-   Results/Insights, but do not exclude an otherwise eligible experiment for it.
+   or a missing, null, stale, failed, or unverifiable value, excludes only that candidate before any
+   Results/Insights/Decision generation and before any Confluence or Jira write. When a candidate
+   is excluded by this gate, continue to the next candidate in the ordered pool and calculate its
+   fresh maturity data. Stop iterating at the first candidate that passes every eligibility rule;
+   select and finalise exactly that experiment. Pending charges are explicitly not an eligibility
+   condition: report incomplete charge maturity as a caveat in the published Results/Insights, but
+   do not exclude an otherwise eligible experiment for it. Only if every candidate in the pool has
+   been checked and excluded may you return exactly `{NO_OP_NOTIFICATION}` and nothing else. Do not
+   treat this expected no-op as an error.
 8. Immediately before any write, re-fetch the UGM allowlist and experiment title and re-check both
    monetisation gates from rule 1, the actual end timestamp/client classification and age gate, the
    admin/page conditions, and the strict pending-trials gate against the same fresh
@@ -100,11 +102,11 @@ Execution for the selected experiment:
    `ExperimentCalculatorConfig.from_env()` configuration and the
    `ug_monetization_sloperator_` table prefix. This direct calculation is explicitly authorised for
    this scheduled job, including its documented writes and subscription-source refresh. During
-   selection, run this procedure only for the one preliminary candidate chosen by rule 6; do not
-   calculate the selected experiment a second time when its verified calculation is still fresh.
-   Wait for each call to finish and verify fresh successful rows in every expected
-   result/stat/funnel and raw users table before continuing. Do not silently use stale results. If
-   the selected experiment's direct calculation fails or times out, stop without publishing partial
+   selection, run this procedure once for each preliminary candidate in rule 7 until one passes the
+   maturity gate; do not calculate the selected experiment a second time when its verified
+   calculation is still fresh. Wait for each call to finish and verify fresh successful rows in
+   every expected result/stat/funnel and raw users table before continuing. Do not silently use
+   stale results. If a direct calculation fails or times out, stop without publishing partial
    итогов and report the exact failure.
 3. Run the complete Results → Insights → Decision / Next steps pipeline in this exact order:
    a. Generate the full publishable Results/Итоги block through `ug-experiment-calculator`,

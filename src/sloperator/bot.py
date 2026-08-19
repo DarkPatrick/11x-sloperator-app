@@ -16,7 +16,12 @@ from sloperator.anomaly_alerts import AnomalyAlertResponder, is_anomaly_trigger
 from sloperator.archive import ArchiveMiddleware
 from sloperator.automation_controls import AutomationControls
 from sloperator.config import Settings
+from sloperator.experiment_config_check import (
+    ExperimentConfigResponder,
+    is_experiment_config_trigger,
+)
 from sloperator.mobile_health import MobileHealthResponder, is_mobile_health_trigger
+from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
 from sloperator.store import EventStore
 from sloperator.subscription_flow import SubscriptionFlowResponder, is_subscription_flow_event
 from sloperator.vpn import VpnError, VpnManager, VpnState
@@ -77,13 +82,16 @@ def is_trusted_channel_thread(event: Mapping[str, Any], settings: Settings) -> b
     """Match allowed-user replies in agent-enabled monitoring-channel threads."""
     return (
         event.get("user") in settings.conversation_user_ids
-        and event.get("channel")
-        in {
-            settings.anomaly_alert_channel,
-            settings.subscription_flow_alert_channel,
-            settings.experiment_finalizer_channel,
-            settings.mobile_health_alert_channel,
-        }
+        and (
+            event.get("channel_type") == "im"
+            or event.get("channel")
+            in {
+                settings.anomaly_alert_channel,
+                settings.subscription_flow_alert_channel,
+                settings.experiment_finalizer_channel,
+                settings.mobile_health_alert_channel,
+            }
+        )
         and isinstance(event.get("thread_ts"), str)
         and isinstance(event.get("text"), str)
         and isinstance(event.get("ts"), str)
@@ -96,6 +104,7 @@ def create_app(
     orchestrator: AgentOrchestrator,
     vpn: VpnManager,
     subscription_flow_responder: SubscriptionFlowResponder | None = None,
+    payment_layer_responder: PaymentLayerResponder | None = None,
     automation_controls: AutomationControls | None = None,
 ) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
@@ -108,6 +117,10 @@ def create_app(
         store,
         orchestrator,
     )
+    payment_layer_responder = payment_layer_responder or PaymentLayerResponder(
+        settings, store, orchestrator
+    )
+    experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
     vpn_threads: set[tuple[str, str]] = set()
 
     @app.event("message")
@@ -126,6 +139,12 @@ def create_app(
             return
         if enabled("subscription-flow") and is_subscription_flow_event(dict(event), settings):
             await subscription_flow_responder.handle(dict(event), client)
+            return
+        if enabled("payment-layer") and is_payment_layer_trigger(dict(event), settings):
+            await payment_layer_responder.handle(dict(event), client)
+            return
+        if enabled("experiment-config") and is_experiment_config_trigger(dict(event)):
+            await experiment_config_responder.handle(dict(event), client)
             return
         if event.get("subtype") is not None or event.get("bot_id") is not None:
             return

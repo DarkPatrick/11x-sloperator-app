@@ -35,3 +35,10 @@ async def test_claude_control_interrupts_process_for_steering() -> None:
     with pytest.raises(AgentSteeringInterrupt):
         await running
     assert control.take_claude_steering() == ["Use the corrected input"]
+
+
+async def test_optional_reply_control_rejects_steering() -> None:
+    control = ActiveAgentRun("claude", steerable=False)
+
+    assert not await control.steer("A message that may be addressed to somebody else")
+    assert not control.has_claude_steering

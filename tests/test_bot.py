@@ -126,6 +126,26 @@ def test_trusted_channel_thread_supports_mobile_health_channel() -> None:
     assert is_trusted_channel_thread(event, settings)
 
 
+def test_trusted_channel_thread_supports_allowlisted_user_in_agent_dm() -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        slack_allowed_conversation_users=frozenset({"UOWNER", "UANALYST"}),
+    )
+    event = {
+        "user": "UANALYST",
+        "channel": "DANALYST",
+        "channel_type": "im",
+        "thread_ts": "100.1",
+        "ts": "100.2",
+        "text": "Почему именно эти segments?",
+    }
+
+    assert is_trusted_channel_thread(event, settings)
+    assert not is_trusted_channel_thread({**event, "user": "UOTHER"}, settings)
+
+
 def test_settings_without_explicit_conversation_users_fall_back_to_owner() -> None:
     settings = Settings(
         slack_user_id="UOWNER",

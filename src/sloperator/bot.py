@@ -190,7 +190,13 @@ def create_app(
                 thread_ts=active_thread_ts,
                 text=text,
                 show_status=False,
+                timeout_seconds=(
+                    settings.mobile_health_timeout_seconds
+                    if channel == settings.mobile_health_alert_channel
+                    else None
+                ),
                 optional_reply=True,
+                automated=channel == settings.mobile_health_alert_channel,
             )
             if result is SubmitResult.EXPIRED:
                 LOGGER.debug(

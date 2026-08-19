@@ -45,11 +45,18 @@ TIME_LIMIT_NOTICE = "⚠️ Агент исчерпал лимит работы;
 TIMEOUT_RECOVERY_SECONDS = 300
 TIMEOUT_RECOVERY_PROMPT = f"""\
 The previous turn exhausted its work-time limit. Do not continue the investigation, run queries,
-start reviews, or improve the analysis. Immediately return everything useful already established
-or prepared, even if incomplete. Package any existing reader-safe deliverables into the required
-artifact archive when the original request required one. Clearly distinguish incomplete findings
-from verified ones. Your response will be prefixed with this notice by Sloperator:
+use tools, inspect files, package artifacts, start reviews, or improve the analysis. The original
+artifact requirement is waived for this recovery turn. Immediately return a concise partial report
+using only findings already present in the conversation context, even if incomplete. Clearly
+distinguish incomplete findings from verified ones. Your response will be prefixed with this notice
+by Sloperator:
 `{TIME_LIMIT_NOTICE}`
+"""
+TIMEOUT_RECOVERY_FAILURE_NOTICE = f"""\
+{TIME_LIMIT_NOTICE}
+
+Агент не успел оформить частичный отчёт за дополнительное время. Уже собранные материалы и сессия
+сохранены; работу можно продолжить сообщением в этом треде.
 """
 RESTART_RECOVERY_PROMPT = """\
 The Sloperator service restarted while this automated turn was running. Resume the same task from
@@ -1379,28 +1386,38 @@ class AgentOrchestrator:
                         agent_timeout_seconds=TIMEOUT_RECOVERY_SECONDS,
                     )
                     recovery_session = replace(session, status="cancelled")
-                    if session.provider == "claude":
-                        result = await run_claude(
-                            recovery_settings,
-                            recovery_session,
-                            TIMEOUT_RECOVERY_PROMPT,
-                            control,
-                            force_resume=True,
-                            environment_overrides=environment_overrides,
+                    try:
+                        if session.provider == "claude":
+                            result = await run_claude(
+                                recovery_settings,
+                                recovery_session,
+                                TIMEOUT_RECOVERY_PROMPT,
+                                control,
+                                force_resume=True,
+                                environment_overrides=environment_overrides,
+                            )
+                        else:
+                            result = await run_codex(
+                                recovery_settings,
+                                recovery_session,
+                                TIMEOUT_RECOVERY_PROMPT,
+                                control,
+                                self.store,
+                                environment_overrides,
+                            )
+                        result = replace(
+                            result,
+                            text=f"{TIME_LIMIT_NOTICE}\n\n{result.text.strip()}",
                         )
-                    else:
-                        result = await run_codex(
-                            recovery_settings,
-                            recovery_session,
-                            TIMEOUT_RECOVERY_PROMPT,
-                            control,
-                            self.store,
-                            environment_overrides,
+                    except AgentTimeoutError:
+                        LOGGER.warning(
+                            "Partial-result recovery also timed out in Slack thread %s",
+                            thread_ts,
                         )
-                    result = replace(
-                        result,
-                        text=f"{TIME_LIMIT_NOTICE}\n\n{result.text.strip()}",
-                    )
+                        result = AgentRunResult(
+                            session_id=session.external_session_id or "",
+                            text=TIMEOUT_RECOVERY_FAILURE_NOTICE.strip(),
+                        )
                 finally:
                     if self._active_runs.get(key) is control:
                         self._active_runs.pop(key, None)

@@ -12,6 +12,7 @@ from sloperator.agents import (
     FINAL_ARTIFACT_RECOVERY_PROMPT,
     RESTART_RECOVERY_PROMPT,
     TIME_LIMIT_NOTICE,
+    TIMEOUT_RECOVERY_FAILURE_NOTICE,
     TIMEOUT_RECOVERY_PROMPT,
     AgentExecutionError,
     AgentOrchestrator,
@@ -218,6 +219,47 @@ async def test_automated_trigger_returns_partial_result_after_timeout(
         thread_ts="100.1",
         markdown_text=f"{TIME_LIMIT_NOTICE}\n\nPartial verified finding",
     )
+
+
+async def test_automated_trigger_keeps_session_resumable_when_partial_recovery_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_claude = AsyncMock(side_effect=AgentTimeoutError("limit reached"))
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+    )
+    post_message = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message, files_upload_v2=AsyncMock())
+    orchestrator = AgentOrchestrator(settings, store)
+
+    await orchestrator.submit(
+        client,
+        channel_id="C123",
+        message_ts="100.1:analysis",
+        thread_ts="100.1",
+        text="Investigate",
+        show_status=False,
+        automated=True,
+    )
+    await orchestrator.drain()
+
+    assert run_claude.await_count == 2
+    post_message.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        markdown_text=TIMEOUT_RECOVERY_FAILURE_NOTICE.strip(),
+    )
+    session = store.get_agent_session("C123", "100.1")
+    assert session is not None
+    assert session.status == "idle"
+    assert session.external_session_id
 
 
 async def test_interrupted_automated_turn_resumes_same_session_after_restart(

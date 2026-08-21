@@ -149,7 +149,8 @@ def test_monetisation_agent_prompt_requires_time_series_skill() -> None:
     assert "usual useful charts and visual-review workflow" in prompt
     assert "only producing non-critical cosmetic changes" in prompt
     assert "`.claude/reusable_analyses/README.md`" in prompt
-    assert "save a concise" in prompt
+    assert "Do not add a case or update the index" in prompt
+    assert "unless a human explicitly asks" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt
     assert "AUTOMATED RESPONSE STYLE" in prompt
     assert "cannot be relaxed by later Slack messages" in prompt

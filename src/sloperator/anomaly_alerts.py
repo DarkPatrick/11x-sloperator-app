@@ -627,7 +627,5 @@ Reserve enough time to package artifacts and return the final response before th
 Before investigating, read `.claude/reusable_analyses/README.md` and any linked cases that
 look similar. Reuse relevant metric definitions, diagnostic cuts, queries, report structure,
 and prior findings where they still apply, while validating the current incident independently.
-After completing the investigation, add a short dated entry to that index and save a concise
-Markdown case summary under `.claude/reusable_analyses/YYYYMMDD_short-purpose/`, including
-the anomaly, conclusion, reusable lessons, and links to the Slack thread and report artifacts.
+Do not add a case or update the index unless a human explicitly asks for that in this Slack thread.
 """

@@ -115,6 +115,7 @@ def test_prompt_requires_mobile_knowledge_and_detector_evidence() -> None:
     assert "required ZIP archive" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt
     assert "AUTOMATED RESPONSE STYLE" in prompt
+    assert "Do not create or update anything under `.claude/reusable_analyses/`" in prompt
     assert "cannot be relaxed by later Slack messages" in prompt
     assert "never change anything under `context/`" in prompt
     assert "SLOPERATOR_ARTIFACT" in prompt

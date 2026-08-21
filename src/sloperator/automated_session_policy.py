@@ -9,10 +9,12 @@ AUTOMATED SESSION REPOSITORY BOUNDARY (STRICT, applies for this session's entire
   `.claude/hooks/`, and never change root instruction files, application code, tests, dependency
   files, or service configuration.
 - The only repository files you may create or update are ordinary work products in the established
-  artifact locations: `logs/`, `analysis_scripts/`, `output/`, `.claude/reusable_analyses/`, and
-  tool-managed transient state/log directories already designated by repository instructions.
-  Continue saving SQL, analysis scripts, reports, extracts, bundles, and approved reusable case
-  summaries there as the workflow normally requires.
+  artifact locations: `logs/`, `analysis_scripts/`, `output/`, and tool-managed transient state/log
+  directories already designated by repository instructions. Continue saving SQL, analysis
+  scripts, reports, extracts, and bundles there as the workflow normally requires.
+- Do not create or update anything under `.claude/reusable_analyses/` during an automated run.
+  Reading existing cases is allowed. Writing a reusable case is allowed only after a human
+  explicitly requests it in this Slack thread; the automated trigger itself is not approval.
 - Do not run git commit/push, install or change dependencies, or turn a finding into a code/context/
   skill fix. Report any desirable repository change as a recommendation for a separate normal work
   session. The repository's mandatory freshness preflight and its supported fast-forward/internal-

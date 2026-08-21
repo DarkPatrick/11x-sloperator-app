@@ -73,6 +73,9 @@ def test_prompt_makes_every_requested_check_and_is_read_only() -> None:
     assert "contact the monetisation-team analysts" in prompt
     assert "read-only audit" in prompt
     assert "AUTOMATED RESPONSE STYLE" in prompt
+    assert "calculator auto-substitution does not count" in prompt
+    assert "always report that as a" in prompt
+    assert "segments: {'Total': {'pro_rights': 'all'}}" in prompt
 
 
 def test_result_without_verdict_is_issues_only_when_issue_sections_exist() -> None:

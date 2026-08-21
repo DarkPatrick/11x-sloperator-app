@@ -104,7 +104,11 @@ relevant application source/release history. Perform all of these checks:
 1. Propose a concrete, admin-ready `segments` configuration grounded in the project's target
    audience, hypotheses, metrics, and planned analysis cuts. Use the `ug-experiment-config-builder`
    skill. Validate that every proposed segment is computable from supported calculator fields;
-   never invent a field or silently fall back to Total.
+   never invent a field or silently fall back to Total. The raw admin `Configuration` must always
+   contain an explicit non-empty `segments` object. Even when the unrestricted default `Total`
+   audience is exactly right, require it to be written explicitly as
+   `segments: {{'Total': {{'pro_rights': 'all'}}}}`; calculator auto-substitution does not count
+   as a configured segment.
 2. Check that configured Android/iOS/web application versions are the versions required by the
    project and actually containing the experiment implementation. Verify against source code and
    release tags when the project table alone is ambiguous.
@@ -121,9 +125,11 @@ they should make, never an audit trail. Apply these output rules strictly:
 - Never mention checks that passed or say the configuration is correct overall.
 - For a web-only experiment, do not mention app versions at all. For app experiments, mention a
   version only when it is materially wrong.
-- If configured segments are adequate, do not print or discuss them. Suggest additions only when
-  they are materially needed to answer the project's stated decision; give only the additions and
-  a concise reason, not a catalogue of alternatives or field-validation notes.
+- If the raw configuration has no explicit non-empty `segments` object, always report that as a
+  required fix and provide the complete copy-paste-ready `segments` value. Otherwise, if configured
+  segments are adequate, do not print or discuss them. Suggest additions only when materially
+  needed to answer the project's stated decision; give only the additions and a concise reason,
+  not a catalogue of alternatives or field-validation notes.
 - Do not report minor observations, early-data health signals, normal running state such as an
   empty end date, or anything that could not be verified. Uncertainty means silence, not a caveat.
 - Do not include skill/context disclosure lines in the Slack-facing content; Sloperator strips any

@@ -12,7 +12,10 @@ from typing import Any
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.anomaly_alerts import AgentSubmitter
-from sloperator.automated_session_policy import AUTOMATED_SESSION_REPOSITORY_POLICY
+from sloperator.automated_session_policy import (
+    AUTOMATED_RESPONSE_STYLE,
+    AUTOMATED_SESSION_REPOSITORY_POLICY,
+)
 from sloperator.config import Settings
 from sloperator.store import EventStore
 
@@ -150,6 +153,8 @@ Work from `/home/egor/projects/ug-ai-analyst`, follow CLAUDE.md and its freshnes
 and use the repository's analytics context and data tools.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_RESPONSE_STYLE}
 
 Detector context:
 - Each affected flow compares an upstream store/processor signal with the corresponding

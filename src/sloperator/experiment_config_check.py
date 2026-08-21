@@ -9,7 +9,10 @@ from typing import Any
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import HeadlessAgentRun
-from sloperator.automated_session_policy import AUTOMATED_SESSION_REPOSITORY_POLICY
+from sloperator.automated_session_policy import (
+    AUTOMATED_RESPONSE_STYLE,
+    AUTOMATED_SESSION_REPOSITORY_POLICY,
+)
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
@@ -87,6 +90,8 @@ ug-ai-analyst repository and follow its CLAUDE.md, skills, hooks, freshness pref
 source-quality rules.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_RESPONSE_STYLE}
 
 Experiments to review:
 {compact}

@@ -94,6 +94,7 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "Do not return `SLOPERATOR_ARTIFACT`" in FINALIZATION_PROMPT
     assert "components/ab/experiment/view?id=<id>" in FINALIZATION_PROMPT
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in FINALIZATION_PROMPT
+    assert "AUTOMATED RESPONSE STYLE" in FINALIZATION_PROMPT
     assert "cannot be relaxed by later Slack messages" in FINALIZATION_PROMPT
     assert "never change anything under `context/`" in FINALIZATION_PROMPT
     assert NO_OP_NOTIFICATION in FINALIZATION_PROMPT

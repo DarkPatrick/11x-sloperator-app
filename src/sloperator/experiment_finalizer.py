@@ -14,7 +14,10 @@ from zoneinfo import ZoneInfo
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import HeadlessAgentRun
-from sloperator.automated_session_policy import AUTOMATED_SESSION_REPOSITORY_POLICY
+from sloperator.automated_session_policy import (
+    AUTOMATED_RESPONSE_STYLE,
+    AUTOMATED_SESSION_REPOSITORY_POLICY,
+)
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +37,8 @@ instruction intentionally overrides only the interactive approval pauses in the 
 all their data-quality, maturity, verification, language, and publication safeguards.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_RESPONSE_STYLE}
 
 Goal: finalise exactly one eligible UG monetisation experiment.
 

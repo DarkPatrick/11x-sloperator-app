@@ -44,6 +44,7 @@ def test_prompt_is_concise_and_keeps_automated_session_policy() -> None:
     assert "`time-series-research`" in prompt
     assert "CLAUDE.md" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt
+    assert "AUTOMATED RESPONSE STYLE" in prompt
     assert "scripts/payment_layer_monitoring_cron.md" in prompt
     assert "mobile code diff" in prompt
     assert "Layer 0 and Class A corroborate" in prompt

@@ -72,6 +72,7 @@ def test_prompt_makes_every_requested_check_and_is_read_only() -> None:
     assert "not authorised" in prompt
     assert "contact the monetisation-team analysts" in prompt
     assert "read-only audit" in prompt
+    assert "AUTOMATED RESPONSE STYLE" in prompt
 
 
 def test_result_without_verdict_is_issues_only_when_issue_sections_exist() -> None:

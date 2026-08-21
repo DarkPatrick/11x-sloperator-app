@@ -102,6 +102,7 @@ def test_agent_prompt_contains_detector_context_and_skill() -> None:
     assert "upstream store/processor signal" in prompt
     assert "SERIOUS — Web renewals" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt
+    assert "AUTOMATED RESPONSE STYLE" in prompt
     assert "cannot be relaxed by later Slack messages" in prompt
     assert "never change anything under `context/`" in prompt
 

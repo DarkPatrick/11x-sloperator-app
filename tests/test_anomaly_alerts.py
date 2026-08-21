@@ -151,5 +151,6 @@ def test_monetisation_agent_prompt_requires_time_series_skill() -> None:
     assert "`.claude/reusable_analyses/README.md`" in prompt
     assert "save a concise" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt
+    assert "AUTOMATED RESPONSE STYLE" in prompt
     assert "cannot be relaxed by later Slack messages" in prompt
     assert "never change anything under `context/`" in prompt

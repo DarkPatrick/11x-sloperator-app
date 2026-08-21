@@ -11,7 +11,10 @@ from typing import Any
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.anomaly_alerts import AgentSubmitter
-from sloperator.automated_session_policy import AUTOMATED_SESSION_REPOSITORY_POLICY
+from sloperator.automated_session_policy import (
+    AUTOMATED_RESPONSE_STYLE,
+    AUTOMATED_SESSION_REPOSITORY_POLICY,
+)
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
@@ -129,6 +132,8 @@ UG Mobile Monetisation Health Monitoring report below. Work from
 analytics context and data tools.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_RESPONSE_STYLE}
 
 Before querying, read these repository knowledge sources:
 - `context/data-warehouse/anomaly-detection.md` for the detector semantics, alert vocabulary,

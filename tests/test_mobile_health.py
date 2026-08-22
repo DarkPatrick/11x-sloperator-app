@@ -66,6 +66,21 @@ def test_trigger_requires_configured_channel_bot_and_dashboard_header() -> None:
     assert not is_mobile_health_trigger({**event, "thread_ts": "99.1"}, settings)
 
 
+def test_trigger_accepts_current_mobile_dashboard_header() -> None:
+    settings = _settings()
+    event = {
+        "channel": settings.mobile_health_alert_channel,
+        "bot_id": settings.mobile_health_bot_id,
+        "ts": "100.1",
+        "text": REPORT.replace(
+            "UG Monetisation Health Monitoring Dashboard",
+            "UG Monetisation: Mobile Health Monitoring Dashboard",
+        ),
+    }
+
+    assert is_mobile_health_trigger(event, settings)
+
+
 def test_parser_selects_only_five_red_critical_android_ios_metrics() -> None:
     metrics = parse_critical_mobile_metrics(REPORT)
 

@@ -20,7 +20,9 @@ from sloperator.config import Settings
 LOGGER = logging.getLogger(__name__)
 
 REPORT_MARKER = "UG Monetisation Health Monitoring Dashboard"
+CURRENT_REPORT_MARKER = "UG Monetisation: Mobile Health Monitoring Dashboard"
 LEGACY_REPORT_MARKER = "*APP Health Monitoring Report*"
+REPORT_MARKERS = (CURRENT_REPORT_MARKER, REPORT_MARKER, LEGACY_REPORT_MARKER)
 PLATFORM_RE = re.compile(r"^:(?:robot_face|green_apple):\s+\*?(Android|iOS)\*?\s*$")
 QUERY_RE = re.compile(r"^<(?P<url>https?://[^|>]+)\|(?P<title>.+)>$")
 CRITICAL_DROP_RE = re.compile(
@@ -45,7 +47,7 @@ def is_mobile_health_trigger(event: dict[str, Any], settings: Settings) -> bool:
         and event.get("bot_id") == settings.mobile_health_bot_id
         and not isinstance(event.get("thread_ts"), str)
         and isinstance(text, str)
-        and (REPORT_MARKER in text or LEGACY_REPORT_MARKER in text)
+        and any(marker in text for marker in REPORT_MARKERS)
     )
 
 
@@ -251,7 +253,7 @@ class MobileHealthResponder:
                 and 0 <= float(timestamp) - float(message_ts) <= 10
             ):
                 if timestamp != message_ts and (
-                    REPORT_MARKER in text or LEGACY_REPORT_MARKER in text
+                    any(marker in text for marker in REPORT_MARKERS)
                 ):
                     continue
                 chunks.append((float(timestamp), text))

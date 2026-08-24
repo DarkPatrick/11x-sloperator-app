@@ -126,6 +126,8 @@ def test_prompt_requires_mobile_knowledge_and_detector_evidence() -> None:
     assert "`Confidence:" in prompt
     assert "`Impact:" in prompt
     assert "`Next:" in prompt
+    assert "first Slack-facing response containing the analysis" in prompt
+    assert "<@U0149RHN7D3> <@U09CYCGN6H4> <@U0525MDT0MN>" in prompt
     assert "detailed self-contained HTML report" in prompt
     assert "required ZIP archive" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt

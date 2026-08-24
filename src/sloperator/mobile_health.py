@@ -175,6 +175,11 @@ fields in this order, with no sub-bullets and no extra prose under or between th
 `Impact: <one concrete number> (<optional one-clause context>)`
 `Next: <one sentence containing 1-2 concrete next steps>`
 
+The first Slack-facing response containing the analysis must begin with exactly this mention line:
+`<@U0149RHN7D3> <@U09CYCGN6H4> <@U0525MDT0MN>`
+These are, respectively, Artyom Smirnov, Yanina Bykouskaya, and Egor Semin. Keep the mention line
+separate from the metric blocks; it is the only additional visible line allowed.
+
 Budget exactly six visible lines per metric: one header plus the five fields. This compact format
 is intentional: surface only the alert interpretation, the real issue beneath it, one impact
 number, and the action; keep the supporting analysis in the attachment. Do not merely paraphrase

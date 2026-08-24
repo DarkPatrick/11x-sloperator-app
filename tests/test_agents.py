@@ -460,6 +460,36 @@ async def test_headless_run_is_visible_and_disables_interactive_hooks(
     assert store.get_agent_session("D123", "100.1") is not None
 
 
+async def test_headless_run_ignores_interim_result_and_continues(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_claude = AsyncMock(
+        side_effect=(
+            AgentRunResult(session_id="session-1", text="Work is still running"),
+            AgentRunResult(session_id="session-1", text="Final notification"),
+        )
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    orchestrator = AgentOrchestrator(settings, store)
+
+    result = await orchestrator.execute_once(
+        "Automated work",
+        5_400,
+        accept_result=lambda text: text == "Final notification",
+    )
+
+    assert run_claude.await_count == 2
+    assert run_claude.await_args_list[1].args[2] == INTERIM_RECOVERY_PROMPT
+    assert result.text == "Final notification"
+    assert store.list_scheduled_agent_runs()[0]["messages"][-1]["text"] == (
+        "Final notification"
+    )
+
+
 async def test_headless_timeout_returns_partial_failure_without_retry(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,

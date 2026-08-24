@@ -812,7 +812,14 @@ class AgentOrchestrator:
         if not task.cancelled() and (error := task.exception()) is not None:
             LOGGER.error("Unhandled agent task failure: %s", type(error).__name__)
 
-    async def execute_once(self, text: str, timeout_seconds: int) -> HeadlessAgentRun:
+    async def execute_once(
+        self,
+        text: str,
+        timeout_seconds: int,
+        *,
+        accept_result: Callable[[str], bool] = lambda _: True,
+        max_interim_results: int = 2,
+    ) -> HeadlessAgentRun:
         """Run one isolated agent turn without creating a Slack thread."""
         parsed = parse_agent_request(text, self.settings)
         run_id = str(uuid.uuid4())
@@ -934,6 +941,44 @@ class AgentOrchestrator:
                         "Experiment finalisation failed: agent exhausted its work-time limit. "
                         f"{result.text.strip()}"
                     ),
+                )
+            interim_count = 0
+            while not accept_result(result.text) and interim_count < max_interim_results:
+                interim_count += 1
+                LOGGER.warning(
+                    "Ignoring interim result from scheduled agent turn; "
+                    "requesting final response (%d/%d)",
+                    interim_count,
+                    max_interim_results,
+                )
+                session = replace(
+                    session,
+                    external_session_id=result.session_id,
+                    status="cancelled",
+                )
+                if session.provider == "claude":
+                    continue_provider = partial(
+                        run_claude,
+                        run_settings,
+                        session,
+                        INTERIM_RECOVERY_PROMPT,
+                        control,
+                        force_resume=True,
+                        environment_overrides=environment_overrides,
+                    )
+                else:
+                    continue_provider = partial(
+                        run_codex,
+                        run_settings,
+                        session,
+                        INTERIM_RECOVERY_PROMPT,
+                        control,
+                        self.store,
+                        environment_overrides,
+                    )
+                result = await self._run_with_retries(
+                    continue_provider,
+                    context="scheduled agent turn final response",
                 )
         except asyncio.CancelledError:
             interrupted_status = (

@@ -174,7 +174,14 @@ Never finalise more than one experiment in this run.
 
 
 class AgentSubmitter(Protocol):
-    async def execute_once(self, text: str, timeout_seconds: int) -> HeadlessAgentRun: ...
+    async def execute_once(
+        self,
+        text: str,
+        timeout_seconds: int,
+        *,
+        accept_result: Callable[[str], bool] = lambda _: True,
+        max_interim_results: int = 2,
+    ) -> HeadlessAgentRun: ...
 
     async def attach_session(
         self,
@@ -244,6 +251,7 @@ async def run_once(
     run = await agent.execute_once(
         FINALIZATION_PROMPT,
         settings.experiment_finalizer_timeout_seconds,
+        accept_result=is_finalization_notification,
     )
     return await publish_run(client, agent, settings, run)
 

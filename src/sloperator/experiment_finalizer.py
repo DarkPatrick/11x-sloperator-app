@@ -210,6 +210,15 @@ def normalize_finalization_notification(text: str) -> str:
     )
 
 
+def is_finalization_notification(text: str) -> bool:
+    """Return whether a headless result is publishable rather than an interim update."""
+    try:
+        normalize_finalization_notification(text)
+    except InvalidFinalizationNotification:
+        return False
+    return True
+
+
 def next_run_at(
     now: dt.datetime,
     timezone_name: str = "Asia/Nicosia",

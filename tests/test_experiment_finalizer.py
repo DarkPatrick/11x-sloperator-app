@@ -13,6 +13,7 @@ from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
     NO_OP_NOTIFICATION,
     InvalidFinalizationNotification,
+    is_finalization_notification,
     next_run_at,
     normalize_finalization_notification,
     run_once,
@@ -163,3 +164,10 @@ No eligible experiment after checking the configured window.
 def test_notification_normalizer_rejects_unstructured_agent_commentary() -> None:
     with pytest.raises(InvalidFinalizationNotification):
         normalize_finalization_notification("Everything is published and verified.")
+
+
+def test_finalization_notification_distinguishes_interim_from_final_result() -> None:
+    assert not is_finalization_notification(
+        "The calculation is running; I'll continue when it completes."
+    )
+    assert is_finalization_notification(VALID_NOTIFICATION)

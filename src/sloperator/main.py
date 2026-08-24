@@ -25,6 +25,7 @@ from sloperator.experiment_config_check import (
 from sloperator.experiment_finalizer import (
     InvalidFinalizationNotification,
     cancel_task,
+    is_finalization_notification,
     publish_run,
     run_daily,
 )
@@ -140,7 +141,8 @@ async def serve(settings: Settings) -> None:
         await slack_handler.connect_async()  # type: ignore[no-untyped-call]
         await orchestrator.resume_interrupted(app.client)
         recovered_headless = await orchestrator.resume_interrupted_headless(
-            settings.experiment_finalizer_timeout_seconds
+            settings.experiment_finalizer_timeout_seconds,
+            accept_result=is_finalization_notification,
         )
         for run in recovered_headless:
             try:

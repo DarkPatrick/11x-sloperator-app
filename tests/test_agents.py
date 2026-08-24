@@ -10,6 +10,7 @@ from sloperator.agents import (
     AGENT_RETRY_DELAYS,
     CLAUDE_INITIAL_INSTRUCTION,
     FINAL_ARTIFACT_RECOVERY_PROMPT,
+    INTERIM_RECOVERY_PROMPT,
     RESTART_RECOVERY_PROMPT,
     TIME_LIMIT_NOTICE,
     TIMEOUT_RECOVERY_FAILURE_NOTICE,
@@ -515,6 +516,39 @@ async def test_interrupted_headless_turn_resumes_original_session(
     pending_publication = store.list_interrupted_scheduled_agent_runs()
     assert pending_publication[0]["status"] == "recovered"
     assert pending_publication[0]["result_text"] == "Recovered scheduled result"
+
+
+async def test_interrupted_headless_turn_ignores_interim_result_and_continues(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_claude = AsyncMock(
+        side_effect=(
+            AgentRunResult(session_id="scheduled-session", text="Calculation is still running"),
+            AgentRunResult(session_id="scheduled-session", text="Final notification"),
+        )
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.create_scheduled_agent_run(
+        "run-1", "claude", "opus", "scheduled-session", "Original cron request"
+    )
+    store.finish_scheduled_agent_run("run-1", status="interrupted")
+    orchestrator = AgentOrchestrator(settings, store)
+
+    recovered = await orchestrator.resume_interrupted_headless(
+        5_400,
+        accept_result=lambda text: text == "Final notification",
+    )
+
+    assert run_claude.await_count == 2
+    assert run_claude.await_args_list[1].args[2] == INTERIM_RECOVERY_PROMPT
+    assert recovered[0].text == "Final notification"
+    assert store.list_interrupted_scheduled_agent_runs()[0]["result_text"] == (
+        "Final notification"
+    )
 
 
 def test_split_slack_message_preserves_all_text() -> None:

@@ -63,6 +63,12 @@ The Sloperator service restarted while this automated turn was running. Resume t
 the existing session and workspace state. Inspect what has already completed, avoid repeating
 finished expensive calculations, and continue through the originally requested final response.
 """
+INTERIM_RECOVERY_PROMPT = """\
+Your previous response was only a progress update, so Sloperator did not publish it. Continue the
+existing work from its current state. Do not return another progress update, promise to continue
+later, or stop while a child task is still running. Wait for or inspect the ongoing work as needed,
+then return only the final response required by the original request.
+"""
 INITIAL_INSTRUCTION = """\
 Act as a pragmatic product analyst embedded in the Ultimate Guitar monetisation team.
 Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
@@ -1011,14 +1017,22 @@ class AgentOrchestrator:
         )
 
     async def resume_interrupted_headless(
-        self, timeout_seconds: int
+        self,
+        timeout_seconds: int,
+        *,
+        accept_result: Callable[[str], bool] = lambda _: True,
+        max_interim_results: int = 2,
     ) -> list[HeadlessAgentRun]:
         """Resume interrupted cron turns in their original provider sessions."""
         rows = await asyncio.to_thread(self.store.list_interrupted_scheduled_agent_runs)
         completed: list[HeadlessAgentRun] = []
         for row in rows:
             run_id = str(row["run_id"])
-            if row["status"] == "recovered" and isinstance(row["result_text"], str):
+            if (
+                row["status"] == "recovered"
+                and isinstance(row["result_text"], str)
+                and accept_result(row["result_text"])
+            ):
                 completed.append(
                     HeadlessAgentRun(
                         provider=str(row["provider"]),
@@ -1115,8 +1129,46 @@ class AgentOrchestrator:
                         f"{result.text.strip()}"
                     ),
                 )
-            finally:
-                self._active_runs.pop(key, None)
+            interim_count = 0
+            while not accept_result(result.text) and interim_count < max_interim_results:
+                interim_count += 1
+                LOGGER.warning(
+                    "Ignoring interim result from recovered scheduled turn %s; "
+                    "requesting final response (%d/%d)",
+                    run_id,
+                    interim_count,
+                    max_interim_results,
+                )
+                session = replace(
+                    session,
+                    external_session_id=result.session_id,
+                    status="cancelled",
+                )
+                if session.provider == "claude":
+                    continue_provider = partial(
+                        run_claude,
+                        run_settings,
+                        session,
+                        INTERIM_RECOVERY_PROMPT,
+                        control,
+                        force_resume=True,
+                        environment_overrides=environment_overrides,
+                    )
+                else:
+                    continue_provider = partial(
+                        run_codex,
+                        run_settings,
+                        session,
+                        INTERIM_RECOVERY_PROMPT,
+                        control,
+                        self.store,
+                        environment_overrides,
+                    )
+                result = await self._run_with_retries(
+                    continue_provider,
+                    context=f"recovered scheduled turn {run_id} final response",
+                )
+            self._active_runs.pop(key, None)
             await asyncio.to_thread(
                 self.store.finish_scheduled_agent_run,
                 run_id,

@@ -227,7 +227,8 @@ class CodexAppServer:
                         continue
                     if completed.get("status") != "completed":
                         raise CodexAppServerError(
-                            f"Codex turn ended with status {completed.get('status')!r}"
+                            "Codex turn ended unsuccessfully: "
+                            f"{dict(completed)!r}"
                         )
                     if not final_messages:
                         raise CodexAppServerError("Codex completed without a final answer")

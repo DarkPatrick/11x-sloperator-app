@@ -99,6 +99,14 @@ class AgentTimeoutError(AgentExecutionError):
     """Raised when an agent turn reaches its configured work-time limit."""
 
 
+class AgentAuthenticationError(AgentExecutionError):
+    """Raised when an agent CLI cannot authenticate with its provider."""
+
+    def __init__(self, provider: str, detail: str = "") -> None:
+        self.provider = provider
+        super().__init__(detail or f"{provider} authentication failed")
+
+
 class AgentSteeringInterrupt(RuntimeError):
     """Raised after a Claude process was interrupted for new user guidance."""
 
@@ -113,7 +121,7 @@ async def retry_agent_service_errors[AgentResult](
     for retry_number, delay in enumerate(delays, start=1):
         try:
             return await operation()
-        except AgentTimeoutError:
+        except (AgentTimeoutError, AgentAuthenticationError):
             raise
         except AgentExecutionError as error:
             LOGGER.warning(
@@ -448,6 +456,39 @@ def _tail(value: str, limit: int = 4_000) -> str:
     return value[-limit:].strip()
 
 
+AUTH_FAILURE_MARKERS = (
+    "authentication_failed",
+    "failed to authenticate",
+    "not authenticated",
+    "not logged in",
+    "oauth session expired",
+    "oauth token expired",
+    "refresh token expired",
+    "please run /login",
+    "please run `claude auth login`",
+    "please run 'codex login'",
+    "please run `codex login`",
+    "401 unauthorized",
+    "invalid authentication credentials",
+)
+
+
+def is_authentication_failure(detail: str) -> bool:
+    """Recognize provider credential failures that must never be retried."""
+    normalized = detail.casefold()
+    return any(marker in normalized for marker in AUTH_FAILURE_MARKERS)
+
+
+def authentication_failure_notice(provider: str, owner_user_id: str) -> str:
+    """Build an actionable, provider-specific Slack alert for the operator."""
+    command = "claude auth login" if provider == "claude" else "codex login"
+    label = "Claude" if provider == "claude" else "Codex"
+    return (
+        f"<@{owner_user_id}> ⚠️ {label} потерял авторизацию, поэтому агент остановлен сразу "
+        f"без повторных попыток. Выполните `{command}`, проверьте вход и запустите задачу повторно."
+    )
+
+
 def _with_workspace_lock(settings: Settings, command: list[str]) -> list[str]:
     """Serialize agents and automatic updates that share one working tree."""
     lock_path = settings.agent_workspace / ".git" / "sloperator-agent.lock"
@@ -498,6 +539,9 @@ async def run_claude(
         control=control,
         environment_overrides=environment_overrides,
     )
+    diagnostic = f"{stdout}\n{stderr}"
+    if is_authentication_failure(diagnostic):
+        raise AgentAuthenticationError("claude", _tail(diagnostic))
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as error:
@@ -552,6 +596,8 @@ async def run_codex(
             f"Agent turn exceeded the {settings.agent_timeout_seconds}-second timeout"
         ) from None
     except CodexAppServerError as error:
+        if is_authentication_failure(str(error)):
+            raise AgentAuthenticationError("codex", str(error)) from error
         raise AgentExecutionError("Codex agent service request failed") from error
     finally:
         control.codex = None
@@ -578,6 +624,26 @@ class AgentOrchestrator:
         self._headless_tasks: dict[tuple[str, str], asyncio.Task[object]] = {}
         self._headless_sessions: dict[tuple[str, str], dict[str, object]] = {}
         self._manual_cancellations: set[tuple[str, str]] = set()
+        self._notification_client: AsyncWebClient | None = None
+
+    def set_notification_client(self, client: AsyncWebClient) -> None:
+        """Set the Slack client used for operator alerts from headless runs."""
+        self._notification_client = client
+
+    async def _notify_owner_auth_failure(self, provider: str) -> None:
+        """Immediately DM the owner when a headless provider loses authentication."""
+        client = self._notification_client
+        if client is None:
+            LOGGER.error("Cannot send %s auth alert: Slack client is not configured", provider)
+            return
+        conversation = await client.conversations_open(users=self.settings.slack_user_id)
+        await client.chat_postMessage(
+            channel=conversation["channel"]["id"],
+            markdown_text=authentication_failure_notice(
+                provider,
+                self.settings.slack_user_id,
+            ),
+        )
 
     def headless_sessions(self) -> list[dict[str, object]]:
         """Return cron/headless runs for display and control in the admin UI."""
@@ -875,6 +941,19 @@ class AgentOrchestrator:
                 run_id,
                 status=interrupted_status,
             )
+            raise
+        except AgentAuthenticationError as error:
+            self._headless_sessions[key].update(
+                status="failed",
+                last_error=repr(error),
+            )
+            await asyncio.to_thread(
+                self.store.finish_scheduled_agent_run,
+                run_id,
+                status="failed",
+                last_error=repr(error),
+            )
+            await self._notify_owner_auth_failure(error.provider)
             raise
         except Exception as error:
             self._headless_sessions[key].update(
@@ -1443,6 +1522,24 @@ class AgentOrchestrator:
         except ValueError as error:
             await self._reply(client, channel_id, thread_ts, str(error))
             request_status = "rejected"
+        except AgentAuthenticationError as error:
+            await asyncio.to_thread(
+                self.store.fail_agent_turn,
+                channel_id,
+                thread_ts,
+                repr(error),
+            )
+            LOGGER.error(
+                "%s authentication failed in Slack thread %s",
+                error.provider,
+                thread_ts,
+            )
+            await self._reply(
+                client,
+                channel_id,
+                thread_ts,
+                authentication_failure_notice(error.provider, self.settings.slack_user_id),
+            )
         except asyncio.CancelledError:
             await asyncio.to_thread(
                 self.store.cancel_agent_turn,

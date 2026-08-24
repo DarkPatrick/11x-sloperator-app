@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from sloperator.codex_app_server import CodexAppServer
+from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
 
 
 def test_command_makes_git_metadata_writable_inside_workspace_sandbox() -> None:
@@ -50,3 +50,27 @@ async def test_initialize_can_wait_for_the_workspace_lock() -> None:
         await server.connect()
 
     assert server._request.await_args.kwargs["request_timeout"] == 900
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_preserves_authentication_error_detail() -> None:
+    server = CodexAppServer(Path("/usr/bin/codex"), Path("/srv/agent"), "model", 60)
+    server.thread_id = "thread-1"
+    server._request = AsyncMock(  # type: ignore[method-assign]
+        return_value={"turn": {"id": "turn-1"}}
+    )
+    await server._notifications.put(
+        {
+            "method": "turn/completed",
+            "params": {
+                "turn": {
+                    "id": "turn-1",
+                    "status": "failed",
+                    "error": {"message": "401 Unauthorized; please run 'codex login'"},
+                }
+            },
+        }
+    )
+
+    with pytest.raises(CodexAppServerError, match="401 Unauthorized"):
+        await server.run_turn("test")

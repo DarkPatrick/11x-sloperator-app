@@ -14,12 +14,15 @@ from sloperator.agents import (
     TIME_LIMIT_NOTICE,
     TIMEOUT_RECOVERY_FAILURE_NOTICE,
     TIMEOUT_RECOVERY_PROMPT,
+    AgentAuthenticationError,
     AgentExecutionError,
     AgentOrchestrator,
     AgentRunResult,
     AgentTimeoutError,
+    authentication_failure_notice,
     extract_artifact,
     fetch_thread_context,
+    is_authentication_failure,
     optional_reply_instruction,
     parse_agent_request,
     retry_agent_service_errors,
@@ -121,6 +124,19 @@ def test_agent_service_retry_delays_grow_to_one_hour() -> None:
     assert AGENT_RETRY_DELAYS == (60, 300, 900, 1_800, 3_600)
 
 
+@pytest.mark.parametrize(
+    "detail",
+    (
+        "Failed to authenticate: OAuth session expired and could not be refreshed",
+        "authentication_failed",
+        "initialize failed: 401 Unauthorized",
+        "Please run 'codex login'",
+    ),
+)
+def test_provider_authentication_failures_are_recognized(detail: str) -> None:
+    assert is_authentication_failure(detail)
+
+
 async def test_agent_service_errors_retry_with_progressive_backoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -175,6 +191,99 @@ async def test_agent_timeout_is_never_retried(
 
     operation.assert_awaited_once()
     sleep.assert_not_awaited()
+
+
+async def test_agent_authentication_failure_is_never_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = AsyncMock(
+        side_effect=AgentAuthenticationError("claude", "OAuth session expired")
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("sloperator.agents.asyncio.sleep", sleep)
+
+    with pytest.raises(AgentAuthenticationError, match="OAuth session expired"):
+        await retry_agent_service_errors(operation, context="automated trigger")
+
+    operation.assert_awaited_once()
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.parametrize("provider", ("claude", "codex"))
+async def test_slack_turn_reports_authentication_failure_immediately(
+    provider: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = AsyncMock(side_effect=AgentAuthenticationError(provider, "credentials expired"))
+    monkeypatch.setattr(f"sloperator.agents.run_{provider}", runner)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        default_agent=provider,
+        agent_workspace=tmp_path,
+    )
+    post_message = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message, files_upload_v2=AsyncMock())
+    orchestrator = AgentOrchestrator(settings, store)
+
+    await orchestrator.submit(
+        client,
+        channel_id="C123",
+        message_ts="100.1:analysis",
+        thread_ts="100.1",
+        text="Investigate",
+        show_status=False,
+        automated=True,
+    )
+    await orchestrator.drain()
+
+    runner.assert_awaited_once()
+    post_message.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        markdown_text=authentication_failure_notice(provider, "U1234567890"),
+    )
+    session = store.get_agent_session("C123", "100.1")
+    assert session is not None
+    assert session.status == "failed"
+
+
+async def test_headless_authentication_failure_immediately_dms_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_claude = AsyncMock(
+        side_effect=AgentAuthenticationError("claude", "OAuth session expired")
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+    )
+    client = SimpleNamespace(
+        conversations_open=AsyncMock(return_value={"channel": {"id": "D123"}}),
+        chat_postMessage=AsyncMock(),
+    )
+    orchestrator = AgentOrchestrator(settings, store)
+    orchestrator.set_notification_client(client)
+
+    with pytest.raises(AgentAuthenticationError):
+        await orchestrator.execute_once("Automated work", 5_400)
+
+    run_claude.assert_awaited_once()
+    client.conversations_open.assert_awaited_once_with(users="U1234567890")
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="D123",
+        markdown_text=authentication_failure_notice("claude", "U1234567890"),
+    )
 
 
 async def test_automated_trigger_returns_partial_result_after_timeout(

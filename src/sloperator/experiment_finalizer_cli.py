@@ -24,6 +24,7 @@ async def launch(settings: Settings) -> None:
     vpn = VpnManager(settings)
     orchestrator = AgentOrchestrator(settings, store, vpn)
     client = AsyncWebClient(token=settings.bot_token)
+    orchestrator.set_notification_client(client)
     try:
         await run_once(client, orchestrator, settings)
         await orchestrator.drain()

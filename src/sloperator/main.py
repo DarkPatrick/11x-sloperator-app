@@ -68,6 +68,7 @@ async def serve(settings: Settings) -> None:
         payment_layer_responder=payment_layer_responder,
         automation_controls=automation_controls,
     )
+    orchestrator.set_notification_client(app.client)
 
     async def handle_new_history_message(
         channel_id: str,

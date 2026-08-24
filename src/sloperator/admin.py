@@ -84,10 +84,15 @@ text-overflow:ellipsis}.cron-job-stats{font-size:11px;color:var(--muted);margin-
 .cron-day{position:relative;width:22px;height:22px;border-radius:5px;background:var(--surface);
 border:1px solid var(--line);transition:transform .12s,border-color .12s;display:grid;
 grid-template-columns:repeat(var(--segment-cols,1),1fr);grid-auto-rows:1fr;gap:1px;padding:2px;
-overflow:hidden}.cron-day.has-runs{border-color:#ffffff20}
-.cron-day:hover{transform:scale(1.18);z-index:2;border-color:var(--text)}.cron-day.today{
+overflow:hidden;cursor:pointer}.cron-day.has-runs{border-color:#ffffff20}
+.cron-day:hover{transform:scale(1.18);z-index:5;border-color:var(--text)}
+.cron-day.multiple:hover,.cron-day.multiple:focus-within{width:max(44px,calc(var(--run-count) * 18px));
+max-width:220px;height:28px;transform:none;grid-template-columns:repeat(var(--run-count),minmax(14px,1fr));
+grid-template-rows:1fr;box-shadow:0 8px 28px #0008;overflow:visible;background:var(--card)}.cron-day.today{
 outline:2px solid var(--blue);outline-offset:2px}.cron-day.future{opacity:.32}
-.run-segment{min-width:1px;min-height:1px;border-radius:1px;background:var(--blue)}
+.run-segment{min-width:1px;min-height:1px;border:0;padding:0;border-radius:1px;background:var(--blue);
+cursor:pointer}.cron-day.multiple:hover .run-segment,.cron-day.multiple:focus-within .run-segment{
+min-width:14px;border-radius:3px}.run-segment:hover{outline:2px solid var(--text);outline-offset:1px}
 .cron-empty-board{padding:18px;color:var(--muted)}.cron-config,.history-log{margin-top:14px}
 .cron-config .table-wrap,.history-log .table-wrap{overflow:auto}summary{cursor:pointer}
 .trigger-configs{grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:14px}
@@ -163,6 +168,7 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <span class="sub">Last 28 days · UTC</span><div class="cron-legend">
 <span class="legend-item"><i class="run-dot success"></i>Completed</span>
 <span class="legend-item"><i class="run-dot running"></i>Running</span>
+<span class="legend-item"><i class="run-dot"></i>Started, awaiting result</span>
 <span class="legend-item"><i class="run-dot failed"></i>Failed</span>
 <span class="legend-item"><i class="run-dot scheduled"></i>Scheduled</span>
 <span class="legend-item"><i class="run-dot missed"></i>No record</span>
@@ -205,6 +211,13 @@ title="SQL visualizations"></iframe></details></section></section></main>
 <div class="sub">Current initialization prompt · representative dynamic values</div></div>
 <button onclick="closePrompt()" aria-label="Close prompt">✕</button></div>
 <div class="prompt-modal-body"><div id="prompt-markdown" class="prompt-markdown"></div></div>
+</section></div>
+<div id="cron-run-modal" class="modal-backdrop" hidden onclick="if(event.target===this)closeCronRuns()">
+<section class="card prompt-modal" role="dialog" aria-modal="true" aria-labelledby="cron-run-modal-title">
+<div class="row spread prompt-modal-head"><div><h2 id="cron-run-modal-title">Cron executions</h2>
+<div id="cron-run-modal-subtitle" class="sub"></div></div>
+<button onclick="closeCronRuns()" aria-label="Close execution details">✕</button></div>
+<div class="prompt-modal-body"><div id="cron-run-details"></div></div>
 </section></div>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
@@ -425,27 +438,40 @@ if(job.command.includes("--only-at"))return 1;
 return cronFieldValues(fields[0],0,59).size*cronFieldValues(fields[1],0,23).size}
 function automationButton(kind,item){const verb=item.enabled?"stop":"start",label=item.enabled?"Stop":"Start";
 return `<button class="${item.enabled?"danger":""}" onclick="event.stopPropagation();action('/automations/${kind}/${encodeURIComponent(item.name||item.key)}/${verb}')">${label}</button>`}
+window.cronRunGroups=[];
+function openCronRuns(index,runIndex=null){const group=window.cronRunGroups[index];if(!group)return;
+const runs=runIndex===null?group.runs:[group.runs[runIndex]].filter(Boolean);
+document.getElementById("cron-run-modal-title").textContent=group.job;
+document.getElementById("cron-run-modal-subtitle").textContent=`${group.day} · planned ${group.planned} · recorded ${group.runs.length}`;
+document.getElementById("cron-run-details").innerHTML=runs.length?`<div class="table-wrap"><table><thead><tr>
+<th>Time</th><th>Status</th><th>Execution information</th></tr></thead><tbody>${runs.map(run=>`<tr>
+<td>${esc(run.time)}</td><td><span class="badge ${esc(statusLabel(run.status))}">${esc(statusLabel(run.status))}</span></td>
+<td><code>${esc(run.command||"No execution details recorded")}</code></td></tr>`).join("")}</tbody></table></div>`:
+'<div class="sub">No execution was recorded for this scheduled run.</div>';
+document.getElementById("cron-run-modal").hidden=false}
+function closeCronRuns(){document.getElementById("cron-run-modal").hidden=true}
 function cronRow(job,events,days,today){const firstEvent=events.length?
 [...events].sort((a,b)=>a.time.localeCompare(b.time))[0].time.slice(0,10):today;
 const cells=days.map(date=>{const key=dayKey(date);
 const runs=events.filter(event=>dayKey(utcDate(event.time))===key).sort((a,b)=>a.time.localeCompare(b.time));
 const executionRuns=runs.filter(event=>statusLabel(event.status)!=="scheduled");
-const planned=key>=firstEvent?plannedRuns(job,date):0;const displayedRuns=planned===1&&executionRuns.length?
-[executionRuns[executionRuns.length-1]]:executionRuns.slice(0,planned);
-const segments=Array.from({length:planned},(_,index)=>{const status=index<displayedRuns.length?
-statusLabel(displayedRuns[index].status):(key===today?"scheduled":"missed");
-return `<i class="run-segment ${esc(status)}" title="${esc(index<displayedRuns.length?
-displayedRuns[index].time+" — "+status:"planned — "+status)}"></i>`}).join("");
+const planned=key>=firstEvent?plannedRuns(job,date):0;const displayedRuns=executionRuns;
+const groupIndex=window.cronRunGroups.push({job:job.name,day:key,planned,runs})-1;
+const segmentRuns=displayedRuns.length?displayedRuns:Array.from({length:planned},()=>null);
+const segments=segmentRuns.map(run=>{const status=run?statusLabel(run.status):(key===today?"scheduled":"missed");
+return `<button class="run-segment ${esc(status)}" title="${esc(run?run.time+" — "+status:"planned — "+status)}"
+onclick="event.stopPropagation();openCronRuns(${groupIndex},${run?runs.indexOf(run):"null"})" aria-label="${esc(status)}"></button>`}).join("");
 const details=`${key} · planned ${planned} · recorded ${runs.length}`+
 (runs.length?"\\n"+runs.map(event=>`${event.time} — ${statusLabel(event.status)}`).join("\\n"):"");
-const cols=Math.max(1,Math.ceil(Math.sqrt(planned)));return `<div class="cron-day-slot"><div
-class="cron-day ${runs.length?"has-runs":""} ${key===today?"today":""}"
-style="--segment-cols:${cols}" title="${esc(details)}" aria-label="${esc(details)}">${segments}</div></div>`}).join("");
+const cols=Math.max(1,Math.ceil(Math.sqrt(segmentRuns.length)));return `<div class="cron-day-slot"><div
+class="cron-day ${runs.length?"has-runs":""} ${segmentRuns.length>1?"multiple":""} ${key===today?"today":""}"
+style="--segment-cols:${cols};--run-count:${Math.max(1,segmentRuns.length)}" title="${esc(details)}" aria-label="${esc(details)}"
+tabindex="0" role="button" onclick="openCronRuns(${groupIndex})" onkeydown="if(event.key==='Enter'||event.key===' ')openCronRuns(${groupIndex})">${segments}</div></div>`}).join("");
 const completed=events.filter(event=>statusLabel(event.status)==="completed").length;
 return `<div class="cron-job-label" title="${esc(job.name)} · ${esc(job.schedule)}"><div class="row spread"><b>${esc(job.name)}</b>${automationButton("crons",job)}</div>
 <div class="cron-job-stats">${job.enabled?"active":"stopped"} · ${esc(job.schedule)} · ${events.length} events${completed?` · ${completed} done`:""}</div>
 </div>${cells}`}
-function renderCronHistory(jobs,events){const root=document.getElementById("history");
+function renderCronHistory(jobs,events){const root=document.getElementById("history");window.cronRunGroups=[];
 const days=calendarDays(),today=dayKey(days[days.length-1]);const axis=days.map(date=>{
 const monday=date.getUTCDay()===1;return `<div class="cron-axis-day ${monday?"week-start":""}"
 title="${dayKey(date)}">${monday?date.toLocaleString("en",{month:"short",day:"numeric",timeZone:"UTC"}):
@@ -752,12 +778,22 @@ def _cron_execution_history(
             if timestamp.astimezone(dt.UTC) < cutoff:
                 continue
             status = str(item.get("status", "")).lower()
+            # Older monitor logs were appended only after a successful evaluation
+            # but did not carry an explicit status.  Preserve that established
+            # success signal instead of painting every historical run red.
+            effective_status = status or "legacy_success"
+            details = [f"status={effective_status}"]
+            for field in ("started_at", "duration_sec", "exit_code", "error"):
+                if field in item:
+                    details.append(f"{field}={item[field]}")
             rows.append(
                 {
                     "time": _utc_string(timestamp),
-                    "command": f"execution log · status={status or 'unknown'}",
+                    "command": "execution log · " + " · ".join(details),
                     "job": job["name"],
-                    "status": "completed" if status in {"ok", "completed", "success"} else "failed",
+                    "status": "completed"
+                    if effective_status in {"ok", "completed", "success", "legacy_success"}
+                    else "failed",
                 }
             )
 

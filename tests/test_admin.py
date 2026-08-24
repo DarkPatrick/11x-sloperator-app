@@ -115,9 +115,9 @@ def test_cron_execution_history_uses_real_retry_child_results(tmp_path: Path) ->
     log.write_text(
         "\n".join(
             (
-                "[2026-07-27 10:05:00] [cron_retry:health] child exited rc=0",
+                "[2026-07-28 10:05:00] [cron_retry:health] child exited rc=0",
                 "[2026-07-27 11:00:00] [cron_retry:health] not the scheduled fire: skipping",
-                "[2026-07-28 10:05:00] [cron_retry:health] child exited rc=1",
+                "[2026-07-28 14:05:00] [cron_retry:health] child exited rc=1",
             )
         )
     )
@@ -136,8 +136,8 @@ def test_cron_execution_history_uses_real_retry_child_results(tmp_path: Path) ->
     assert authoritative == {"health"}
     assert [row["status"] for row in rows] == ["failed", "completed"]
     assert [row["time"] for row in rows] == [
+        "2026-07-28 11:05:00 UTC",
         "2026-07-28 07:05:00 UTC",
-        "2026-07-27 07:05:00 UTC",
     ]
 
 
@@ -150,6 +150,7 @@ def test_cron_execution_history_reads_jsonl_job_outcomes(tmp_path: Path) -> None
             (
                 '{"ts":"2026-07-28T08:00:00+00:00","status":"ok"}',
                 '{"ts":"2026-07-28T08:30:00+00:00","status":"data_unavailable"}',
+                '{"ts":"2026-07-28T09:00:00+00:00","findings":2}',
             )
         )
     )
@@ -164,7 +165,8 @@ def test_cron_execution_history_reads_jsonl_job_outcomes(tmp_path: Path) -> None
     rows, authoritative = _cron_execution_history(jobs)
 
     assert authoritative == {"probe"}
-    assert [row["status"] for row in rows] == ["failed", "completed"]
+    assert [row["status"] for row in rows] == ["completed", "failed", "completed"]
+    assert "status=legacy_success" in rows[0]["command"]
 
 
 def test_admin_contains_airflow_style_28_day_cron_grid() -> None:
@@ -226,7 +228,16 @@ def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:
 
 def test_cron_calendar_does_not_let_next_schedule_hide_completed_run() -> None:
     assert 'executionRuns=runs.filter(event=>statusLabel(event.status)!=="scheduled")' in ADMIN_HTML
-    assert "[executionRuns[executionRuns.length-1]]" in ADMIN_HTML
+    assert "const displayedRuns=executionRuns" in ADMIN_HTML
+
+
+def test_cron_calendar_has_clickable_execution_details_and_multi_run_hover() -> None:
+    assert 'id="cron-run-modal"' in ADMIN_HTML
+    assert "function openCronRuns(index,runIndex=null)" in ADMIN_HTML
+    assert 'onclick="openCronRuns(${groupIndex})"' in ADMIN_HTML
+    assert ".cron-day.multiple:hover" in ADMIN_HTML
+    assert "--run-count:${Math.max(1,segmentRuns.length)}" in ADMIN_HTML
+    assert "Started, awaiting result" in ADMIN_HTML
 
 
 def test_admin_supports_headless_agent_runs() -> None:

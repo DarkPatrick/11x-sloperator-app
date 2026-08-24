@@ -1282,7 +1282,7 @@ class AgentOrchestrator:
         """Return Slack thread keys with queued or running in-process work."""
         return {
             key for key, tasks in self._thread_tasks.items() if tasks
-        } | self._headless_tasks.keys()
+        } | self._headless_tasks.keys() | self._active_runs.keys()
 
     async def drain(self) -> None:
         """Wait until all currently queued turns finish."""

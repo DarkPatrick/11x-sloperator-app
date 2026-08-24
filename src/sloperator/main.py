@@ -22,7 +22,12 @@ from sloperator.experiment_config_check import (
     ExperimentConfigResponder,
     is_experiment_config_trigger,
 )
-from sloperator.experiment_finalizer import cancel_task, publish_run, run_daily
+from sloperator.experiment_finalizer import (
+    InvalidFinalizationNotification,
+    cancel_task,
+    publish_run,
+    run_daily,
+)
 from sloperator.health import create_health_app
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
 from sloperator.store import EventStore
@@ -138,7 +143,33 @@ async def serve(settings: Settings) -> None:
             settings.experiment_finalizer_timeout_seconds
         )
         for run in recovered_headless:
-            await publish_run(app.client, orchestrator, settings, run)
+            try:
+                await publish_run(app.client, orchestrator, settings, run)
+            except InvalidFinalizationNotification as error:
+                LOGGER.error(
+                    "Recovered experiment finalizer returned an invalid interim response"
+                )
+                if run.run_id is not None:
+                    await asyncio.to_thread(
+                        store.finish_scheduled_agent_run,
+                        run.run_id,
+                        status="failed",
+                        external_session_id=run.session_id,
+                        result_text=run.text,
+                        last_error=repr(error),
+                    )
+                conversation = await app.client.conversations_open(
+                    users=settings.slack_user_id
+                )
+                await app.client.chat_postMessage(
+                    channel=conversation["channel"]["id"],
+                    markdown_text=(
+                        f"<@{settings.slack_user_id}> ⚠️ Experiment finalizer остановлен: "
+                        "после восстановления агент вернул промежуточный, но не финальный "
+                        "результат. Сервис продолжает работать; задачу нужно запустить повторно."
+                    ),
+                )
+                continue
             if run.run_id is not None:
                 await asyncio.to_thread(
                     store.finish_scheduled_agent_run,

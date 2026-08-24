@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS admin_agent_messages (
 
 CREATE TABLE IF NOT EXISTS scheduled_agent_runs (
     run_id TEXT PRIMARY KEY,
+    job_name TEXT NOT NULL DEFAULT 'scheduled-agent',
     provider TEXT NOT NULL CHECK(provider IN ('claude', 'codex')),
     model TEXT NOT NULL,
     external_session_id TEXT,
@@ -242,6 +243,24 @@ class EventStore:
                     UPDATE agent_sessions
                     SET last_activity_at = updated_at
                     WHERE last_activity_at IS NULL
+                    """
+                )
+            scheduled_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(scheduled_agent_runs)")
+            }
+            if "job_name" not in scheduled_columns:
+                connection.execute(
+                    "ALTER TABLE scheduled_agent_runs ADD COLUMN job_name TEXT "
+                    "NOT NULL DEFAULT 'experiment-finalizer'"
+                )
+                connection.execute(
+                    """
+                    UPDATE scheduled_agent_runs
+                    SET job_name = 'experiment-config-check'
+                    WHERE prompt LIKE '%automated review of newly started%'
+                       OR prompt LIKE '%configuration audit%'
+                       OR prompt LIKE '%configuration with the project%'
                     """
                 )
             connection.execute(
@@ -568,6 +587,7 @@ class EventStore:
     def create_scheduled_agent_run(
         self,
         run_id: str,
+        job_name: str,
         provider: str,
         model: str,
         external_session_id: str | None,
@@ -578,10 +598,10 @@ class EventStore:
             connection.execute(
                 """
                 INSERT INTO scheduled_agent_runs(
-                    run_id, provider, model, external_session_id, prompt
-                ) VALUES (?, ?, ?, ?, ?)
+                    run_id, job_name, provider, model, external_session_id, prompt
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, provider, model, external_session_id, prompt),
+                (run_id, job_name, provider, model, external_session_id, prompt),
             )
 
     def finish_scheduled_agent_run(
@@ -615,7 +635,7 @@ class EventStore:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """
-                SELECT run_id, provider, model, external_session_id, status,
+                SELECT run_id, job_name, provider, model, external_session_id, status,
                        turn_count, last_error, prompt, result_text,
                        created_at, updated_at
                 FROM scheduled_agent_runs
@@ -628,6 +648,7 @@ class EventStore:
         for row in rows:
             item = dict(row)
             run_id = item.pop("run_id")
+            job_name = item.pop("job_name")
             messages = [
                 {
                     "message_ts": "prompt",
@@ -652,7 +673,7 @@ class EventStore:
                 {
                     **item,
                     "channel_id": "scheduled",
-                    "channel_name": "Scheduled experiment finalizer",
+                    "channel_name": job_name,
                     "thread_ts": run_id,
                     "last_activity_at": item["updated_at"],
                     "headless": True,
@@ -1228,27 +1249,32 @@ class EventStore:
             for row in rows
         ]
 
-    def list_interrupted_scheduled_agent_runs(self) -> list[dict[str, object]]:
+    def list_interrupted_scheduled_agent_runs(
+        self, job_name: str | None = None
+    ) -> list[dict[str, object]]:
         """Return headless cron turns interrupted before producing a result."""
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT run_id, provider, model, external_session_id, prompt,
+                SELECT run_id, job_name, provider, model, external_session_id, prompt,
                        status, result_text
                 FROM scheduled_agent_runs
                 WHERE status IN ('running', 'interrupted', 'recovered')
+                  AND (? IS NULL OR job_name = ?)
                 ORDER BY created_at
-                """
+                """,
+                (job_name, job_name),
             ).fetchall()
         return [
             {
                 "run_id": row[0],
-                "provider": row[1],
-                "model": row[2],
-                "external_session_id": row[3],
-                "prompt": row[4],
-                "status": row[5],
-                "result_text": row[6],
+                "job_name": row[1],
+                "provider": row[2],
+                "model": row[3],
+                "external_session_id": row[4],
+                "prompt": row[5],
+                "status": row[6],
+                "result_text": row[7],
             }
             for row in rows
         ]

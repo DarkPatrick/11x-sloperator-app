@@ -23,7 +23,7 @@ def test_settings_load_valid_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.experiment_finalizer_enabled is True
     assert settings.experiment_finalizer_timezone == "Asia/Nicosia"
     assert settings.experiment_finalizer_hour == 12
-    assert settings.experiment_finalizer_timeout_seconds == 5_400
+    assert settings.experiment_finalizer_timeout_seconds == 7_200
     assert settings.experiment_finalizer_channel == "C07A9FDQ14P"
     assert settings.mobile_health_timeout_seconds == 3_600
 

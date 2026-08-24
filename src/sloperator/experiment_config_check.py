@@ -296,6 +296,7 @@ class ExperimentConfigResponder:
         run: HeadlessAgentRun = await self.agent.execute_once(
             build_experiment_config_prompt(normalized, interactive=interactive),
             timeout_seconds,
+            job_name="experiment-config-check",
         )
         verdict, visible_text = normalize_experiment_config_result(run.text)
         if verdict == "OK":

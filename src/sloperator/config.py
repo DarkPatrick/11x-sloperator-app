@@ -59,7 +59,7 @@ class Settings:
     experiment_finalizer_enabled: bool = True
     experiment_finalizer_timezone: str = "Asia/Nicosia"
     experiment_finalizer_hour: int = 12
-    experiment_finalizer_timeout_seconds: int = 5_400
+    experiment_finalizer_timeout_seconds: int = 7_200
     experiment_finalizer_channel: str = "C07A9FDQ14P"
     mobile_health_timeout_seconds: int = 3_600
     ldap_username: str | None = None
@@ -177,7 +177,7 @@ class Settings:
                 os.environ.get("EXPERIMENT_FINALIZER_HOUR", "12")
             )
             experiment_finalizer_timeout_seconds = int(
-                os.environ.get("EXPERIMENT_FINALIZER_TIMEOUT_SECONDS", "5400")
+                os.environ.get("EXPERIMENT_FINALIZER_TIMEOUT_SECONDS", "7200")
             )
             vpn_proxy_port = int(os.environ.get("SLOPERATOR_VPN_PROXY_PORT", "18888"))
             anomaly_window_hours = float(os.environ.get("ANOMALY_WINDOW_HOURS", "24"))

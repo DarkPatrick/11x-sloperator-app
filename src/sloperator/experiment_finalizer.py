@@ -251,6 +251,7 @@ async def run_once(
     run = await agent.execute_once(
         FINALIZATION_PROMPT,
         settings.experiment_finalizer_timeout_seconds,
+        job_name="experiment-finalizer",
         accept_result=is_finalization_notification,
     )
     return await publish_run(client, agent, settings, run)

@@ -530,7 +530,8 @@ async def test_interrupted_headless_turn_resumes_original_session(
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()
     store.create_scheduled_agent_run(
-        "run-1", "claude", "opus", "scheduled-session", "Original cron request"
+        "run-1", "experiment-finalizer", "claude", "opus", "scheduled-session",
+        "Original cron request"
     )
     store.finish_scheduled_agent_run("run-1", status="interrupted")
     orchestrator = AgentOrchestrator(settings, store)
@@ -563,7 +564,8 @@ async def test_interrupted_headless_turn_ignores_interim_result_and_continues(
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()
     store.create_scheduled_agent_run(
-        "run-1", "claude", "opus", "scheduled-session", "Original cron request"
+        "run-1", "experiment-finalizer", "claude", "opus", "scheduled-session",
+        "Original cron request"
     )
     store.finish_scheduled_agent_run("run-1", status="interrupted")
     orchestrator = AgentOrchestrator(settings, store)

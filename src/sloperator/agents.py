@@ -817,6 +817,7 @@ class AgentOrchestrator:
         text: str,
         timeout_seconds: int,
         *,
+        job_name: str = "scheduled-agent",
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
     ) -> HeadlessAgentRun:
@@ -839,7 +840,7 @@ class AgentOrchestrator:
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         self._headless_sessions[key] = {
             "channel_id": session.channel_id,
-            "channel_name": "Scheduled experiment finalizer",
+            "channel_name": job_name,
             "thread_ts": session.thread_ts,
             "provider": session.provider,
             "model": session.model,
@@ -864,6 +865,7 @@ class AgentOrchestrator:
         await asyncio.to_thread(
             self.store.create_scheduled_agent_run,
             run_id,
+            job_name,
             session.provider,
             session.model,
             session.external_session_id,
@@ -1065,11 +1067,14 @@ class AgentOrchestrator:
         self,
         timeout_seconds: int,
         *,
+        job_name: str | None = None,
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
     ) -> list[HeadlessAgentRun]:
         """Resume interrupted cron turns in their original provider sessions."""
-        rows = await asyncio.to_thread(self.store.list_interrupted_scheduled_agent_runs)
+        rows = await asyncio.to_thread(
+            self.store.list_interrupted_scheduled_agent_runs, job_name
+        )
         completed: list[HeadlessAgentRun] = []
         for row in rows:
             run_id = str(row["run_id"])

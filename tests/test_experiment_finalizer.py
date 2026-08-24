@@ -128,7 +128,8 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     assert result == VALID_NOTIFICATION.strip()
     agent.execute_once.assert_awaited_once_with(
         FINALIZATION_PROMPT,
-        5_400,
+        7_200,
+        job_name="experiment-finalizer",
         accept_result=is_finalization_notification,
     )
     client.chat_postMessage.assert_awaited_once_with(

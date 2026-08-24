@@ -142,6 +142,7 @@ async def serve(settings: Settings) -> None:
         await orchestrator.resume_interrupted(app.client)
         recovered_headless = await orchestrator.resume_interrupted_headless(
             settings.experiment_finalizer_timeout_seconds,
+            job_name="experiment-finalizer",
             accept_result=is_finalization_notification,
         )
         for run in recovered_headless:

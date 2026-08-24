@@ -15,12 +15,12 @@ from sloperator.agents import (
     TIME_LIMIT_NOTICE,
     TIMEOUT_RECOVERY_FAILURE_NOTICE,
     TIMEOUT_RECOVERY_PROMPT,
+    ActiveAgentRun,
     AgentAuthenticationError,
     AgentExecutionError,
     AgentOrchestrator,
     AgentRunResult,
     AgentTimeoutError,
-    ActiveAgentRun,
     authentication_failure_notice,
     extract_artifact,
     fetch_thread_context,
@@ -286,6 +286,37 @@ async def test_headless_authentication_failure_immediately_dms_owner(
         channel="D123",
         markdown_text=authentication_failure_notice("claude", "U1234567890"),
     )
+
+
+async def test_headless_run_can_override_agent_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_claude = AsyncMock(
+        return_value=AgentRunResult(session_id="session-1", text="done")
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    default_workspace = tmp_path / "default"
+    audit_workspace = tmp_path / "audit"
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=default_workspace,
+    )
+    orchestrator = AgentOrchestrator(settings, store)
+
+    await orchestrator.execute_once(
+        "[claude:opus] Audit",
+        5_400,
+        workspace=audit_workspace,
+    )
+
+    run_settings = run_claude.await_args.args[0]
+    assert run_settings.agent_workspace == audit_workspace
+    assert orchestrator.settings.agent_workspace == default_workspace
 
 
 async def test_automated_trigger_returns_partial_result_after_timeout(

@@ -179,6 +179,7 @@ class AgentSubmitter(Protocol):
         text: str,
         timeout_seconds: int,
         *,
+        job_name: str = "scheduled-agent",
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
     ) -> HeadlessAgentRun: ...

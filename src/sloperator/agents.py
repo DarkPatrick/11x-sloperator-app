@@ -818,6 +818,7 @@ class AgentOrchestrator:
         timeout_seconds: int,
         *,
         job_name: str = "scheduled-agent",
+        workspace: Path | None = None,
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
     ) -> HeadlessAgentRun:
@@ -834,7 +835,11 @@ class AgentOrchestrator:
             turn_count=0,
             last_error=None,
         )
-        run_settings = replace(self.settings, agent_timeout_seconds=timeout_seconds)
+        run_settings = replace(
+            self.settings,
+            agent_timeout_seconds=timeout_seconds,
+            agent_workspace=workspace or self.settings.agent_workspace,
+        )
         control = ActiveAgentRun(session.provider)
         key = (session.channel_id, session.thread_ts)
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
@@ -1068,6 +1073,7 @@ class AgentOrchestrator:
         timeout_seconds: int,
         *,
         job_name: str | None = None,
+        workspace: Path | None = None,
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
     ) -> list[HeadlessAgentRun]:
@@ -1114,7 +1120,9 @@ class AgentOrchestrator:
                 f"{RESTART_RECOVERY_PROMPT}\n\nOriginal request:\n{row['prompt']}"
             )
             run_settings = replace(
-                self.settings, agent_timeout_seconds=timeout_seconds
+                self.settings,
+                agent_timeout_seconds=timeout_seconds,
+                agent_workspace=workspace or self.settings.agent_workspace,
             )
             environment_overrides = {
                 **(

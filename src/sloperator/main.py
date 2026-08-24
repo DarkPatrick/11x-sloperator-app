@@ -16,6 +16,19 @@ from sloperator.admin import create_admin_routes
 from sloperator.agents import AgentOrchestrator, validate_agent_runtime
 from sloperator.archive import periodically_synchronize_archive, synchronize_archive
 from sloperator.automation_controls import AutomationControls
+from sloperator.automation_error_audit import PROJECT_ROOT, TIMEOUT_SECONDS
+from sloperator.automation_error_audit import (
+    cancel_task as cancel_automation_error_audit,
+)
+from sloperator.automation_error_audit import (
+    is_final_result as is_automation_error_audit_result,
+)
+from sloperator.automation_error_audit import (
+    publish_run as publish_automation_error_audit,
+)
+from sloperator.automation_error_audit import (
+    run_daily as run_daily_automation_error_audit,
+)
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
 from sloperator.experiment_config_check import (
@@ -127,6 +140,7 @@ async def serve(settings: Settings) -> None:
     archive_task: asyncio.Task[None] | None = None
     vpn_task: asyncio.Task[None] | None = None
     experiment_finalizer_task: asyncio.Task[None] | None = None
+    automation_error_audit_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -181,6 +195,22 @@ async def serve(settings: Settings) -> None:
                     external_session_id=run.session_id,
                     result_text=run.text,
                 )
+        recovered_audits = await orchestrator.resume_interrupted_headless(
+            TIMEOUT_SECONDS,
+            job_name="automation-error-audit",
+            workspace=PROJECT_ROOT,
+            accept_result=is_automation_error_audit_result,
+        )
+        for run in recovered_audits:
+            await publish_automation_error_audit(app.client, settings, run)
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status="completed",
+                    external_session_id=run.session_id,
+                    result_text=run.text,
+                )
         await synchronize_archive(app.client, store, settings.backfill_limit)
         archive_task = asyncio.create_task(
             periodically_synchronize_archive(
@@ -211,6 +241,10 @@ async def serve(settings: Settings) -> None:
                 ),
                 name="daily-experiment-finalizer",
             )
+        automation_error_audit_task = asyncio.create_task(
+            run_daily_automation_error_audit(app.client, orchestrator, settings),
+            name="daily-automation-error-audit",
+        )
         LOGGER.info(
             "Sloperator started; health http://%s:%d/healthz; admin /admin; archive %s",
             settings.host,
@@ -229,6 +263,7 @@ async def serve(settings: Settings) -> None:
             with suppress(asyncio.CancelledError):
                 await vpn_task
         await cancel_task(experiment_finalizer_task)
+        await cancel_automation_error_audit(automation_error_audit_task)
         await orchestrator.close()
         await slack_handler.close_async()  # type: ignore[no-untyped-call]
         await runner.cleanup()

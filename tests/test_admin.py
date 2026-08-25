@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from sloperator.admin import (
     ADMIN_HTML,
@@ -111,13 +113,20 @@ def test_cron_history_is_labelled_for_calendar() -> None:
 
 
 def test_cron_execution_history_uses_real_retry_child_results(tmp_path: Path) -> None:
+    timezone = ZoneInfo("Asia/Nicosia")
+    local_date = (dt.datetime.now(timezone) - dt.timedelta(days=1)).date()
+    completed_at = dt.datetime.combine(local_date, dt.time(10, 5), timezone)
+    failed_at = dt.datetime.combine(local_date, dt.time(14, 5), timezone)
     log = tmp_path / "health.log"
     log.write_text(
         "\n".join(
             (
-                "[2026-07-28 10:05:00] [cron_retry:health] child exited rc=0",
-                "[2026-07-27 11:00:00] [cron_retry:health] not the scheduled fire: skipping",
-                "[2026-07-28 14:05:00] [cron_retry:health] child exited rc=1",
+                f"[{completed_at:%Y-%m-%d %H:%M:%S}] "
+                "[cron_retry:health] child exited rc=0",
+                f"[{local_date:%Y-%m-%d} 11:00:00] "
+                "[cron_retry:health] not the scheduled fire: skipping",
+                f"[{failed_at:%Y-%m-%d %H:%M:%S}] "
+                "[cron_retry:health] child exited rc=1",
             )
         )
     )
@@ -136,21 +145,29 @@ def test_cron_execution_history_uses_real_retry_child_results(tmp_path: Path) ->
     assert authoritative == {"health"}
     assert [row["status"] for row in rows] == ["failed", "completed"]
     assert [row["time"] for row in rows] == [
-        "2026-07-28 11:05:00 UTC",
-        "2026-07-28 07:05:00 UTC",
+        failed_at.astimezone(dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        completed_at.astimezone(dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
     ]
 
 
 def test_cron_execution_history_reads_jsonl_job_outcomes(tmp_path: Path) -> None:
+    base_time = dt.datetime.now(dt.UTC).replace(microsecond=0) - dt.timedelta(days=1)
     script = tmp_path / "probe.py"
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "probe.jsonl").write_text(
         "\n".join(
             (
-                '{"ts":"2026-07-28T08:00:00+00:00","status":"ok"}',
-                '{"ts":"2026-07-28T08:30:00+00:00","status":"data_unavailable"}',
-                '{"ts":"2026-07-28T09:00:00+00:00","findings":2}',
+                json.dumps({"ts": base_time.isoformat(), "status": "ok"}),
+                json.dumps(
+                    {
+                        "ts": (base_time + dt.timedelta(minutes=30)).isoformat(),
+                        "status": "data_unavailable",
+                    }
+                ),
+                json.dumps(
+                    {"ts": (base_time + dt.timedelta(hours=1)).isoformat(), "findings": 2}
+                ),
             )
         )
     )

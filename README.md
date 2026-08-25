@@ -118,6 +118,11 @@ semantics and mobile-health datamart knowledge in `ug-ai-analyst`; replies from 
 in the same thread continue that session. Configure the source with
 `MOBILE_HEALTH_ALERT_CHANNEL` and `MOBILE_HEALTH_BOT_ID`.
 
+The same channel and monitor bot can also post `UG Monetisation: WEB health monitoring`
+reports. Sloperator selects at most five red critical metrics from the Web section and starts
+an equivalent investigation grounded in dashboard 104's card-level SQL and the repository's
+`ug_web_health_monitoring.md` knowledge source.
+
 Confirmed Analytics Bot anomalies are deduplicated per metric, platform, and metric type.
 Once an agent investigation is launched for a combination, repeated alerts for that same
 combination are excluded from agent analysis for 24 hours; new combinations in a mixed alert

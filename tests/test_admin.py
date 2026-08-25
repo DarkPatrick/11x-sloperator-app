@@ -208,6 +208,7 @@ def test_slack_trigger_definitions_include_all_automatic_investigations() -> Non
         "analytics-anomaly",
         "subscription-flow",
         "mobile-health",
+        "web-health",
         "payment-layer",
     ]
     assert definitions[2]["channel_id"] == settings.mobile_health_alert_channel
@@ -215,8 +216,10 @@ def test_slack_trigger_definitions_include_all_automatic_investigations() -> Non
     assert "`time-series-research`" in definitions[0]["prompt"]
     assert "{{ exact SERIOUS Slack alert }}" in definitions[1]["prompt"]
     assert "context/data-warehouse/anomaly-detection.md" in definitions[2]["prompt"]
-    assert definitions[3]["channel_id"] == settings.payment_layer_alert_channel
-    assert "no more than five short lines" in definitions[3]["prompt"]
+    assert definitions[3]["channel_id"] == settings.mobile_health_alert_channel
+    assert "ug_web_health_monitoring.md" in definitions[3]["prompt"]
+    assert definitions[4]["channel_id"] == settings.payment_layer_alert_channel
+    assert "no more than five short lines" in definitions[4]["prompt"]
 
 
 def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:

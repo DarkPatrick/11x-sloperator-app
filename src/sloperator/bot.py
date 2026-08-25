@@ -25,6 +25,7 @@ from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_tri
 from sloperator.store import EventStore
 from sloperator.subscription_flow import SubscriptionFlowResponder, is_subscription_flow_event
 from sloperator.vpn import VpnError, VpnManager, VpnState
+from sloperator.web_health import WebHealthResponder, is_web_health_trigger
 
 LOGGER = logging.getLogger(__name__)
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
@@ -112,6 +113,7 @@ def create_app(
     app.use(ArchiveMiddleware(store, app.client))
     anomaly_responder = AnomalyAlertResponder(settings, store, orchestrator)
     mobile_health_responder = MobileHealthResponder(settings, orchestrator)
+    web_health_responder = WebHealthResponder(settings, orchestrator)
     subscription_flow_responder = subscription_flow_responder or SubscriptionFlowResponder(
         settings,
         store,
@@ -136,6 +138,9 @@ def create_app(
             return
         if enabled("mobile-health") and is_mobile_health_trigger(dict(event), settings):
             await mobile_health_responder.handle(dict(event), client)
+            return
+        if enabled("web-health") and is_web_health_trigger(dict(event), settings):
+            await web_health_responder.handle(dict(event), client)
             return
         if enabled("subscription-flow") and is_subscription_flow_event(dict(event), settings):
             await subscription_flow_responder.handle(dict(event), client)

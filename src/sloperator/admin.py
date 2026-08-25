@@ -34,6 +34,7 @@ from sloperator.subscription_flow import (
     SubscriptionFlowIncident,
     build_subscription_flow_agent_prompt,
 )
+from sloperator.web_health import WebCriticalMetric, build_web_health_agent_prompt
 
 ADMIN_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -932,6 +933,17 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             )
         ],
     )
+    web_prompt = build_web_health_agent_prompt(
+        "{{ source report header and summary }}",
+        [
+            WebCriticalMetric(
+                "{{ Metabase card title }}",
+                "https://metabase.mu.se/question/{{ card id }}",
+                ":red_circle: {{ critical metric line with detector evidence }}",
+                ("{{ optional segment or diagnostic evidence }}",),
+            )
+        ],
+    )
     payment_prompt = build_payment_layer_agent_prompt(
         ":rotating_light: *Payment path collapsed* — {{ source build `path` }}\n"
         "{{ current rate vs baseline · estimated loss }}\n"
@@ -971,6 +983,16 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             "condition": "Red critical metrics in Android/iOS report sections",
             "limit": "at most 5 metrics per report",
             "prompt": preview_note + mobile_prompt,
+        },
+        {
+            "key": "web-health",
+            "name": "UG Monetisation: WEB health monitoring",
+            "channel_id": settings.mobile_health_alert_channel,
+            "channel_name": "ug-monetization-metrics-monitoring",
+            "source": settings.mobile_health_bot_id,
+            "condition": "Red critical metrics in the Web report section",
+            "limit": "at most 5 metrics per report",
+            "prompt": preview_note + web_prompt,
         },
         {
             "key": "payment-layer",

@@ -201,6 +201,16 @@ class VpnManager:
         os.chmod(self.runtime_dir, 0o700)
         profile_path = self.runtime_dir / "client.ovpn"
         auth_path = self.runtime_dir / "auth"
+        # Docker creates a directory at a missing bind-mount source. This can
+        # happen after transient credentials are removed while the stopped
+        # container still exists, and would otherwise make reconnect fail.
+        if auth_path.is_dir():
+            try:
+                auth_path.rmdir()
+            except OSError as error:
+                raise VpnError(
+                    f"VPN auth path is an unexpected non-empty directory: {auth_path}"
+                ) from error
         profile_path.write_bytes(self.settings.vpn_profile.read_bytes())
         auth_path.write_text(f"{username}\n{password}\n")
         os.chmod(profile_path, 0o600)

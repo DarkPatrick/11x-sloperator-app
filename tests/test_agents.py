@@ -569,7 +569,8 @@ async def test_interrupted_headless_turn_resumes_original_session(
     store.finish_scheduled_agent_run("run-1", status="interrupted")
     orchestrator = AgentOrchestrator(settings, store)
     orchestrator._active_runs[("scheduled", "run-1")] = ActiveAgentRun("claude")
-    assert ("scheduled", "run-1") in orchestrator.active_keys()
+    # A retained process-control object is not proof that work is still active.
+    assert ("scheduled", "run-1") not in orchestrator.active_keys()
     orchestrator._active_runs.clear()
 
     recovered = await orchestrator.resume_interrupted_headless(5_400)

@@ -717,6 +717,17 @@ class AgentOrchestrator:
 
         return await retry_agent_service_errors(run_with_capacity, context=context)
 
+    async def _agent_environment(self, *, automated: bool) -> dict[str, str]:
+        """Build agent environment from the current VPN state for each attempt."""
+        environment = (
+            self.vpn.agent_environment()
+            if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
+            else {}
+        )
+        if automated:
+            environment["UG_SKIP_PREFLIGHT"] = "1"
+        return environment
+
     async def submit(
         self,
         client: AsyncWebClient,
@@ -907,16 +918,8 @@ class AgentOrchestrator:
         if current_task is not None:
             self._headless_tasks[key] = current_task
         self._active_runs[key] = control
-        environment_overrides = {
-            **(
-                self.vpn.agent_environment()
-                if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
-                else {}
-            ),
-            "UG_SKIP_PREFLIGHT": "1",
-        }
-
         async def execute_provider() -> AgentRunResult:
+            environment_overrides = await self._agent_environment(automated=True)
             if session.provider == "claude":
                 result = await run_claude(
                     run_settings,
@@ -951,6 +954,7 @@ class AgentOrchestrator:
                     agent_timeout_seconds=TIMEOUT_RECOVERY_SECONDS,
                 )
                 recovery_session = replace(session, status="cancelled")
+                environment_overrides = await self._agent_environment(automated=True)
                 if session.provider == "claude":
                     result = await run_claude(
                         recovery_settings,
@@ -990,6 +994,7 @@ class AgentOrchestrator:
                     external_session_id=result.session_id,
                     status="cancelled",
                 )
+                environment_overrides = await self._agent_environment(automated=True)
                 if session.provider == "claude":
                     continue_provider = partial(
                         run_claude,
@@ -1151,28 +1156,23 @@ class AgentOrchestrator:
                 agent_timeout_seconds=timeout_seconds,
                 agent_workspace=workspace or self.settings.agent_workspace,
             )
-            environment_overrides = {
-                **(
-                    self.vpn.agent_environment()
-                    if self.vpn is not None and await self.vpn.state() is VpnState.CONNECTED
-                    else {}
-                ),
-                "UG_SKIP_PREFLIGHT": "1",
-            }
-
-            if session.provider == "claude":
-                resume_provider = partial(
-                    run_claude,
-                    run_settings,
-                    session,
-                    recovery_prompt,
-                    control,
-                    force_resume=True,
-                    environment_overrides=environment_overrides,
-                )
-            else:
-                resume_provider = partial(
-                    run_codex,
+            async def resume_provider(
+                session: AgentSession = session,
+                run_settings: Settings = run_settings,
+                recovery_prompt: str = recovery_prompt,
+                control: ActiveAgentRun = control,
+            ) -> AgentRunResult:
+                environment_overrides = await self._agent_environment(automated=True)
+                if session.provider == "claude":
+                    return await run_claude(
+                        run_settings,
+                        session,
+                        recovery_prompt,
+                        control,
+                        force_resume=True,
+                        environment_overrides=environment_overrides,
+                    )
+                return await run_codex(
                     run_settings,
                     session,
                     recovery_prompt,
@@ -1189,6 +1189,7 @@ class AgentOrchestrator:
                 recovery_settings = replace(
                     run_settings, agent_timeout_seconds=TIMEOUT_RECOVERY_SECONDS
                 )
+                environment_overrides = await self._agent_environment(automated=True)
                 if session.provider == "claude":
                     result = await run_claude(
                         recovery_settings,
@@ -1229,6 +1230,7 @@ class AgentOrchestrator:
                     external_session_id=result.session_id,
                     status="cancelled",
                 )
+                environment_overrides = await self._agent_environment(automated=True)
                 if session.provider == "claude":
                     continue_provider = partial(
                         run_claude,
@@ -1253,7 +1255,6 @@ class AgentOrchestrator:
                     continue_provider,
                     context=f"recovered scheduled turn {run_id} final response",
                 )
-            self._active_runs.pop(key, None)
             await asyncio.to_thread(
                 self.store.finish_scheduled_agent_run,
                 run_id,
@@ -1270,6 +1271,7 @@ class AgentOrchestrator:
                     run_id=run_id,
                 )
             )
+            self._active_runs.pop(key, None)
         if completed:
             LOGGER.warning("Resumed %d interrupted scheduled turn(s)", len(completed))
         return completed
@@ -1317,7 +1319,7 @@ class AgentOrchestrator:
         """Return Slack thread keys with queued or running in-process work."""
         return {
             key for key, tasks in self._thread_tasks.items() if tasks
-        } | self._headless_tasks.keys() | self._active_runs.keys()
+        } | self._headless_tasks.keys()
 
     async def drain(self) -> None:
         """Wait until all currently queued turns finish."""

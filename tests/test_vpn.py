@@ -41,3 +41,27 @@ def test_vpn_runtime_credentials_preserve_special_characters(tmp_path: Path) -> 
     assert (manager.runtime_dir / "auth").read_text() == (
         "user@mus.se\n$pec!al\\\\password\n"
     )
+
+
+def test_vpn_runtime_credentials_replace_stale_docker_mount_directory(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "client.ovpn"
+    profile.write_text("client\n")
+    manager = VpnManager(
+        Settings(
+            slack_user_id="U1234567890",
+            bot_token="xoxb-test",
+            app_token="xapp-test",
+            database_path=tmp_path / "data" / "archive.sqlite3",
+            ldap_username="user",
+            ldap_password="password",
+            vpn_profile=profile,
+        )
+    )
+    (manager.runtime_dir / "auth").mkdir(parents=True)
+
+    manager._prepare_runtime_files()
+
+    assert (manager.runtime_dir / "auth").is_file()
+    assert (manager.runtime_dir / "auth").read_text() == "user\npassword\n"

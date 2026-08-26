@@ -24,6 +24,7 @@ from sloperator.agents import (
     authentication_failure_notice,
     extract_artifact,
     fetch_thread_context,
+    has_required_deliverable,
     is_authentication_failure,
     optional_reply_instruction,
     parse_agent_request,
@@ -688,6 +689,29 @@ def test_extract_artifact_rejects_paths_outside_workspace(tmp_path) -> None:
     with pytest.raises(ValueError, match="за пределами"):
         extract_artifact(
             "SLOPERATOR_ARTIFACT: ../analysis.zip",
+            tmp_path,
+        )
+
+
+def test_reused_analysis_satisfies_artifact_contract_and_becomes_slack_link(
+    tmp_path: Path,
+) -> None:
+    url = "https://ultimate-guitar.slack.com/archives/C0AJKHFHVHV/p1234567890123456"
+
+    response, artifact = extract_artifact(
+        f"<@UOWNER>\nSLOPERATOR_REUSE_ANALYSIS: {url}",
+        tmp_path,
+    )
+
+    assert has_required_deliverable(f"SLOPERATOR_REUSE_ANALYSIS: {url}")
+    assert response == f"<@UOWNER>\nПовтор этого же алерта — [открыть существующий разбор]({url})."
+    assert artifact is None
+
+
+def test_reused_analysis_rejects_non_slack_url(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="некорректную Slack-ссылку"):
+        extract_artifact(
+            "SLOPERATOR_REUSE_ANALYSIS: https://example.com/not-slack",
             tmp_path,
         )
 

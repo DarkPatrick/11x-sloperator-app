@@ -16,6 +16,7 @@ from urllib.parse import quote
 import aiohttp
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.analysis_reuse import recent_analysis_reuse_policy
 from sloperator.automated_session_policy import (
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
@@ -266,7 +267,11 @@ class AnomalyAlertResponder:
                     channel_id=self.settings.anomaly_alert_channel,
                     message_ts=f"{trigger_ts}:monetisation-analysis",
                     thread_ts=trigger_ts,
-                    text=build_monetisation_agent_prompt(batch, monetisation),
+                    text=build_monetisation_agent_prompt(
+                        batch,
+                        monetisation,
+                        self.settings.anomaly_alert_channel,
+                    ),
                     show_status=False,
                     require_artifact=True,
                     automated=True,
@@ -585,6 +590,7 @@ def confirmed_monetisation_anomalies(
 def build_monetisation_agent_prompt(
     batch: AlertBatch,
     anomalies: list[tuple[Alert, dict[str, Any]]],
+    channel_id: str = "C06FADPMGKT",
 ) -> str:
     """Build the first durable agent turn for a confirmed monetisation incident."""
     metric_lines = []
@@ -607,6 +613,8 @@ CLAUDE.md and freshness preflight, and use its analytics context and data tools.
 
 {AUTOMATED_RESPONSE_STYLE}
 
+{recent_analysis_reuse_policy(channel_id, "metric + platform + type")}
+
 Alert timestamp: {batch.alert_dt or "unknown"} UTC
 Confirmed monetisation anomalies:
 {metrics}
@@ -624,8 +632,8 @@ but if further review rounds are only producing non-critical cosmetic changes an
 substantial time, publish the current sound version instead of continuing to polish it.
 Reserve enough time to package artifacts and return the final response before the deadline.
 
-Before investigating, read `.claude/reusable_analyses/README.md` and any linked cases that
-look similar. Reuse relevant metric definitions, diagnostic cuts, queries, report structure,
-and prior findings where they still apply, while validating the current incident independently.
+When no reusable Slack analysis exists, read `.claude/reusable_analyses/README.md` and any linked
+cases that look similar. Reuse relevant metric definitions, diagnostic cuts, queries, report
+structure, and prior findings where they still apply, while validating the current incident independently.
 Do not add a case or update the index unless a human explicitly asks for that in this Slack thread.
 """

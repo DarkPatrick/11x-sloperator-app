@@ -34,6 +34,11 @@ DIRECTIVE_RE = re.compile(
 )
 NEXT_RE = re.compile(r"^next:\s*", re.IGNORECASE)
 ARTIFACT_RE = re.compile(r"^SLOPERATOR_ARTIFACT:\s*(?P<path>\S+)\s*$")
+REUSE_ANALYSIS_PREFIX = "SLOPERATOR_REUSE_ANALYSIS:"
+REUSE_ANALYSIS_RE = re.compile(
+    r"^SLOPERATOR_REUSE_ANALYSIS:\s*"
+    r"(?P<url>https://[A-Za-z0-9.-]+\.slack\.com/archives/[A-Z0-9]+/p\d+(?:\?\S*)?)\s*$"
+)
 FINAL_ARTIFACT_RECOVERY_PROMPT = """\
 Your previous response was an internal review/status note, not the deliverable requested by
 Sloperator. Do not run any more tools, reviews, polls, or analysis. Return the already prepared
@@ -367,11 +372,23 @@ def split_slack_message(text: str, limit: int = 3_000) -> list[str]:
 
 
 def extract_artifact(text: str, workspace: Path) -> tuple[str, Path | None]:
-    """Remove and validate one agent-produced ZIP attachment marker."""
+    """Remove and validate one ZIP marker or render one reused-analysis marker."""
     artifact: Path | None = None
+    reused_analysis: str | None = None
     response_lines: list[str] = []
     workspace = workspace.resolve()
     for line in text.splitlines():
+        reuse_match = REUSE_ANALYSIS_RE.fullmatch(line.strip())
+        if reuse_match is not None:
+            if reused_analysis is not None:
+                raise ValueError("Агент указал больше одного существующего разбора.")
+            reused_analysis = reuse_match.group("url")
+            response_lines.append(
+                f"Повтор этого же алерта — [открыть существующий разбор]({reused_analysis})."
+            )
+            continue
+        if line.strip().startswith(REUSE_ANALYSIS_PREFIX):
+            raise ValueError("Агент вернул некорректную Slack-ссылку на существующий разбор.")
         match = ARTIFACT_RE.fullmatch(line.strip())
         if match is None:
             response_lines.append(line)
@@ -389,7 +406,17 @@ def extract_artifact(text: str, workspace: Path) -> tuple[str, Path | None]:
         if candidate.suffix.lower() != ".zip" or not candidate.is_file():
             raise ValueError("Агент не создал указанный ZIP-архив.")
         artifact = candidate
+    if artifact is not None and reused_analysis is not None:
+        raise ValueError("Агент одновременно вернул новый архив и существующий разбор.")
     return "\n".join(response_lines).strip(), artifact
+
+
+def has_required_deliverable(text: str) -> bool:
+    """Accept either a new artifact or an explicit recent-analysis reuse result."""
+    return any(
+        ARTIFACT_RE.fullmatch(line.strip()) or REUSE_ANALYSIS_RE.fullmatch(line.strip())
+        for line in text.splitlines()
+    )
 
 
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
@@ -1506,10 +1533,7 @@ class AgentOrchestrator:
                             )
                             prompt = _claude_steering_prompt(additions)
                             force_resume = True
-                        if require_artifact and not any(
-                            ARTIFACT_RE.fullmatch(line.strip())
-                            for line in result.text.splitlines()
-                        ):
+                        if require_artifact and not has_required_deliverable(result.text):
                             LOGGER.warning(
                                 "Claude result for thread %s missed the required artifact "
                                 "contract; requesting the prepared final deliverable",
@@ -1538,10 +1562,7 @@ class AgentOrchestrator:
                                 ),
                                 context=f"Slack thread {thread_ts} final deliverable recovery",
                             )
-                            if not any(
-                                ARTIFACT_RE.fullmatch(line.strip())
-                                for line in result.text.splitlines()
-                            ):
+                            if not has_required_deliverable(result.text):
                                 raise AgentExecutionError(
                                     "Claude did not return the required final artifact contract"
                                 )

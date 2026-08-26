@@ -149,6 +149,10 @@ def test_monetisation_agent_prompt_requires_time_series_skill() -> None:
     assert "usual useful charts and visual-review workflow" in prompt
     assert "only producing non-critical cosmetic changes" in prompt
     assert "`.claude/reusable_analyses/README.md`" in prompt
+    assert "previous five days" in prompt
+    assert "`metric + platform + type` identities" in prompt
+    assert "SLOPERATOR_REUSE_ANALYSIS:" in prompt
+    assert "return exactly this one line" in prompt
     assert "Do not add a case or update the index" in prompt
     assert "unless a human explicitly asks" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt

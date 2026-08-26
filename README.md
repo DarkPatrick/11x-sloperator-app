@@ -118,6 +118,17 @@ semantics and mobile-health datamart knowledge in `ug-ai-analyst`; replies from 
 in the same thread continue that session. Configure the source with
 `MOBILE_HEALTH_ALERT_CHANNEL` and `MOBILE_HEALTH_BOT_ID`.
 
+Before querying data, Mobile and Web health agents inspect completed Sloperator analyses in the
+same channel from the previous five days. An exact match requires the same complete set of
+platform/card/metric identities; changing values and diagnostics do not make the alert new. When
+a completed match exists, the fresh alert thread receives a link to that analysis instead of a
+duplicate investigation and ZIP artifact. Partial overlap, raw alerts, and progress replies are
+never reused.
+
+Confirmed Analytics Bot monetisation anomalies apply the same five-day preflight in
+`#ug-analytics-monitoring`, matching the complete set of metric/platform/type identities. Its
+existing 24-hour per-identity launch cooldown remains the first deduplication layer.
+
 The same channel and monitor bot can also post `UG Monetisation: WEB health monitoring`
 reports. Sloperator selects at most five red critical metrics from the Web section and starts
 an equivalent investigation grounded in dashboard 104's card-level SQL and the repository's

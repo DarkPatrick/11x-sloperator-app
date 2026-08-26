@@ -116,6 +116,10 @@ def test_prompt_requires_mobile_knowledge_and_detector_evidence() -> None:
     assert "AGENTS.md" not in prompt
     assert "context/data-warehouse/anomaly-detection.md" in prompt
     assert "context/data-warehouse/tables/ug_mobile_health_monitoring.md" in prompt
+    assert "previous five days" in prompt
+    assert "SLOPERATOR_REUSE_ANALYSIS:" in prompt
+    assert "complete set of selected `platform + metric/card`" in prompt
+    assert "do not run even a" in prompt
     assert "at most five across Android and iOS" in prompt
     assert "critical one" in prompt
     assert "critical six" not in prompt

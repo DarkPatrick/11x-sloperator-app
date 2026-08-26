@@ -84,6 +84,9 @@ def test_prompt_uses_web_dashboard_knowledge_and_automated_style() -> None:
     assert "`time-series-research`" in prompt
     assert "context/data-warehouse/anomaly-detection.md" in prompt
     assert "context/data-warehouse/dashboards/ug_web_health_monitoring.md" in prompt
+    assert "previous five days" in prompt
+    assert "SLOPERATOR_REUSE_ANALYSIS:" in prompt
+    assert "complete set of selected `platform + metric/card`" in prompt
     assert "dashboard 104 has no shared datamart" in prompt.lower()
     assert "critical one" in prompt
     assert "critical six" not in prompt

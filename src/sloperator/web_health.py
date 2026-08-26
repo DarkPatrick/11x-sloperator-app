@@ -16,6 +16,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
 from sloperator.config import Settings
+from sloperator.analysis_reuse import recent_analysis_reuse_policy
 
 LOGGER = logging.getLogger(__name__)
 REPORT_MARKER = "UG Monetisation: WEB health monitoring"
@@ -95,7 +96,11 @@ def parse_critical_web_metrics(text: str, *, limit: int = 5) -> list[WebCritical
     return selected
 
 
-def build_web_health_agent_prompt(report_text: str, metrics: list[WebCriticalMetric]) -> str:
+def build_web_health_agent_prompt(
+    report_text: str,
+    metrics: list[WebCriticalMetric],
+    channel_id: str = "C0AJKHFHVHV",
+) -> str:
     """Build the initial agent turn for critical web monetisation anomalies."""
     metric_blocks: list[str] = []
     for metric in metrics:
@@ -119,6 +124,12 @@ analytics context and data tools.
 
 {AUTOMATED_RESPONSE_STYLE}
 
+{recent_analysis_reuse_policy(
+    channel_id,
+    "platform + metric/card",
+    "<@U0149RHN7D3> <@U09CYCGN6H4> <@U0525MDT0MN>",
+)}
+
 Before querying, read these repository knowledge sources:
 - `context/data-warehouse/anomaly-detection.md` for the detector semantics, alert vocabulary,
   thresholds, and raw-source investigation playbook.
@@ -140,7 +151,8 @@ movement is a real product/business issue, a funnel or traffic-composition shift
 experiment/release effect, fraud/bot activity, or a freshness/query artifact. Look for a shared
 cause when several metrics move together; do not force one if evidence differs.
 
-Do the full investigation, but separate the detailed deliverable from the Slack response:
+When no reusable analysis exists, do the full investigation and separate the detailed deliverable
+from the Slack response:
 - Create a detailed self-contained HTML report with the evidence walkthrough, charts, diagnostic
   cuts, calculations, rejected hypotheses, limitations, and source links needed to audit the
   conclusion. Preserve useful detail; do not shorten the report to match the Slack TL;DR.
@@ -150,7 +162,8 @@ Do the full investigation, but separate the detailed deliverable from the Slack 
 - Put evidence walkthroughs, "what it is not" inventories, and multi-step action lists only in the
   attached report, never in the visible Slack text.
 
-Reply in this Slack thread with a TL;DR only, not a report. For each affected metric, use one bold
+For a fresh investigation, reply in this Slack thread with a TL;DR only, not a report. For each
+affected metric, use one bold
 Slack header line in the form `*Web | metric name*`, followed by exactly these five one-line fields
 in this order, with no sub-bullets and no extra prose under or between them:
 `Alert: <real, noise, mean-reversion, or transient — one plain sentence>`
@@ -197,7 +210,11 @@ class WebHealthResponder:
                 channel_id=self.settings.mobile_health_alert_channel,
                 message_ts=f"{message_ts}:web-health-analysis",
                 thread_ts=message_ts,
-                text=build_web_health_agent_prompt(report_text, metrics),
+                text=build_web_health_agent_prompt(
+                    report_text,
+                    metrics,
+                    self.settings.mobile_health_alert_channel,
+                ),
                 show_status=False,
                 require_artifact=True,
                 timeout_seconds=self.settings.mobile_health_timeout_seconds,

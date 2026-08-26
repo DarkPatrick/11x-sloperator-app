@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from sloperator.admin import (
     ADMIN_HTML,
+    _cron_agent_prompt_definitions,
     _cron_execution_history,
     _cron_history,
     _cron_jobs,
@@ -189,7 +190,8 @@ def test_cron_execution_history_reads_jsonl_job_outcomes(tmp_path: Path) -> None
 def test_admin_contains_airflow_style_28_day_cron_grid() -> None:
     assert "Array.from({length:28}" in ADMIN_HTML
     assert 'class="cron-grid"' in ADMIN_HTML
-    assert "function cronRow(job,events,days,today)" in ADMIN_HTML
+    assert "function calendarRow(item,events,days,today,options)" in ADMIN_HTML
+    assert "function renderRunCalendar(items,events,options)" in ADMIN_HTML
     assert "Last 28 days · UTC" in ADMIN_HTML
     assert "renderCronHistory(d.cron_jobs,d.cron_history)" in ADMIN_HTML
     assert "function plannedRuns(job,date)" in ADMIN_HTML
@@ -208,8 +210,10 @@ def test_admin_contains_slack_trigger_calendar_and_session_links() -> None:
     assert "function openPrompt(trigger)" in ADMIN_HTML
     assert "function renderMarkdown(markdown)" in ADMIN_HTML
     assert "Click to view prompt" in ADMIN_HTML
-    assert 'automationButton("triggers",trigger)' in ADMIN_HTML
+    assert 'automationButton(kind,item)' in ADMIN_HTML
     assert "/automations/${kind}/" in ADMIN_HTML
+    assert 'kind:"trigger",title:"Trigger calendar"' in ADMIN_HTML
+    assert "resetCalendarRuns(\"trigger\")" in ADMIN_HTML
 
 
 def test_slack_trigger_definitions_include_all_automatic_investigations() -> None:
@@ -247,17 +251,37 @@ def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:
 
 
 def test_cron_calendar_does_not_let_next_schedule_hide_completed_run() -> None:
-    assert 'executionRuns=runs.filter(event=>statusLabel(event.status)!=="scheduled")' in ADMIN_HTML
-    assert "const displayedRuns=executionRuns" in ADMIN_HTML
+    assert 'executionRuns=runs.filter(event=>event.status!=="scheduled")' in ADMIN_HTML
+    assert "segmentRuns=executionRuns.length?executionRuns" in ADMIN_HTML
 
 
 def test_cron_calendar_has_clickable_execution_details_and_multi_run_hover() -> None:
-    assert 'id="cron-run-modal"' in ADMIN_HTML
-    assert "function openCronRuns(index,runIndex=null)" in ADMIN_HTML
-    assert 'onclick="openCronRuns(${groupIndex})"' in ADMIN_HTML
+    assert 'id="run-modal"' in ADMIN_HTML
+    assert "function openCalendarRuns(index,runIndex=null)" in ADMIN_HTML
+    assert "function resetCalendarRuns(kind)" in ADMIN_HTML
+    assert "openCalendarRuns('${esc(groupKey)}')" in ADMIN_HTML
     assert ".cron-day.multiple:hover" in ADMIN_HTML
     assert "--run-count:${Math.max(1,segmentRuns.length)}" in ADMIN_HTML
     assert "Started, awaiting result" in ADMIN_HTML
+
+
+def test_cron_agent_prompt_cards_share_the_slack_trigger_component() -> None:
+    jobs = [
+        {
+            "name": "experiment-finalizer (sloperator.service)",
+            "schedule": "weekdays Mon-Fri 12:00 Asia/Nicosia",
+            "command": "embedded scheduler",
+            "enabled": True,
+        }
+    ]
+
+    prompts = _cron_agent_prompt_definitions(jobs)
+
+    assert 'id="cron-prompts"' in ADMIN_HTML
+    assert "function renderPromptCards(rootId,items,kind)" in ADMIN_HTML
+    assert 'renderPromptCards("cron-prompts",d.cron_agent_prompts,"crons")' in ADMIN_HTML
+    assert prompts[0]["name"] == jobs[0]["name"]
+    assert "AUTOMATED RESPONSE STYLE" in prompts[0]["prompt"]
 
 
 def test_admin_supports_headless_agent_runs() -> None:

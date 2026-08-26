@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import datetime as dt
 import json
 import re
@@ -27,6 +28,8 @@ from sloperator.anomaly_alerts import Alert, AlertBatch, build_monetisation_agen
 from sloperator.automation_controls import AutomationControls
 from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
+from sloperator.experiment_config_check import build_experiment_config_prompt
+from sloperator.experiment_finalizer import FINALIZATION_PROMPT
 from sloperator.mobile_health import MobileCriticalMetric, build_mobile_health_agent_prompt
 from sloperator.payment_layer import build_payment_layer_agent_prompt
 from sloperator.store import EventStore
@@ -173,7 +176,8 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <span class="legend-item"><i class="run-dot failed"></i>Failed</span>
 <span class="legend-item"><i class="run-dot scheduled"></i>Scheduled</span>
 <span class="legend-item"><i class="run-dot missed"></i>No record</span>
-</div></div><div id="history"></div><details class="card cron-config"><summary>Schedules and commands</summary>
+</div></div><div id="cron-prompts" class="grid trigger-configs"></div><div id="history"></div>
+<details class="card cron-config"><summary>Schedules and commands</summary>
 <div id="cron"></div></details></section>
 <section id="panel-triggers" class="panel"><h2>Slack triggers</h2>
 <div class="sub cron-toolbar">Configured event-driven launches · last 28 days · UTC</div>
@@ -213,12 +217,12 @@ title="SQL visualizations"></iframe></details></section></section></main>
 <button onclick="closePrompt()" aria-label="Close prompt">✕</button></div>
 <div class="prompt-modal-body"><div id="prompt-markdown" class="prompt-markdown"></div></div>
 </section></div>
-<div id="cron-run-modal" class="modal-backdrop" hidden onclick="if(event.target===this)closeCronRuns()">
-<section class="card prompt-modal" role="dialog" aria-modal="true" aria-labelledby="cron-run-modal-title">
-<div class="row spread prompt-modal-head"><div><h2 id="cron-run-modal-title">Cron executions</h2>
-<div id="cron-run-modal-subtitle" class="sub"></div></div>
-<button onclick="closeCronRuns()" aria-label="Close execution details">✕</button></div>
-<div class="prompt-modal-body"><div id="cron-run-details"></div></div>
+<div id="run-modal" class="modal-backdrop" hidden onclick="if(event.target===this)closeCalendarRuns()">
+<section class="card prompt-modal" role="dialog" aria-modal="true" aria-labelledby="run-modal-title">
+<div class="row spread prompt-modal-head"><div><h2 id="run-modal-title">Executions</h2>
+<div id="run-modal-subtitle" class="sub"></div></div>
+<button onclick="closeCalendarRuns()" aria-label="Close execution details">✕</button></div>
+<div class="prompt-modal-body"><div id="run-details"></div></div>
 </section></div>
 <script>
 const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
@@ -439,90 +443,94 @@ if(job.command.includes("--only-at"))return 1;
 return cronFieldValues(fields[0],0,59).size*cronFieldValues(fields[1],0,23).size}
 function automationButton(kind,item){const verb=item.enabled?"stop":"start",label=item.enabled?"Stop":"Start";
 return `<button class="${item.enabled?"danger":""}" onclick="event.stopPropagation();action('/automations/${kind}/${encodeURIComponent(item.name||item.key)}/${verb}')">${label}</button>`}
-window.cronRunGroups=[];
-function openCronRuns(index,runIndex=null){const group=window.cronRunGroups[index];if(!group)return;
-const runs=runIndex===null?group.runs:[group.runs[runIndex]].filter(Boolean);
-document.getElementById("cron-run-modal-title").textContent=group.job;
-document.getElementById("cron-run-modal-subtitle").textContent=`${group.day} · planned ${group.planned} · recorded ${group.runs.length}`;
-document.getElementById("cron-run-details").innerHTML=runs.length?`<div class="table-wrap"><table><thead><tr>
+window.calendarRunGroups={};
+window.calendarRunSequence=0;
+function resetCalendarRuns(kind){for(const key of Object.keys(window.calendarRunGroups))
+if(key.startsWith(kind+":"))delete window.calendarRunGroups[key]}
+function calendarRunDetails(group,runs){if(group.kind==="trigger")return runs.length?`<div class="table-wrap"><table><thead><tr>
+<th>Time</th><th>Status</th><th>Channel</th><th>Links</th></tr></thead><tbody>${runs.map(run=>`<tr>
+<td>${esc(run.time)} UTC</td><td><span class="badge ${esc(run.status)}">${esc(run.status)}</span></td>
+<td>${esc(run.channel_name)}</td><td><div class="trigger-links">${run.session_exists?`<a href="#agents" onclick="closeCalendarRuns();return openAgentSession('${esc(run.channel_id)}','${esc(run.thread_ts)}')">Agent session</a>`:"<span class='sub'>No session</span>"}
+<a href="${esc(run.slack_url)}" target="_blank" rel="noreferrer">Slack thread ↗</a></div></td></tr>`).join("")}</tbody></table></div>`:
+'<div class="sub">No trigger launch was recorded for this day.</div>';
+return runs.length?`<div class="table-wrap"><table><thead><tr>
 <th>Time</th><th>Status</th><th>Execution information</th></tr></thead><tbody>${runs.map(run=>`<tr>
-<td>${esc(run.time)}</td><td><span class="badge ${esc(statusLabel(run.status))}">${esc(statusLabel(run.status))}</span></td>
+<td>${esc(run.time)}</td><td><span class="badge ${esc(run.status)}">${esc(run.status)}</span></td>
 <td><code>${esc(run.command||"No execution details recorded")}</code></td></tr>`).join("")}</tbody></table></div>`:
-'<div class="sub">No execution was recorded for this scheduled run.</div>';
-document.getElementById("cron-run-modal").hidden=false}
-function closeCronRuns(){document.getElementById("cron-run-modal").hidden=true}
-function cronRow(job,events,days,today){const firstEvent=events.length?
+'<div class="sub">No execution was recorded for this scheduled run.</div>'}
+function openCalendarRuns(index,runIndex=null){const group=window.calendarRunGroups[index];if(!group)return;
+const runs=runIndex===null?group.runs:[group.runs[runIndex]].filter(Boolean);
+document.getElementById("run-modal-title").textContent=group.label;
+document.getElementById("run-modal-subtitle").textContent=group.kind==="cron"?
+`${group.day} · planned ${group.planned} · recorded ${group.runs.length}`:`${group.day} · recorded ${group.runs.length}`;
+document.getElementById("run-details").innerHTML=calendarRunDetails(group,runs);
+document.getElementById("run-modal").hidden=false}
+function closeCalendarRuns(){document.getElementById("run-modal").hidden=true}
+function calendarAxis(days){return days.map(date=>{const monday=date.getUTCDay()===1;return `<div
+class="cron-axis-day ${monday?"week-start":""}" title="${dayKey(date)}">${monday?date.toLocaleString("en",
+{month:"short",day:"numeric",timeZone:"UTC"}):date.getUTCDate()}</div>`}).join("")}
+function calendarRow(item,events,days,today,options){const firstEvent=events.length?
 [...events].sort((a,b)=>a.time.localeCompare(b.time))[0].time.slice(0,10):today;
 const cells=days.map(date=>{const key=dayKey(date);
 const runs=events.filter(event=>dayKey(utcDate(event.time))===key).sort((a,b)=>a.time.localeCompare(b.time));
-const executionRuns=runs.filter(event=>statusLabel(event.status)!=="scheduled");
-const planned=key>=firstEvent?plannedRuns(job,date):0;const displayedRuns=executionRuns;
-const groupIndex=window.cronRunGroups.push({job:job.name,day:key,planned,runs})-1;
-const segmentRuns=displayedRuns.length?displayedRuns:Array.from({length:planned},()=>null);
-const segments=segmentRuns.map(run=>{const status=run?statusLabel(run.status):(key===today?"scheduled":"missed");
+const executionRuns=runs.filter(event=>event.status!=="scheduled");
+const planned=options.planned&&key>=firstEvent?options.planned(item,date):0;
+const segmentRuns=executionRuns.length?executionRuns:Array.from({length:planned},()=>null);
+const groupKey=`${options.kind}:${++window.calendarRunSequence}`;
+window.calendarRunGroups[groupKey]={kind:options.kind,label:item.name,day:key,planned,runs};
+const segments=segmentRuns.map(run=>{const status=run?run.status:(key===today?"scheduled":"missed");
 return `<button class="run-segment ${esc(status)}" title="${esc(run?run.time+" — "+status:"planned — "+status)}"
-onclick="event.stopPropagation();openCronRuns(${groupIndex},${run?runs.indexOf(run):"null"})" aria-label="${esc(status)}"></button>`}).join("");
+onclick="event.stopPropagation();openCalendarRuns('${esc(groupKey)}',${run?runs.indexOf(run):"null"})" aria-label="${esc(status)}"></button>`}).join("");
 const details=`${key} · planned ${planned} · recorded ${runs.length}`+
-(runs.length?"\\n"+runs.map(event=>`${event.time} — ${statusLabel(event.status)}`).join("\\n"):"");
+(runs.length?"\\n"+runs.map(event=>`${event.time} — ${event.status}`).join("\\n"):"");
 const cols=Math.max(1,Math.ceil(Math.sqrt(segmentRuns.length)));return `<div class="cron-day-slot"><div
 class="cron-day ${runs.length?"has-runs":""} ${segmentRuns.length>1?"multiple":""} ${key===today?"today":""}"
 style="--segment-cols:${cols};--run-count:${Math.max(1,segmentRuns.length)}" title="${esc(details)}" aria-label="${esc(details)}"
-tabindex="0" role="button" onclick="openCronRuns(${groupIndex})" onkeydown="if(event.key==='Enter'||event.key===' ')openCronRuns(${groupIndex})">${segments}</div></div>`}).join("");
-const completed=events.filter(event=>statusLabel(event.status)==="completed").length;
-return `<div class="cron-job-label" title="${esc(job.name)} · ${esc(job.schedule)}"><div class="row spread"><b>${esc(job.name)}</b>${automationButton("crons",job)}</div>
-<div class="cron-job-stats">${job.enabled?"active":"stopped"} · ${esc(job.schedule)} · ${events.length} events${completed?` · ${completed} done`:""}</div>
-</div>${cells}`}
-function renderCronHistory(jobs,events){const root=document.getElementById("history");window.cronRunGroups=[];
-const days=calendarDays(),today=dayKey(days[days.length-1]);const axis=days.map(date=>{
-const monday=date.getUTCDay()===1;return `<div class="cron-axis-day ${monday?"week-start":""}"
-title="${dayKey(date)}">${monday?date.toLocaleString("en",{month:"short",day:"numeric",timeZone:"UTC"}):
-date.getUTCDate()}</div>`}).join("");const gridRows=jobs.map(job=>
-cronRow(job,events.filter(event=>event.job===job.name),days,today)).join("");
+tabindex="0" role="button" onclick="openCalendarRuns('${esc(groupKey)}')" onkeydown="if(event.key==='Enter'||event.key===' ')openCalendarRuns('${esc(groupKey)}')">${segments}</div></div>`}).join("");
+return `${options.label(item,events)}${cells}`}
+function renderRunCalendar(items,events,options){const days=calendarDays(),today=dayKey(days[days.length-1]);
+const rows=items.map(item=>calendarRow(item,events.filter(event=>event.itemKey===options.itemKey(item)),days,today,options)).join("");
+return items.length?`<section class="card cron-board"><div class="cron-board-head row spread">
+<b>${esc(options.title)}</b><span class="badge">${esc(options.badge)}</span></div><div class="cron-scroll">
+<div class="cron-grid"><div class="cron-axis-label">${esc(options.axisLabel)}</div>${calendarAxis(days)}${rows}</div></div></section>`:
+`<div class="card cron-empty-board">${esc(options.empty)}</div>`}
+function renderCronHistory(jobs,events){const root=document.getElementById("history");resetCalendarRuns("cron");
+const normalized=events.map(event=>({...event,itemKey:event.job,status:statusLabel(event.status)}));
 const eventRows=events.map(event=>`<tr><td>${esc(event.time)}</td><td>${esc(event.job||"unknown")}</td>
 <td><span class="badge ${esc(statusLabel(event.status))}">${esc(statusLabel(event.status))}</span></td>
 <td><code>${esc(event.command)}</code></td></tr>`).join("");
-root.innerHTML=jobs.length?`<section class="card cron-board"><div class="cron-board-head row spread">
-<b>Run calendar</b><span class="badge">${jobs.length} jobs</span></div><div class="cron-scroll">
-<div class="cron-grid"><div class="cron-axis-label">Job / schedule</div>${axis}${gridRows}</div></div></section>`:
-'<div class="card cron-empty-board">No scheduled jobs</div>';
+root.innerHTML=renderRunCalendar(jobs,normalized,{kind:"cron",title:"Run calendar",badge:`${jobs.length} jobs`,
+axisLabel:"Job / schedule",empty:"No scheduled jobs",itemKey:job=>job.name,planned:plannedRuns,
+label:(job,jobEvents)=>{const completed=jobEvents.filter(event=>event.status==="completed").length;return `<div
+class="cron-job-label" title="${esc(job.name)} · ${esc(job.schedule)}"><div class="row spread"><b>${esc(job.name)}</b>${automationButton("crons",job)}</div>
+<div class="cron-job-stats">${job.enabled?"active":"stopped"} · ${esc(job.schedule)} · ${jobEvents.length} events${completed?` · ${completed} done`:""}</div></div>`}});
 root.innerHTML+=`<details class="card history-log"><summary>Event log</summary><div class="table-wrap"><table><thead>
 <tr><th>Time</th><th>Job</th><th>Status</th><th>Command</th></tr></thead><tbody>${eventRows||
 '<tr><td colspan="4" class="sub">No events in the last 28 days</td></tr>'}</tbody></table></div></details>`}
 function triggerRunStatus(event){return event.session_status==="running"?"running":event.status||"queued"}
-function renderTriggerHistory(triggers,events){const configs=document.getElementById("trigger-configs");
-window.slackTriggers=triggers;configs.innerHTML=triggers.map((trigger,index)=>`<section
-class="card trigger-config" tabindex="0" role="button" onclick="openPrompt(window.slackTriggers[${index}])"
-onkeydown="if(event.key==='Enter'||event.key===' ')openPrompt(window.slackTriggers[${index}])">
-<div class="row spread">
-<h3>${esc(trigger.name)}</h3><div class="row"><span class="badge">${trigger.enabled?"active":"stopped"}</span>${automationButton("triggers",trigger)}</div>
-</div><div class="trigger-condition">${esc(trigger.channel_name)} · <code>${esc(trigger.channel_id)}</code><br>
-Source: <code>${esc(trigger.source)}</code><br>${esc(trigger.condition)}<br>
-Limit: ${esc(trigger.limit||"one session per matched incident")}<br><b>Click to view prompt</b>
-</div></section>`).join("")||
-'<div class="card sub">No configured Slack triggers</div>';
-const root=document.getElementById("trigger-history"),days=calendarDays(),today=dayKey(days[days.length-1]);
-const axis=days.map(date=>{const monday=date.getUTCDay()===1;return `<div class="cron-axis-day
-${monday?"week-start":""}" title="${dayKey(date)}">${monday?date.toLocaleString("en",
-{month:"short",day:"numeric",timeZone:"UTC"}):date.getUTCDate()}</div>`}).join("");
-const rows=triggers.map(trigger=>{const triggerEvents=events.filter(e=>e.trigger===trigger.key);
-const cells=days.map(date=>{const key=dayKey(date),runs=triggerEvents.filter(e=>e.created_at.slice(0,10)===key);
-const segments=runs.map(run=>`<i class="run-segment ${esc(triggerRunStatus(run))}"
-title="${esc(run.created_at+" — "+triggerRunStatus(run))}"></i>`).join("");
-const cols=Math.max(1,Math.ceil(Math.sqrt(runs.length)));return `<div class="cron-day-slot"><div
-class="cron-day ${runs.length?"has-runs":""} ${key===today?"today":""}" style="--segment-cols:${cols}"
-title="${esc(key+" · "+runs.length+" trigger(s)")}" aria-label="${esc(key+" · "+runs.length+
-" trigger(s)")}">${segments}</div></div>`}).join("");
-return `<div class="cron-job-label"><b>${esc(trigger.name)}</b><div class="cron-job-stats">
-event-driven · ${triggerEvents.length} launches</div></div>${cells}`}).join("");
+function renderPromptCards(rootId,items,kind){window.promptCards=window.promptCards||{};
+window.promptCards[kind]=items;document.getElementById(rootId).innerHTML=items.map((item,index)=>`<section
+class="card trigger-config" tabindex="0" role="button" onclick="openPrompt(window.promptCards.${kind}[${index}])"
+onkeydown="if(event.key==='Enter'||event.key===' ')openPrompt(window.promptCards.${kind}[${index}])">
+<div class="row spread"><h3>${esc(item.name)}</h3><div class="row"><span class="badge">${item.enabled?"active":"stopped"}</span>${automationButton(kind,item)}</div></div>
+<div class="trigger-condition">${kind==="crons"?`Schedule: <code>${esc(item.schedule)}</code><br>`:
+`${esc(item.channel_name)} · <code>${esc(item.channel_id)}</code><br>`}Source: <code>${esc(item.source)}</code><br>
+${esc(item.condition)}<br><b>Click to view prompt</b></div></section>`).join("")||
+`<div class="card sub">No ${kind==="crons"?"scheduled agent jobs":"configured Slack triggers"}</div>`}
+function renderTriggerHistory(triggers,events){
+renderPromptCards("trigger-configs",triggers,"triggers");
+const root=document.getElementById("trigger-history");resetCalendarRuns("trigger");
+const normalized=events.map(event=>({...event,itemKey:event.trigger,time:event.created_at,status:triggerRunStatus(event)}));
 const eventRows=events.map(event=>`<tr><td>${esc(event.created_at)} UTC</td><td>${esc(
 triggers.find(t=>t.key===event.trigger)?.name||event.trigger)}</td><td><span class="badge ${esc(
 triggerRunStatus(event))}">${esc(triggerRunStatus(event))}</span></td><td>${esc(event.channel_name)}</td>
 <td><div class="trigger-links">${event.session_exists?`<a href="#agents" onclick="return openAgentSession(
 '${esc(event.channel_id)}','${esc(event.thread_ts)}')">Agent session</a>`:"<span class='sub'>No session</span>"}
 <a href="${esc(event.slack_url)}" target="_blank" rel="noreferrer">Slack thread ↗</a></div></td></tr>`).join("");
-root.innerHTML=`<section class="card cron-board"><div class="cron-board-head row spread">
-<b>Trigger calendar</b><span class="badge">${events.length} launches</span></div><div class="cron-scroll">
-<div class="cron-grid"><div class="cron-axis-label">Trigger</div>${axis}${rows}</div></div></section>
+root.innerHTML=renderRunCalendar(triggers,normalized,{kind:"trigger",title:"Trigger calendar",
+badge:`${events.length} launches`,axisLabel:"Trigger",empty:"No configured Slack triggers",
+itemKey:trigger=>trigger.key,label:(trigger,triggerEvents)=>`<div class="cron-job-label"><b>${esc(trigger.name)}</b>
+<div class="cron-job-stats">event-driven · ${triggerEvents.length} launches</div></div>`})+`
 <details class="card history-log" open><summary>Trigger log</summary><div class="table-wrap"><table>
 <thead><tr><th>Time</th><th>Trigger</th><th>Status</th><th>Channel</th><th>Links</th></tr></thead>
 <tbody>${eventRows||'<tr><td colspan="5" class="sub">No launches in the last 28 days</td></tr>'}
@@ -532,7 +540,7 @@ if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=s
 const nextCodexSignature=JSON.stringify([d.codex_sessions,selectedCodex]);
 if(nextCodexSignature!==codexSignature){renderCodex(d.codex_sessions);codexSignature=nextCodexSignature;
 if(selectedCodex)await loadCodexDetail(selectedCodex)}
-const nextCronSignature=JSON.stringify([d.cron_jobs,d.cron_history,d.crontab]);
+const nextCronSignature=JSON.stringify([d.cron_jobs,d.cron_history,d.cron_agent_prompts,d.crontab]);
 if(nextCronSignature!==cronSignature){const config=document.querySelector(".cron-config");
 const history=document.querySelector(".history-log");const scroll=document.querySelector(".cron-scroll");
 const ui={configOpen:config?.open||false,historyOpen:history?.open||false,scrollLeft:scroll?.scrollLeft||0};
@@ -541,6 +549,7 @@ document.getElementById("cron").innerHTML=d.cron_jobs.length?`<table><thead><tr>
 </td><td><code>${esc(x.schedule)}</code></td><td><code>${esc(x.command)}</code></td><td>${automationButton("crons",x)}</td></tr>`).join("")}
 </tbody></table><details><summary>Raw crontab</summary><pre>${esc(d.crontab)}</pre></details>`:
 '<span class="sub">No user crontab</span>';
+renderPromptCards("cron-prompts",d.cron_agent_prompts,"crons");
 renderCronHistory(d.cron_jobs,d.cron_history);document.querySelector(".cron-config").open=ui.configOpen;
 const nextHistory=document.querySelector(".history-log");if(nextHistory)nextHistory.open=ui.historyOpen;
 const nextScroll=document.querySelector(".cron-scroll");if(nextScroll)nextScroll.scrollLeft=ui.scrollLeft;
@@ -594,6 +603,114 @@ def _cron_jobs(crontab: str) -> list[dict[str, Any]]:
                 }
             )
     return jobs
+
+
+_ANALYST_REPOSITORY = Path("/home/egor/projects/ug-ai-analyst")
+
+
+def _python_return_template(path: Path, function_name: str) -> str:
+    """Read a function's returned f-string as a display template without importing it."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return f"Prompt source unavailable: {path}"
+    function = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ),
+        None,
+    )
+    if function is None:
+        return f"Prompt function `{function_name}` not found in {path}"
+    returned = next(
+        (node.value for node in ast.walk(function) if isinstance(node, ast.Return)),
+        None,
+    )
+    if not isinstance(returned, ast.JoinedStr):
+        return f"Prompt function `{function_name}` has no f-string return template"
+    parts: list[str] = []
+    for value in returned.values:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            parts.append(value.value)
+        elif isinstance(value, ast.FormattedValue):
+            parts.append("{{ " + ast.unparse(value.value) + " }}")
+    return "".join(parts)
+
+
+def _cron_agent_prompt_definitions(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe configured schedules that can directly or indirectly launch an agent."""
+    by_name = {job["name"]: job for job in jobs}
+    representative_experiment = {
+        "recipient_id": "U123456",
+        "experiments": [{"id": 1234, "name": "{{ experiment title }}"}],
+    }
+    sources: dict[str, tuple[str, str, str]] = {
+        "monetization-health-morning": (
+            "scripts/monetization_health_report.py::_build_prompt",
+            "Headless Claude enrichment of the scheduled monetisation health report",
+            _python_return_template(
+                _ANALYST_REPOSITORY / "scripts/monetization_health_report.py",
+                "_build_prompt",
+            ),
+        ),
+        "slack-action-plan": (
+            "scripts/slack_action_plan_prompt.md",
+            "Headless Claude generation of the scheduled personal Slack action plan",
+            _read_prompt_file(_ANALYST_REPOSITORY / "scripts/slack_action_plan_prompt.md"),
+        ),
+        "exp-segment-config-check": (
+            "sloperator.experiment_config_check.build_experiment_config_prompt",
+            "Agent review when the cron finds a newly started monetisation experiment",
+            build_experiment_config_prompt(representative_experiment, interactive=True),
+        ),
+        "payment-class-a": (
+            "sloperator.payment_layer.build_payment_layer_agent_prompt",
+            "Agent investigation when this monitor emits a new SERIOUS payment alert",
+            build_payment_layer_agent_prompt("{{ exact SERIOUS payment alert }}"),
+        ),
+        "payment-error-signature": (
+            "sloperator.payment_layer.build_payment_layer_agent_prompt",
+            "Agent investigation when this monitor emits a new SERIOUS payment alert",
+            build_payment_layer_agent_prompt("{{ exact SERIOUS payment alert }}"),
+        ),
+    }
+    definitions = [
+        {
+            "name": name,
+            "key": name,
+            "schedule": by_name[name]["schedule"],
+            "enabled": by_name[name]["enabled"],
+            "source": source,
+            "condition": condition,
+            "prompt": prompt,
+        }
+        for name, (source, condition, prompt) in sources.items()
+        if name in by_name
+    ]
+    finalizer = by_name.get("experiment-finalizer (sloperator.service)")
+    if finalizer is not None:
+        definitions.append(
+            {
+                "name": finalizer["name"],
+                "key": finalizer["name"],
+                "schedule": finalizer["schedule"],
+                "enabled": finalizer["enabled"],
+                "source": "sloperator.experiment_finalizer.FINALIZATION_PROMPT",
+                "condition": "One autonomous experiment-finalisation agent run per weekday",
+                "prompt": FINALIZATION_PROMPT,
+            }
+        )
+    return definitions
+
+
+def _read_prompt_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return f"Prompt source unavailable: {path}"
 
 
 def _set_cron_enabled(name: str, enabled: bool) -> bool:
@@ -1079,6 +1196,7 @@ def create_admin_routes(
         )
         cron_jobs = _cron_jobs(crontab)
         service_job["enabled"] = not automation_controls.disabled("crons", service_job["name"])
+        all_cron_jobs = [service_job, *cron_jobs]
         execution_history, authoritative_jobs = await asyncio.to_thread(
             _cron_execution_history, cron_jobs
         )
@@ -1100,7 +1218,10 @@ def create_admin_routes(
                 ],
                 "slack_trigger_runs": await asyncio.to_thread(store.list_slack_trigger_runs),
                 "crontab": crontab,
-                "cron_jobs": [service_job, *cron_jobs],
+                "cron_jobs": all_cron_jobs,
+                "cron_agent_prompts": await asyncio.to_thread(
+                    _cron_agent_prompt_definitions, all_cron_jobs
+                ),
                 "cron_history": sorted(
                     [*execution_history, *journal_history, *service_history],
                     key=lambda row: row["time"],

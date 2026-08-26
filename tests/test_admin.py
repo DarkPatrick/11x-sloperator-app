@@ -14,6 +14,7 @@ from sloperator.admin import (
     _cron_jobs,
     _crontab,
     _label_cron_history,
+    _merge_attached_scheduled_sessions,
     _set_cron_enabled,
     _slack_trigger_definitions,
     _systemd_scheduler_history,
@@ -83,9 +84,10 @@ def test_set_cron_enabled_preserves_block_and_comments_schedule() -> None:
 SHELL=/bin/bash
 */30 * * * * run-health
 # <<< ug-ai-analyst:health <<<"""
-    with patch("sloperator.admin._crontab", return_value=crontab), patch(
-        "sloperator.admin.subprocess.run"
-    ) as run:
+    with (
+        patch("sloperator.admin._crontab", return_value=crontab),
+        patch("sloperator.admin.subprocess.run") as run,
+    ):
         run.return_value.returncode = 0
         assert _set_cron_enabled("health", False)
     assert "# sloperator-disabled: */30 * * * * run-health" in run.call_args.kwargs["input"]
@@ -122,12 +124,10 @@ def test_cron_execution_history_uses_real_retry_child_results(tmp_path: Path) ->
     log.write_text(
         "\n".join(
             (
-                f"[{completed_at:%Y-%m-%d %H:%M:%S}] "
-                "[cron_retry:health] child exited rc=0",
+                f"[{completed_at:%Y-%m-%d %H:%M:%S}] [cron_retry:health] child exited rc=0",
                 f"[{local_date:%Y-%m-%d} 11:00:00] "
                 "[cron_retry:health] not the scheduled fire: skipping",
-                f"[{failed_at:%Y-%m-%d %H:%M:%S}] "
-                "[cron_retry:health] child exited rc=1",
+                f"[{failed_at:%Y-%m-%d %H:%M:%S}] [cron_retry:health] child exited rc=1",
             )
         )
     )
@@ -166,9 +166,7 @@ def test_cron_execution_history_reads_jsonl_job_outcomes(tmp_path: Path) -> None
                         "status": "data_unavailable",
                     }
                 ),
-                json.dumps(
-                    {"ts": (base_time + dt.timedelta(hours=1)).isoformat(), "findings": 2}
-                ),
+                json.dumps({"ts": (base_time + dt.timedelta(hours=1)).isoformat(), "findings": 2}),
             )
         )
     )
@@ -210,10 +208,10 @@ def test_admin_contains_slack_trigger_calendar_and_session_links() -> None:
     assert "function openPrompt(trigger)" in ADMIN_HTML
     assert "function renderMarkdown(markdown)" in ADMIN_HTML
     assert "Click to view prompt" in ADMIN_HTML
-    assert 'automationButton(kind,item)' in ADMIN_HTML
+    assert "automationButton(kind,item)" in ADMIN_HTML
     assert "/automations/${kind}/" in ADMIN_HTML
     assert 'kind:"trigger",title:"Trigger calendar"' in ADMIN_HTML
-    assert "resetCalendarRuns(\"trigger\")" in ADMIN_HTML
+    assert 'resetCalendarRuns("trigger")' in ADMIN_HTML
 
 
 def test_slack_trigger_definitions_include_all_automatic_investigations() -> None:
@@ -280,6 +278,7 @@ def test_cron_agent_prompt_cards_share_the_slack_trigger_component() -> None:
     assert 'id="cron-prompts"' in ADMIN_HTML
     assert "function renderPromptCards(rootId,items,kind)" in ADMIN_HTML
     assert 'renderPromptCards("cron-prompts",d.cron_agent_prompts,"crons")' in ADMIN_HTML
+    assert ".trigger-condition code{white-space:normal;overflow-wrap:anywhere" in ADMIN_HTML
     assert prompts[0]["name"] == jobs[0]["name"]
     assert "AUTOMATED RESPONSE STYLE" in prompts[0]["prompt"]
 
@@ -288,6 +287,59 @@ def test_admin_supports_headless_agent_runs() -> None:
     assert "s.headless" in ADMIN_HTML
     assert "PID ${esc(s.process_id)} + subprocess tree" in ADMIN_HTML
     assert 's.headless?"Prompt and result":"Thread messages"' in ADMIN_HTML
+
+
+def test_admin_merges_published_scheduled_run_with_its_slack_session() -> None:
+    scheduled = {
+        "channel_id": "scheduled",
+        "channel_name": "experiment-finalizer",
+        "thread_ts": "run-1",
+        "external_session_id": "agent-1",
+        "status": "completed",
+        "runtime_status": "completed",
+        "active": False,
+        "turn_count": 1,
+        "headless": True,
+        "created_at": "2026-08-25 09:00:00",
+        "updated_at": "2026-08-25 09:54:37",
+        "last_activity_at": "2026-08-25 09:54:37",
+        "messages": [{"text": "scheduled prompt"}],
+    }
+    slack = {
+        "channel_id": "C123",
+        "channel_name": "ug-monetization-pvt",
+        "thread_ts": "123.456",
+        "external_session_id": "agent-1",
+        "status": "idle",
+        "runtime_status": "idle",
+        "active": False,
+        "turn_count": 1,
+        "created_at": "2026-08-25 09:54:38",
+        "updated_at": "2026-08-25 09:54:38",
+        "last_activity_at": "2026-08-25 09:54:38",
+        "messages": [{"text": "published result"}],
+    }
+
+    assert _merge_attached_scheduled_sessions([scheduled, slack]) == [
+        {
+            **slack,
+            "channel_name": "experiment-finalizer → ug-monetization-pvt",
+            "created_at": scheduled["created_at"],
+            "status": "completed",
+            "runtime_status": "completed",
+            "messages": [*scheduled["messages"], *slack["messages"]],
+            "scheduled_run_id": "run-1",
+        }
+    ]
+
+
+def test_admin_does_not_merge_a_running_scheduled_run() -> None:
+    scheduled = {
+        "headless": True,
+        "external_session_id": "agent-running",
+    }
+
+    assert _merge_attached_scheduled_sessions([scheduled]) == [scheduled]
 
 
 def test_admin_contains_codex_session_chat_ui() -> None:

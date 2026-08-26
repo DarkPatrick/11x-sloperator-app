@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import datetime as dt
 import json
 import re
@@ -38,6 +38,49 @@ from sloperator.subscription_flow import (
     build_subscription_flow_agent_prompt,
 )
 from sloperator.web_health import WebCriticalMetric, build_web_health_agent_prompt
+
+
+def _merge_attached_scheduled_sessions(
+    sessions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Show a published scheduled run and its Slack continuation as one session."""
+    scheduled_by_external_id = {
+        session.get("external_session_id"): session
+        for session in sessions
+        if session.get("headless") and session.get("external_session_id")
+    }
+    merged: list[dict[str, Any]] = []
+    attached_external_ids: set[str] = set()
+    for session in sessions:
+        external_id = session.get("external_session_id")
+        scheduled = scheduled_by_external_id.get(external_id)
+        if session.get("headless") or scheduled is None:
+            merged.append(session)
+            continue
+
+        attached_external_ids.add(external_id)
+        item = dict(session)
+        item["channel_name"] = f"{scheduled['channel_name']} → {session['channel_name']}"
+        item["created_at"] = scheduled["created_at"]
+        item["updated_at"] = max(scheduled["updated_at"], session["updated_at"])
+        item["last_activity_at"] = max(scheduled["last_activity_at"], session["last_activity_at"])
+        item["messages"] = [*scheduled.get("messages", []), *session.get("messages", [])]
+        item["scheduled_run_id"] = scheduled["thread_ts"]
+        # The initial attached Slack row is the continuation handle, not a second turn.
+        # Keep the completed scheduled lifecycle until somebody actually resumes it.
+        if session.get("turn_count") == 1 and not session.get("active"):
+            item["status"] = scheduled["status"]
+            item["runtime_status"] = scheduled["runtime_status"]
+        merged.append(item)
+
+    return [
+        session
+        for session in merged
+        if not (
+            session.get("headless") and session.get("external_session_id") in attached_external_ids
+        )
+    ]
+
 
 ADMIN_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -100,9 +143,10 @@ min-width:14px;border-radius:3px}.run-segment:hover{outline:2px solid var(--text
 .cron-empty-board{padding:18px;color:var(--muted)}.cron-config,.history-log{margin-top:14px}
 .cron-config .table-wrap,.history-log .table-wrap{overflow:auto}summary{cursor:pointer}
 .trigger-configs{grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:14px}
-.trigger-config{cursor:pointer;transition:border-color .12s,transform .12s}.trigger-config:hover{
+.trigger-config{min-width:0;cursor:pointer;transition:border-color .12s,transform .12s}.trigger-config:hover{
 border-color:var(--blue);transform:translateY(-1px)}.trigger-config h3{margin:0 0 7px}
-.trigger-condition{font-size:12px;color:var(--muted);line-height:1.5}
+.trigger-condition{min-width:0;font-size:12px;color:var(--muted);line-height:1.5}
+.trigger-condition code{white-space:normal;overflow-wrap:anywhere;word-break:break-word}
 .trigger-links{display:flex;gap:10px;flex-wrap:wrap}.trigger-links a{color:var(--blue);cursor:pointer}
 .modal-backdrop{position:fixed;inset:0;z-index:20;background:#0009;display:flex;align-items:center;
 justify-content:center;padding:24px}.modal-backdrop[hidden]{display:none}.prompt-modal{width:min(920px,100%);
@@ -1187,6 +1231,7 @@ def create_admin_routes(
             session["runtime_status"] = "running" if key in active else session["status"]
             if not session.get("headless"):
                 session["messages"] = await asyncio.to_thread(store.thread_messages, *key)
+        sessions = _merge_attached_scheduled_sessions(sessions)
         sessions.sort(key=lambda session: session["updated_at"], reverse=True)
         crontab, history, service_job, service_history = await asyncio.gather(
             asyncio.to_thread(_crontab),

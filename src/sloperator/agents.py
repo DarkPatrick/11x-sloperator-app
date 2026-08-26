@@ -1148,6 +1148,19 @@ class AgentOrchestrator:
             control = ActiveAgentRun(session.provider)
             key = (session.channel_id, session.thread_ts)
             self._active_runs[key] = control
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                self._headless_tasks[key] = current_task
+
+                def clear_finished_recovery(
+                    task: asyncio.Task[object],
+                    recovery_key: tuple[str, str] = key,
+                ) -> None:
+                    if self._headless_tasks.get(recovery_key) is task:
+                        self._headless_tasks.pop(recovery_key, None)
+                    self._active_runs.pop(recovery_key, None)
+
+                current_task.add_done_callback(clear_finished_recovery)
             recovery_prompt = (
                 f"{RESTART_RECOVERY_PROMPT}\n\nOriginal request:\n{row['prompt']}"
             )
@@ -1272,6 +1285,7 @@ class AgentOrchestrator:
                 )
             )
             self._active_runs.pop(key, None)
+            self._headless_tasks.pop(key, None)
         if completed:
             LOGGER.warning("Resumed %d interrupted scheduled turn(s)", len(completed))
         return completed

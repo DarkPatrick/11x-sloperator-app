@@ -991,8 +991,10 @@ def _systemd_scheduler_job(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _systemd_scheduler_history() -> list[dict[str, str]]:
-    """Return recent schedule/start/completion events from the service journal."""
+def _systemd_scheduler_history(
+    scheduled_runs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    """Return scheduler history with each start/completion represented once."""
     result = subprocess.run(
         [
             "journalctl",
@@ -1017,6 +1019,12 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
         "Experiment finalizer run completed": ("completed", "completed"),
     }
     rows: list[dict[str, str]] = []
+    pending_starts: list[int] = []
+    durable_statuses = {
+        str(run["created_at"]): str(run["status"])
+        for run in scheduled_runs or []
+        if run.get("channel_name") == "experiment-finalizer"
+    }
     for line in result.stdout.splitlines():
         try:
             item = json.loads(line)
@@ -1037,17 +1045,41 @@ def _systemd_scheduler_history() -> list[dict[str, str]]:
         if event is None or status is None:
             continue
         micros = int(item.get("__REALTIME_TIMESTAMP", 0))
-        rows.append(
-            {
-                "time": time.strftime(
-                    "%Y-%m-%d %H:%M:%S UTC",
-                    time.gmtime(micros / 1e6),
-                ),
-                "command": f"sloperator.service · experiment-finalizer · {event}",
-                "job": "experiment-finalizer (sloperator.service)",
-                "status": status,
-            }
-        )
+        row = {
+            "time": time.strftime(
+                "%Y-%m-%d %H:%M:%S UTC",
+                time.gmtime(micros / 1e6),
+            ),
+            "command": f"sloperator.service · experiment-finalizer · {event}",
+            "job": "experiment-finalizer (sloperator.service)",
+            "status": status,
+        }
+        if status == "started":
+            durable_status = durable_statuses.get(row["time"].removesuffix(" UTC"))
+            if durable_status in {"completed", "failed", "cancelled"}:
+                row["command"] = (
+                    f"sloperator.service · experiment-finalizer · {durable_status}"
+                )
+                row["status"] = durable_status
+                pending_starts.append(len(rows))
+                rows.append(row)
+                continue
+            for pending_index in pending_starts:
+                if rows[pending_index]["status"] == "started":
+                    rows[pending_index]["command"] = (
+                        "sloperator.service · experiment-finalizer · interrupted"
+                    )
+                    rows[pending_index]["status"] = "interrupted"
+            pending_starts.clear()
+            pending_starts.append(len(rows))
+            rows.append(row)
+        elif status == "completed" and pending_starts:
+            # Completion closes the latest run; it is not a second process.
+            started_row = rows[pending_starts.pop()]
+            started_row["command"] = row["command"]
+            started_row["status"] = "completed"
+        else:
+            rows.append(row)
     return list(reversed(rows))
 
 
@@ -1237,7 +1269,7 @@ def create_admin_routes(
             asyncio.to_thread(_crontab),
             asyncio.to_thread(_cron_history),
             asyncio.to_thread(_systemd_scheduler_job, orchestrator.settings),
-            asyncio.to_thread(_systemd_scheduler_history),
+            asyncio.to_thread(_systemd_scheduler_history, persisted_headless),
         )
         cron_jobs = _cron_jobs(crontab)
         service_job["enabled"] = not automation_controls.disabled("crons", service_job["name"])

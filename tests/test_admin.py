@@ -406,18 +406,64 @@ def test_systemd_scheduler_history_extracts_scheduler_events() -> None:
             "2026 INFO sloperator.experiment_finalizer: Starting scheduled experiment finalizer run"
         ),
     }
+    completed = {
+        "__REALTIME_TIMESTAMP": "3000000",
+        "MESSAGE": (
+            "2026 INFO sloperator.experiment_finalizer: Experiment finalizer run completed"
+        ),
+    }
     with patch("sloperator.admin.subprocess.run") as run:
-        run.return_value.stdout = "\n".join((json.dumps(scheduled), json.dumps(started)))
+        run.return_value.stdout = "\n".join(
+            (json.dumps(scheduled), json.dumps(started), json.dumps(completed))
+        )
 
         rows = _systemd_scheduler_history()
 
     assert [row["command"] for row in rows] == [
-        "sloperator.service · experiment-finalizer · started",
+        "sloperator.service · experiment-finalizer · completed",
         ("sloperator.service · experiment-finalizer · scheduled: 2026-07-28T12:00:00+03:00"),
     ]
-    assert [row["status"] for row in rows] == ["started", "scheduled"]
+    assert [row["status"] for row in rows] == ["completed", "scheduled"]
     assert {row["job"] for row in rows} == {"experiment-finalizer (sloperator.service)"}
     args = run.call_args.args[0]
     assert "--grep=sloperator\\.experiment_finalizer:" in args
     assert "--case-sensitive=yes" in args
     assert "-n" not in args
+
+
+def test_systemd_scheduler_history_closes_superseded_start() -> None:
+    first = {
+        "__REALTIME_TIMESTAMP": "1000000",
+        "MESSAGE": (
+            "INFO sloperator.experiment_finalizer: "
+            "Starting scheduled experiment finalizer run"
+        ),
+    }
+    second = {**first, "__REALTIME_TIMESTAMP": "2000000"}
+    with patch("sloperator.admin.subprocess.run") as run:
+        run.return_value.stdout = "\n".join((json.dumps(first), json.dumps(second)))
+
+        rows = _systemd_scheduler_history()
+
+    assert [row["status"] for row in rows] == ["started", "interrupted"]
+
+
+def test_systemd_scheduler_history_uses_durable_recovery_status() -> None:
+    started = {
+        "__REALTIME_TIMESTAMP": "1000000",
+        "MESSAGE": (
+            "INFO sloperator.experiment_finalizer: "
+            "Starting scheduled experiment finalizer run"
+        ),
+    }
+    durable = [{
+        "channel_name": "experiment-finalizer",
+        "created_at": "1970-01-01 00:00:01",
+        "status": "completed",
+    }]
+    with patch("sloperator.admin.subprocess.run") as run:
+        run.return_value.stdout = json.dumps(started)
+
+        rows = _systemd_scheduler_history(durable)
+
+    assert [row["status"] for row in rows] == ["completed"]

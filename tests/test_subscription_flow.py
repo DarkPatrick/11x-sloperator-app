@@ -73,6 +73,15 @@ def test_recovery_title_maps_to_component() -> None:
     assert parse_recovered_component(text) == "ios:recurring"
 
 
+def test_back_to_normal_title_maps_to_component() -> None:
+    text = (
+        ":large_green_circle: *Back to normal — "
+        "Android new subscriptions / first purchases (RTDN 4 :left_right_arrow: Subscribed)*"
+    )
+
+    assert parse_recovered_component(text) == "android:acquisitions"
+
+
 def test_subscription_flow_trigger_is_limited_to_bot_messages_in_channel() -> None:
     settings = Settings(
         slack_user_id="UOWNER",
@@ -88,6 +97,13 @@ def test_subscription_flow_trigger_is_limited_to_bot_messages_in_channel() -> No
     assert is_subscription_flow_event(event, settings)
     assert not is_subscription_flow_event({**event, "channel": "COTHER"}, settings)
     assert not is_subscription_flow_event({**event, "bot_id": None}, settings)
+    assert is_subscription_flow_event(
+        {
+            **event,
+            "text": ":large_green_circle: *Back to normal — Web renewals*",
+        },
+        settings,
+    )
 
 
 def test_agent_prompt_contains_detector_context_and_skill() -> None:
@@ -100,6 +116,10 @@ def test_agent_prompt_contains_detector_context_and_skill() -> None:
     assert "CLAUDE.md" in prompt
     assert "AGENTS.md" not in prompt
     assert "upstream store/processor signal" in prompt
+    assert "require at least three clean samples" in prompt
+    assert "day-of-month correction is disabled" in prompt
+    assert "held at WATCH" in prompt
+    assert "`Back to normal`" in prompt
     assert "SERIOUS — Web renewals" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt
     assert "AUTOMATED RESPONSE STYLE" in prompt
@@ -135,3 +155,38 @@ async def test_concurrent_live_and_history_delivery_launches_one_agent(tmp_path)
     )
 
     agent.submit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_back_to_normal_closes_incident_and_rearms_same_nature(tmp_path) -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+    )
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    agent = SimpleNamespace(submit=AsyncMock())
+    client = SimpleNamespace(auth_test=AsyncMock(return_value={"user_id": "USELF"}))
+    responder = SubscriptionFlowResponder(settings, store, agent)
+    alert = {
+        "channel": settings.subscription_flow_alert_channel,
+        "user": "USELF",
+        "bot_id": "BSELF",
+        "ts": "100.1",
+        "text": _serious_alert("Android new subscriptions / first purchases", "Android"),
+    }
+    closure = {
+        "channel": settings.subscription_flow_alert_channel,
+        "user": "USELF",
+        "bot_id": "BSELF",
+        "ts": "103.1",
+        "thread_ts": "100.1",
+        "text": ":large_green_circle: *Back to normal — Android new subscriptions / first purchases*",
+    }
+
+    await responder.handle(alert, client)
+    await responder.handle(closure, client)
+    await responder.handle({**alert, "ts": "104.1"}, client)
+
+    assert agent.submit.await_count == 2

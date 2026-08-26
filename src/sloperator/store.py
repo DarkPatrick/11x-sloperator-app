@@ -923,12 +923,12 @@ class EventStore:
                 claimed.add(key)
         return claimed
 
-    def recover_subscription_flow_component(
+    def close_subscription_flow_component(
         self,
         component: str,
-        recovered_alert_ts: str,
+        closure_alert_ts: str,
     ) -> int:
-        """Remove a recovered component and resolve incidents with no affected flows left."""
+        """Apply a terminal component reply and resolve incidents with no affected flows left."""
         resolved = 0
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -944,11 +944,11 @@ class EventStore:
                 components = (
                     decoded
                     if isinstance(decoded, dict)
-                    else {item: recovered_alert_ts for item in decoded}
+                    else {item: closure_alert_ts for item in decoded}
                 )
                 if component not in components:
                     continue
-                if float(recovered_alert_ts) < float(components[component]):
+                if float(closure_alert_ts) < float(components[component]):
                     continue
                 components.pop(component)
                 if components:

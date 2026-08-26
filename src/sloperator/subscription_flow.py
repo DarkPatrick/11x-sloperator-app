@@ -23,9 +23,11 @@ LOGGER = logging.getLogger(__name__)
 
 SERIOUS_MARKER = ":rotating_light: *SERIOUS —"
 RECOVERED_MARKER = ":white_check_mark: *Recovered —"
+NORMALIZED_MARKER = ":large_green_circle: *Back to normal —"
+CLOSURE_MARKERS = (RECOVERED_MARKER, NORMALIZED_MARKER)
 TITLE_RE = re.compile(r"SERIOUS — (?P<platforms>.+?) (?P<kind>.+?) anomaly\*")
 SECTION_RE = re.compile(r"^\*(?P<label>[^*]+)\* — ")
-RECOVERY_RE = re.compile(r"Recovered — (?P<label>[^*]+)\*")
+CLOSURE_RE = re.compile(r"(?:Recovered|Back to normal) — (?P<label>[^*]+)\*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,13 +38,13 @@ class SubscriptionFlowIncident:
 
 
 def is_subscription_flow_event(event: dict[str, Any], settings: Settings) -> bool:
-    """Match only serious alerts or recovery replies in the configured channel."""
+    """Match serious alerts and either terminal reply in the configured channel."""
     text = event.get("text")
     return (
         event.get("channel") == settings.subscription_flow_alert_channel
         and event.get("bot_id") is not None
         and isinstance(text, str)
-        and (SERIOUS_MARKER in text or RECOVERED_MARKER in text)
+        and (SERIOUS_MARKER in text or any(marker in text for marker in CLOSURE_MARKERS))
     )
 
 
@@ -132,8 +134,8 @@ def parse_serious_incident(text: str) -> SubscriptionFlowIncident | None:
 
 
 def parse_recovered_component(text: str) -> str | None:
-    """Map the monitor's recovery title to the same platform-and-kind component key."""
-    match = RECOVERY_RE.search(text)
+    """Map either monitor closure title to the platform-and-kind component key."""
+    match = CLOSURE_RE.search(text)
     if match is None:
         return None
     label = match.group("label")
@@ -158,12 +160,22 @@ and use the repository's analytics context and data tools.
 
 Detector context:
 - Each affected flow compares an upstream store/processor signal with the corresponding
-  downstream `ug_subscriptions_events` signal against trailing time-aware baselines.
+  downstream `ug_subscriptions_events` signal against trailing time-aware baselines. Renewals use
+  a pooled same-hour baseline with a learned day-of-month correction. Acquisitions use the median
+  of up to four same-hour, same-weekday reference weeks, require at least three clean samples, and
+  fall back to the pooled baseline when that floor is not met. Their day-of-month correction is disabled
+  because signup volume is calendar-flat.
 - SERIOUS means a catastrophic single-leg collapse or a corroborated/sustained drop, depending
-  on the platform and flow shown in the alert.
+  on the platform and flow shown in the alert. For corroborated acquisitions, a non-catastrophic
+  single-hour drop is held at WATCH when the cleaned reference weeks disagree by more than 1.5x;
+  a near-zero reading can still be SERIOUS.
 - The ingestion check is a near-real-time Graylog liveness probe and may distinguish our receipt
   pipeline from a store-side or proxy/replica issue.
 - A green opposite leg is important evidence: do not treat every alert as a real sales drop.
+- A later `Recovered` reply means cumulative volume caught up and points to delayed/time-shifted
+  delivery. `Back to normal` means the hourly dynamic stayed healthy for three complete hours but
+  the missing volume never returned: the incident is over, yet the flagged hour was a real one-off
+  dip rather than a delivery lag. Both replies close the affected component.
 
 Affected components: {components}
 
@@ -202,17 +214,17 @@ class SubscriptionFlowResponder:
         message_ts = event.get("ts")
         if not isinstance(text, str) or not isinstance(message_ts, str):
             return
-        if RECOVERED_MARKER in text:
+        if any(marker in text for marker in CLOSURE_MARKERS):
             component = parse_recovered_component(text)
-            recovered_alert_ts = event.get("thread_ts")
-            if component is not None and isinstance(recovered_alert_ts, str):
+            closure_alert_ts = event.get("thread_ts")
+            if component is not None and isinstance(closure_alert_ts, str):
                 resolved = await asyncio.to_thread(
-                    self.store.recover_subscription_flow_component,
+                    self.store.close_subscription_flow_component,
                     component,
-                    recovered_alert_ts,
+                    closure_alert_ts,
                 )
                 LOGGER.info(
-                    "Subscription-flow component %s recovered; resolved incidents=%d",
+                    "Subscription-flow component %s closed; resolved incidents=%d",
                     component,
                     resolved,
                 )

@@ -239,9 +239,9 @@ def test_subscription_flow_incident_dedup_recovery_and_rearm(tmp_path: Path) -> 
         "100.2",
     )
 
-    assert store.recover_subscription_flow_component("android:recurring", "100.1") == 0
-    assert store.recover_subscription_flow_component("ios:recurring", "100.1") == 0
-    assert store.recover_subscription_flow_component("web:acquisitions", "100.2") == 1
+    assert store.close_subscription_flow_component("android:recurring", "100.1") == 0
+    assert store.close_subscription_flow_component("ios:recurring", "100.1") == 0
+    assert store.close_subscription_flow_component("web:acquisitions", "100.2") == 1
 
     assert store.claim_subscription_flow_incident(
         nature,
@@ -266,14 +266,14 @@ def test_old_recovery_does_not_close_newer_component_alert(tmp_path: Path) -> No
         "200.1",
     )
 
-    assert store.recover_subscription_flow_component("android:recurring", "100.1") == 0
+    assert store.close_subscription_flow_component("android:recurring", "100.1") == 0
     assert not store.claim_subscription_flow_incident(
         nature,
         {"ios:recurring"},
         "200.2",
     )
-    assert store.recover_subscription_flow_component("android:recurring", "200.1") == 0
-    assert store.recover_subscription_flow_component("ios:recurring", "200.2") == 1
+    assert store.close_subscription_flow_component("android:recurring", "200.1") == 0
+    assert store.close_subscription_flow_component("ios:recurring", "200.2") == 1
 
 
 def test_anomaly_analysis_cooldown_filters_only_recent_metric_keys(

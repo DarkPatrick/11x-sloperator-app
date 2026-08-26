@@ -130,11 +130,17 @@ are still investigated.
 
 Repeated alerts are grouped persistently by their failure shape: upstream severity, downstream
 severity, and ingestion-probe state. Platform, flow kind, evaluated hour, and changing values do
-not make a continuing incident look new. Sloperator tracks the affected platform-and-flow
-components and suppresses another agent launch until every component has received the monitor's
-threaded `Recovered` event. Recovery is tied to the latest alert timestamp for that component,
+not make a continuing incident look new. Renewals use the monitor's pooled same-hour baseline with
+day-of-month correction. Acquisitions use the same-hour/same-weekday baseline with a three-sample
+minimum, pooled fallback, no day-of-month correction, and a reference-spread gate before a
+non-catastrophic single-hour SERIOUS verdict.
+
+Sloperator tracks the affected platform-and-flow components and suppresses another agent launch
+until every component has received one of the monitor's terminal threaded events: `Recovered`
+means cumulative volume caught up, while `Back to normal` means the dynamic stabilized but the
+missing volume never returned. Closure is tied to the latest alert timestamp for that component,
 so a delayed reply from an older alert cannot close a newer recurrence. A different failure shape
-or the same shape after full recovery launches a new investigation.
+or the same shape after full closure launches a new investigation.
 
 ## Claude and Codex sessions
 

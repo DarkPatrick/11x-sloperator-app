@@ -72,10 +72,7 @@ def is_experiment_config_trigger(event: dict[str, Any]) -> bool:
 def build_experiment_config_prompt(payload: dict[str, Any], *, interactive: bool) -> str:
     """Build the fail-closed project/config audit requested by the cron notification."""
     experiments = payload["experiments"]
-    compact = "\n".join(
-        f"- id={item['id']}; name={item['name']}"
-        for item in experiments
-    )
+    compact = "\n".join(f"- id={item['id']}; name={item['name']}" for item in experiments)
     closing = (
         "The recipient is authorised for interactive Sloperator conversations. Invite them to "
         "reply in this Slack thread with questions or corrections."
@@ -154,9 +151,7 @@ def normalize_experiment_config_result(text: str) -> tuple[str, str]:
     lines = text.strip().splitlines()
     verdict_lines = [line.strip() for line in lines if line.strip().startswith(VERDICT_MARKER)]
     visible_text = "\n".join(
-        line
-        for line in lines
-        if not line.strip().startswith((VERDICT_MARKER, "🧭", "📚"))
+        line for line in lines if not line.strip().startswith((VERDICT_MARKER, "🧭", "📚"))
     ).strip()
     if verdict_lines:
         verdict = verdict_lines[-1].removeprefix(VERDICT_MARKER).strip()
@@ -199,21 +194,40 @@ def extract_project_links_and_clean_body(
     experiments: list[dict[str, Any]],
 ) -> tuple[list[str], str]:
     """Extract project URLs for the intro and remove duplicated identity/link lines."""
-    project_urls: list[str] = []
+    project_urls_by_name: dict[str, str] = {}
+    standalone_project_urls: list[str] = []
     body_lines: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("Проект:"):
             match = re.search(r"https?://[^\s>|)]+", stripped)
             if match is not None:
-                project_urls.append(match.group(0))
+                standalone_project_urls.append(match.group(0))
             continue
         if stripped.startswith("Админка:"):
             continue
-        if any(str(experiment["name"]) in stripped for experiment in experiments):
+        matching_experiment = next(
+            (experiment for experiment in experiments if str(experiment["name"]) in stripped),
+            None,
+        )
+        if matching_experiment is not None:
+            urls = re.findall(r"https?://[^\s>|)]+", stripped)
+            project_url = next(
+                (url for url in urls if "ultimate-guitar.com/components/ab/experiment" not in url),
+                None,
+            )
+            if project_url is not None:
+                project_urls_by_name[str(matching_experiment["name"])] = project_url
             continue
         body_lines.append(line)
+    standalone_urls = iter(standalone_project_urls)
+    project_urls = [
+        project_urls_by_name.get(str(experiment["name"])) or next(standalone_urls, "")
+        for experiment in experiments
+    ]
     if len(project_urls) != len(experiments):
+        raise ValueError("agent response must contain one project link per experiment")
+    if any(not url for url in project_urls):
         raise ValueError("agent response must contain one project link per experiment")
     return project_urls, "\n".join(body_lines).strip()
 
@@ -227,8 +241,7 @@ def build_notification_intro(
     if len(experiments) == 1:
         experiment = experiments[0]
         admin_url = (
-            "https://www.ultimate-guitar.com/components/ab/experiment/view"
-            f"?id={experiment['id']}"
+            f"https://www.ultimate-guitar.com/components/ab/experiment/view?id={experiment['id']}"
         )
         return (
             f":wave: Привет, <@{recipient_id}>! Ты недавно запустил эксперимент "

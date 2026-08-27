@@ -27,9 +27,7 @@ def _user_id_set(value: str, default: str) -> frozenset[str]:
     if normalized.startswith("[") and normalized.endswith("]"):
         normalized = normalized[1:-1]
     users = frozenset(
-        item.strip().strip("'\"")
-        for item in normalized.split(",")
-        if item.strip().strip("'\"")
+        item.strip().strip("'\"") for item in normalized.split(",") if item.strip().strip("'\"")
     )
     return users or frozenset({default})
 
@@ -61,6 +59,7 @@ class Settings:
     experiment_finalizer_hour: int = 12
     experiment_finalizer_timeout_seconds: int = 7_200
     experiment_finalizer_channel: str = "C07A9FDQ14P"
+    experiment_config_timeout_seconds: int = 7_200
     mobile_health_timeout_seconds: int = 3_600
     ldap_username: str | None = None
     ldap_password: str | None = None
@@ -130,26 +129,16 @@ class Settings:
         experiment_finalizer_channel = os.environ.get(
             "EXPERIMENT_FINALIZER_CHANNEL", "C07A9FDQ14P"
         ).strip()
-        mobile_health_timeout_seconds = int(
-            os.environ.get("MOBILE_HEALTH_TIMEOUT_SECONDS", "3600")
-        )
+        mobile_health_timeout_seconds = int(os.environ.get("MOBILE_HEALTH_TIMEOUT_SECONDS", "3600"))
         ldap_username = os.environ.get("LDAP_USERNAME")
         ldap_password = os.environ.get("LDAP_PASSWORD")
         vpn_profile = Path(
             os.environ.get("SLOPERATOR_VPN_PROFILE", "/home/egor/hz config 2fa.ovpn")
         ).expanduser()
-        vpn_image = os.environ.get(
-            "SLOPERATOR_VPN_IMAGE", "local/openvpn-agent:24.04"
-        ).strip()
-        vpn_container = os.environ.get(
-            "SLOPERATOR_VPN_CONTAINER", "sloperator-vpn"
-        ).strip()
-        anomaly_alert_channel = os.environ.get(
-            "ANOMALY_ALERT_CHANNEL", "C06FADPMGKT"
-        ).strip()
-        anomaly_bot_user_id = os.environ.get(
-            "ANOMALY_BOT_USER_ID", "U018X57PTFV"
-        ).strip()
+        vpn_image = os.environ.get("SLOPERATOR_VPN_IMAGE", "local/openvpn-agent:24.04").strip()
+        vpn_container = os.environ.get("SLOPERATOR_VPN_CONTAINER", "sloperator-vpn").strip()
+        anomaly_alert_channel = os.environ.get("ANOMALY_ALERT_CHANNEL", "C06FADPMGKT").strip()
+        anomaly_bot_user_id = os.environ.get("ANOMALY_BOT_USER_ID", "U018X57PTFV").strip()
         anomaly_bot_id = os.environ.get("ANOMALY_BOT_ID", "B018Q735LSJ").strip()
         subscription_flow_alert_channel = os.environ.get(
             "SUBFLOW_ALERT_CHANNEL", "C06FADPMGKT"
@@ -157,9 +146,7 @@ class Settings:
         mobile_health_alert_channel = os.environ.get(
             "MOBILE_HEALTH_ALERT_CHANNEL", "C0AJKHFHVHV"
         ).strip()
-        mobile_health_bot_id = os.environ.get(
-            "MOBILE_HEALTH_BOT_ID", "B0AM51CS2H5"
-        ).strip()
+        mobile_health_bot_id = os.environ.get("MOBILE_HEALTH_BOT_ID", "B0AM51CS2H5").strip()
         payment_layer_alert_channel = os.environ.get(
             "PAYMENT_MONITOR_ALERT_CHANNEL", "C06FADPMGKT"
         ).strip()
@@ -173,11 +160,12 @@ class Settings:
             sync_interval_seconds = int(os.environ.get("SLOPERATOR_SYNC_INTERVAL_SECONDS", "300"))
             agent_timeout_seconds = int(os.environ.get("SLOPERATOR_AGENT_TIMEOUT_SECONDS", "2700"))
             agent_max_concurrency = int(os.environ.get("SLOPERATOR_AGENT_MAX_CONCURRENCY", "2"))
-            experiment_finalizer_hour = int(
-                os.environ.get("EXPERIMENT_FINALIZER_HOUR", "12")
-            )
+            experiment_finalizer_hour = int(os.environ.get("EXPERIMENT_FINALIZER_HOUR", "12"))
             experiment_finalizer_timeout_seconds = int(
                 os.environ.get("EXPERIMENT_FINALIZER_TIMEOUT_SECONDS", "7200")
+            )
+            experiment_config_timeout_seconds = int(
+                os.environ.get("EXPERIMENT_CONFIG_TIMEOUT_SECONDS", "7200")
             )
             vpn_proxy_port = int(os.environ.get("SLOPERATOR_VPN_PROXY_PORT", "18888"))
             anomaly_window_hours = float(os.environ.get("ANOMALY_WINDOW_HOURS", "24"))
@@ -192,9 +180,7 @@ class Settings:
         if not user_id.startswith("U"):
             raise ConfigurationError("SLACK_USER_ID must be a Slack user ID")
         if any(not user.startswith("U") for user in allowed_conversation_users):
-            raise ConfigurationError(
-                "SLACK_ALLOWED_CONVERSATION_USERS must contain Slack user IDs"
-            )
+            raise ConfigurationError("SLACK_ALLOWED_CONVERSATION_USERS must contain Slack user IDs")
         if not bot_token.startswith("xoxb-"):
             raise ConfigurationError("SLOPERATOR_SLACK_BOT_TOKEN must be a bot token")
         if not app_token.startswith("xapp-"):
@@ -225,10 +211,12 @@ class Settings:
             raise ConfigurationError(
                 "EXPERIMENT_FINALIZER_TIMEOUT_SECONDS must be between 300 and 86400"
             )
-        if not 300 <= mobile_health_timeout_seconds <= 86_400:
+        if not 300 <= experiment_config_timeout_seconds <= 86_400:
             raise ConfigurationError(
-                "MOBILE_HEALTH_TIMEOUT_SECONDS must be between 300 and 86400"
+                "EXPERIMENT_CONFIG_TIMEOUT_SECONDS must be between 300 and 86400"
             )
+        if not 300 <= mobile_health_timeout_seconds <= 86_400:
+            raise ConfigurationError("MOBILE_HEALTH_TIMEOUT_SECONDS must be between 300 and 86400")
         try:
             from zoneinfo import ZoneInfo
 
@@ -264,9 +252,7 @@ class Settings:
         if not 1 <= clickhouse_port <= 65_535:
             raise ConfigurationError("CLICKHOUSE_PORT must be between 1 and 65535")
         if bool(clickhouse_host) != bool(clickhouse_username):
-            raise ConfigurationError(
-                "CLICKHOUSE_HOST and CLICKHOUSE_USERNAME must be set together"
-            )
+            raise ConfigurationError("CLICKHOUSE_HOST and CLICKHOUSE_USERNAME must be set together")
         if bool(ldap_username) != bool(ldap_password):
             raise ConfigurationError("LDAP_USERNAME and LDAP_PASSWORD must be set together")
         if ldap_username and any(character in ldap_username for character in "\r\n"):
@@ -300,6 +286,7 @@ class Settings:
             experiment_finalizer_hour=experiment_finalizer_hour,
             experiment_finalizer_timeout_seconds=experiment_finalizer_timeout_seconds,
             experiment_finalizer_channel=experiment_finalizer_channel,
+            experiment_config_timeout_seconds=experiment_config_timeout_seconds,
             mobile_health_timeout_seconds=mobile_health_timeout_seconds,
             ldap_username=ldap_username,
             ldap_password=ldap_password,

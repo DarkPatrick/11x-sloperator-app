@@ -113,8 +113,7 @@ def test_notification_intro_mentions_starter_and_experiment() -> None:
     assert intro.startswith(":wave: Привет, <@USTARTER>! Ты недавно запустил эксперимент")
     assert "<https://alice.mu.se/pages/123|«[UG Monetization] Test»>" in intro
     assert (
-        "<https://www.ultimate-guitar.com/components/ab/experiment/view?id=7890|id 7890>"
-        in intro
+        "<https://www.ultimate-guitar.com/components/ab/experiment/view?id=7890|id 7890>" in intro
     )
 
 
@@ -129,6 +128,30 @@ def test_project_links_move_to_intro_and_identity_lines_leave_body() -> None:
 
     assert projects == ["https://alice.mu.se/pages/123"]
     assert body == "**Нужно исправить**\nWrong event."
+
+
+def test_project_links_are_accepted_inside_experiment_headings() -> None:
+    experiments = [
+        {"id": 7898, "name": "[UG Monetization] iOS paywall"},
+        {"id": 7874, "name": "[UG Monetization] top propensity"},
+    ]
+
+    projects, body = extract_project_links_and_clean_body(
+        "**[UG Monetization] iOS paywall** — "
+        "[проект](https://alice.mu.se/pages/7898) · "
+        "[админка](https://www.ultimate-guitar.com/components/ab/experiment/view?id=7898)\n"
+        "**[UG Monetization] top propensity** — "
+        "<https://alice.mu.se/pages/7874|проект> · "
+        "<https://www.ultimate-guitar.com/components/ab/experiment/view?id=7874|админка>\n\n"
+        "**Нужно исправить**\nWrong segments.",
+        experiments,
+    )
+
+    assert projects == [
+        "https://alice.mu.se/pages/7898",
+        "https://alice.mu.se/pages/7874",
+    ]
+    assert body == "**Нужно исправить**\nWrong segments."
 
 
 @pytest.mark.asyncio

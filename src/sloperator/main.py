@@ -125,7 +125,7 @@ async def serve(settings: Settings) -> None:
             notified = await experiment_config_responder.review_and_publish(
                 payload,
                 app.client,
-                timeout_seconds=settings.agent_timeout_seconds,
+                timeout_seconds=settings.experiment_config_timeout_seconds,
             )
         except ValueError as error:
             raise web.HTTPBadRequest(text=str(error)) from error

@@ -44,6 +44,19 @@ def vpn_otp_from_command(command: str) -> str | None:
     return match.group(1) if match is not None else None
 
 
+def is_vpn_command(command: str) -> bool:
+    """Reserve VPN commands before generic threaded-agent routing."""
+    return command in {
+        "vpn ready",
+        "vpn connect",
+        "vpn start",
+        "готов",
+        "vpn",
+        "vpn status",
+        "vpn stop",
+    } or vpn_otp_from_command(command) is not None
+
+
 def response_for(command: str) -> str:
     """Return a deterministic response for a supported command."""
     match command:
@@ -163,7 +176,13 @@ def create_app(
             return
         message_ts = event.get("ts")
         active_thread_ts = reply_thread_ts(event)
-        if trusted_channel_thread:
+        normalized_text = normalize_command(text) if isinstance(text, str) else ""
+        dm_vpn_command = (
+            isinstance(channel, str)
+            and channel.startswith("D")
+            and is_vpn_command(normalized_text)
+        )
+        if trusted_channel_thread and not dm_vpn_command:
             assert isinstance(channel, str)
             assert isinstance(text, str)
             assert isinstance(message_ts, str)

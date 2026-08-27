@@ -1,6 +1,7 @@
 from sloperator.archive import conversation_kind, event_channel_id
 from sloperator.bot import (
     is_trusted_channel_thread,
+    is_vpn_command,
     normalize_command,
     reply_thread_ts,
     response_for,
@@ -26,6 +27,14 @@ def test_vpn_otp_is_reserved_independently_of_vpn_state() -> None:
     assert vpn_otp_from_command("vpn otp 12345678") == "12345678"
     assert vpn_otp_from_command("12345") is None
     assert vpn_otp_from_command("analyze 123456") is None
+
+
+def test_vpn_commands_are_reserved_inside_dm_threads() -> None:
+    assert is_vpn_command("vpn ready")
+    assert is_vpn_command("готов")
+    assert is_vpn_command("vpn status")
+    assert is_vpn_command("123456")
+    assert not is_vpn_command("проверь vpn проблему")
 
 
 def test_reply_thread_ts_preserves_active_chat_thread() -> None:

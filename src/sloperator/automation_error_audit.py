@@ -117,6 +117,7 @@ async def run_daily(
     client: AsyncWebClient,
     agent: AgentSubmitter,
     settings: Settings,
+    enabled: Callable[[], bool] = lambda: True,
 ) -> None:
     """Run forever once per calendar day at 14:00 Cyprus time."""
     while True:
@@ -124,6 +125,9 @@ async def run_daily(
         target = next_run_at(now)
         LOGGER.info("Next automation error audit scheduled for %s", target.isoformat())
         await asyncio.sleep((target.astimezone(dt.UTC) - now).total_seconds())
+        if not enabled():
+            LOGGER.info("Scheduled automation error audit disabled from admin")
+            continue
         try:
             LOGGER.info("Starting scheduled automation error audit")
             await run_once(client, agent, settings)

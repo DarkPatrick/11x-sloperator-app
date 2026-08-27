@@ -44,6 +44,7 @@ from sloperator.experiment_finalizer import (
 )
 from sloperator.health import create_health_app
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
+from sloperator.scheduled_jobs import EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME
 from sloperator.store import EventStore
 from sloperator.subscription_flow import (
     SubscriptionFlowResponder,
@@ -75,6 +76,8 @@ async def serve(settings: Settings) -> None:
     automation_controls = AutomationControls(
         settings.database_path.parent / "automation-controls.json"
     )
+    finalizer_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["experiment-finalizer"]
+    error_audit_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["automation-error-audit"]
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
     experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
@@ -233,16 +236,17 @@ async def serve(settings: Settings) -> None:
                     app.client,
                     orchestrator,
                     settings,
-                    lambda: (
-                        not automation_controls.disabled(
-                            "crons", "experiment-finalizer (sloperator.service)"
-                        )
-                    ),
+                    lambda: not automation_controls.disabled("crons", finalizer_job.display_name),
                 ),
                 name="daily-experiment-finalizer",
             )
         automation_error_audit_task = asyncio.create_task(
-            run_daily_automation_error_audit(app.client, orchestrator, settings),
+            run_daily_automation_error_audit(
+                app.client,
+                orchestrator,
+                settings,
+                lambda: not automation_controls.disabled("crons", error_audit_job.display_name),
+            ),
             name="daily-automation-error-audit",
         )
         LOGGER.info(

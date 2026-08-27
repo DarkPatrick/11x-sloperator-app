@@ -18,7 +18,7 @@ from sloperator.admin import (
     _set_cron_enabled,
     _slack_trigger_definitions,
     _systemd_scheduler_history,
-    _systemd_scheduler_job,
+    _systemd_scheduler_jobs,
 )
 from sloperator.config import Settings
 
@@ -270,7 +270,13 @@ def test_cron_agent_prompt_cards_share_the_slack_trigger_component() -> None:
             "schedule": "weekdays Mon-Fri 12:00 Asia/Nicosia",
             "command": "embedded scheduler",
             "enabled": True,
-        }
+        },
+        {
+            "name": "automation-error-audit (sloperator.service)",
+            "schedule": "daily 14:00 Asia/Nicosia",
+            "command": "embedded scheduler",
+            "enabled": True,
+        },
     ]
 
     prompts = _cron_agent_prompt_definitions(jobs)
@@ -280,6 +286,8 @@ def test_cron_agent_prompt_cards_share_the_slack_trigger_component() -> None:
     assert 'renderPromptCards("cron-prompts",d.cron_agent_prompts,"crons")' in ADMIN_HTML
     assert ".trigger-condition code{white-space:normal;overflow-wrap:anywhere" in ADMIN_HTML
     assert prompts[0]["name"] == jobs[0]["name"]
+    assert prompts[1]["name"] == jobs[1]["name"]
+    assert "daily read-only audit" in prompts[1]["prompt"]
     assert "AUTOMATED RESPONSE STYLE" in prompts[0]["prompt"]
 
 
@@ -374,7 +382,7 @@ def test_admin_contains_debounced_two_pane_sql_editor() -> None:
     assert 'sandbox="allow-scripts"' in ADMIN_HTML
 
 
-def test_systemd_scheduler_job_includes_schedule_and_runtime_state() -> None:
+def test_systemd_scheduler_jobs_include_every_registered_schedule_and_runtime_state() -> None:
     settings = Settings(
         slack_user_id="UOWNER",
         bot_token="xoxb-test",
@@ -383,13 +391,20 @@ def test_systemd_scheduler_job_includes_schedule_and_runtime_state() -> None:
     with patch("sloperator.admin.subprocess.run") as run:
         run.return_value.stdout = "MainPID=123\nActiveState=active\n"
 
-        job = _systemd_scheduler_job(settings)
+        jobs = _systemd_scheduler_jobs(settings)
 
-    assert job == {
-        "name": "experiment-finalizer (sloperator.service)",
-        "schedule": "weekdays Mon-Fri 12:00 Asia/Nicosia",
-        "command": "embedded asyncio scheduler · active · PID 123",
-    }
+    assert jobs == [
+        {
+            "name": "experiment-finalizer (sloperator.service)",
+            "schedule": "weekdays Mon-Fri 12:00 Asia/Nicosia",
+            "command": "embedded asyncio scheduler · active · PID 123",
+        },
+        {
+            "name": "automation-error-audit (sloperator.service)",
+            "schedule": "daily 14:00 Asia/Nicosia",
+            "command": "embedded asyncio scheduler · active · PID 123",
+        },
+    ]
 
 
 def test_systemd_scheduler_history_extracts_scheduler_events() -> None:
@@ -425,10 +440,35 @@ def test_systemd_scheduler_history_extracts_scheduler_events() -> None:
     ]
     assert [row["status"] for row in rows] == ["completed", "scheduled"]
     assert {row["job"] for row in rows} == {"experiment-finalizer (sloperator.service)"}
-    args = run.call_args.args[0]
+    args = run.call_args_list[0].args[0]
     assert "--grep=sloperator\\.experiment_finalizer:" in args
     assert "--case-sensitive=yes" in args
     assert "-n" not in args
+
+
+def test_systemd_scheduler_history_extracts_automation_audit_events() -> None:
+    started = {
+        "__REALTIME_TIMESTAMP": "1000000",
+        "MESSAGE": (
+            "INFO sloperator.automation_error_audit: "
+            "Starting scheduled automation error audit"
+        ),
+    }
+    completed = {
+        "__REALTIME_TIMESTAMP": "2000000",
+        "MESSAGE": "INFO sloperator.automation_error_audit: Automation error audit completed",
+    }
+    with patch("sloperator.admin.subprocess.run") as run:
+        run.return_value.stdout = "\n".join((json.dumps(started), json.dumps(completed)))
+
+        rows = _systemd_scheduler_history()
+
+    assert rows == [{
+        "time": "1970-01-01 00:00:01 UTC",
+        "command": "sloperator.service · automation-error-audit · completed",
+        "job": "automation-error-audit (sloperator.service)",
+        "status": "completed",
+    }]
 
 
 def test_systemd_scheduler_history_closes_superseded_start() -> None:

@@ -29,9 +29,13 @@ from sloperator.automation_controls import AutomationControls
 from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
 from sloperator.experiment_config_check import build_experiment_config_prompt
-from sloperator.experiment_finalizer import FINALIZATION_PROMPT
 from sloperator.mobile_health import MobileCriticalMetric, build_mobile_health_agent_prompt
 from sloperator.payment_layer import build_payment_layer_agent_prompt
+from sloperator.scheduled_jobs import (
+    EMBEDDED_SCHEDULED_JOBS,
+    EMBEDDED_SCHEDULED_JOBS_BY_NAME,
+    EmbeddedScheduledJob,
+)
 from sloperator.store import EventStore
 from sloperator.subscription_flow import (
     SubscriptionFlowIncident,
@@ -734,17 +738,19 @@ def _cron_agent_prompt_definitions(jobs: list[dict[str, Any]]) -> list[dict[str,
         for name, (source, condition, prompt) in sources.items()
         if name in by_name
     ]
-    finalizer = by_name.get("experiment-finalizer (sloperator.service)")
-    if finalizer is not None:
+    for scheduled_job in EMBEDDED_SCHEDULED_JOBS:
+        job = by_name.get(scheduled_job.display_name)
+        if job is None:
+            continue
         definitions.append(
             {
-                "name": finalizer["name"],
-                "key": finalizer["name"],
-                "schedule": finalizer["schedule"],
-                "enabled": finalizer["enabled"],
-                "source": "sloperator.experiment_finalizer.FINALIZATION_PROMPT",
-                "condition": "One autonomous experiment-finalisation agent run per weekday",
-                "prompt": FINALIZATION_PROMPT,
+                "name": job["name"],
+                "key": job["name"],
+                "schedule": job["schedule"],
+                "enabled": job["enabled"],
+                "source": scheduled_job.prompt_source,
+                "condition": scheduled_job.condition,
+                "prompt": scheduled_job.prompt,
             }
         )
     return definitions
@@ -963,8 +969,8 @@ def _cron_execution_history(
     return rows, authoritative
 
 
-def _systemd_scheduler_job(settings: Settings) -> dict[str, Any]:
-    """Describe the experiment scheduler embedded in sloperator.service."""
+def _systemd_scheduler_jobs(settings: Settings) -> list[dict[str, Any]]:
+    """Describe every scheduler registered inside sloperator.service."""
     result = subprocess.run(
         [
             "systemctl",
@@ -981,20 +987,30 @@ def _systemd_scheduler_job(settings: Settings) -> dict[str, Any]:
     properties = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
     state = properties.get("ActiveState", "unknown")
     pid = properties.get("MainPID", "unknown")
-    return {
-        "name": "experiment-finalizer (sloperator.service)",
-        "schedule": (
-            f"weekdays Mon-Fri {settings.experiment_finalizer_hour:02d}:00 "
-            f"{settings.experiment_finalizer_timezone}"
-        ),
-        "command": f"embedded asyncio scheduler · {state} · PID {pid}",
-    }
+    return [
+        {
+            "name": job.display_name,
+            "schedule": job.schedule(settings),
+            "command": f"embedded asyncio scheduler · {state} · PID {pid}",
+        }
+        for job in EMBEDDED_SCHEDULED_JOBS
+    ]
 
 
 def _systemd_scheduler_history(
     scheduled_runs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Return scheduler history with each start/completion represented once."""
+    rows: list[dict[str, str]] = []
+    for job in EMBEDDED_SCHEDULED_JOBS:
+        rows.extend(_one_systemd_scheduler_history(job, scheduled_runs))
+    return sorted(rows, key=lambda row: row["time"], reverse=True)
+
+
+def _one_systemd_scheduler_history(
+    job: EmbeddedScheduledJob,
+    scheduled_runs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
     result = subprocess.run(
         [
             "journalctl",
@@ -1005,7 +1021,7 @@ def _systemd_scheduler_history(
             "sloperator",
             "--since",
             "28 days ago",
-            "--grep=sloperator\\.experiment_finalizer:",
+            "--grep=" + job.logger_name.replace(".", "\\.") + ":",
             "--case-sensitive=yes",
         ],
         capture_output=True,
@@ -1014,16 +1030,16 @@ def _systemd_scheduler_history(
         check=False,
     )
     prefixes = {
-        "Next experiment finalizer run scheduled for ": ("scheduled: ", "scheduled"),
-        "Starting scheduled experiment finalizer run": ("started", "started"),
-        "Experiment finalizer run completed": ("completed", "completed"),
+        job.scheduled_prefix: ("scheduled: ", "scheduled"),
+        job.started_message: ("started", "started"),
+        job.completed_message: ("completed", "completed"),
     }
     rows: list[dict[str, str]] = []
     pending_starts: list[int] = []
     durable_statuses = {
         str(run["created_at"]): str(run["status"])
         for run in scheduled_runs or []
-        if run.get("channel_name") == "experiment-finalizer"
+        if run.get("channel_name") == job.job_name
     }
     for line in result.stdout.splitlines():
         try:
@@ -1050,15 +1066,15 @@ def _systemd_scheduler_history(
                 "%Y-%m-%d %H:%M:%S UTC",
                 time.gmtime(micros / 1e6),
             ),
-            "command": f"sloperator.service · experiment-finalizer · {event}",
-            "job": "experiment-finalizer (sloperator.service)",
+            "command": f"sloperator.service · {job.job_name} · {event}",
+            "job": job.display_name,
             "status": status,
         }
         if status == "started":
             durable_status = durable_statuses.get(row["time"].removesuffix(" UTC"))
             if durable_status in {"completed", "failed", "cancelled"}:
                 row["command"] = (
-                    f"sloperator.service · experiment-finalizer · {durable_status}"
+                    f"sloperator.service · {job.job_name} · {durable_status}"
                 )
                 row["status"] = durable_status
                 pending_starts.append(len(rows))
@@ -1067,7 +1083,7 @@ def _systemd_scheduler_history(
             for pending_index in pending_starts:
                 if rows[pending_index]["status"] == "started":
                     rows[pending_index]["command"] = (
-                        "sloperator.service · experiment-finalizer · interrupted"
+                        f"sloperator.service · {job.job_name} · interrupted"
                     )
                     rows[pending_index]["status"] = "interrupted"
             pending_starts.clear()
@@ -1265,15 +1281,18 @@ def create_admin_routes(
                 session["messages"] = await asyncio.to_thread(store.thread_messages, *key)
         sessions = _merge_attached_scheduled_sessions(sessions)
         sessions.sort(key=lambda session: session["updated_at"], reverse=True)
-        crontab, history, service_job, service_history = await asyncio.gather(
+        crontab, history, service_jobs, service_history = await asyncio.gather(
             asyncio.to_thread(_crontab),
             asyncio.to_thread(_cron_history),
-            asyncio.to_thread(_systemd_scheduler_job, orchestrator.settings),
+            asyncio.to_thread(_systemd_scheduler_jobs, orchestrator.settings),
             asyncio.to_thread(_systemd_scheduler_history, persisted_headless),
         )
         cron_jobs = _cron_jobs(crontab)
-        service_job["enabled"] = not automation_controls.disabled("crons", service_job["name"])
-        all_cron_jobs = [service_job, *cron_jobs]
+        for service_job in service_jobs:
+            service_job["enabled"] = not automation_controls.disabled(
+                "crons", service_job["name"]
+            )
+        all_cron_jobs = [*service_jobs, *cron_jobs]
         execution_history, authoritative_jobs = await asyncio.to_thread(
             _cron_execution_history, cron_jobs
         )
@@ -1324,7 +1343,7 @@ def create_admin_routes(
         kind = request.match_info["kind"]
         name = request.match_info["name"]
         enabled = request.match_info["action"] == "start"
-        if kind == "crons" and name != "experiment-finalizer (sloperator.service)":
+        if kind == "crons" and name not in EMBEDDED_SCHEDULED_JOBS_BY_NAME:
             if not await asyncio.to_thread(_set_cron_enabled, name, enabled):
                 raise web.HTTPNotFound(text="Unknown managed cron")
         elif kind == "triggers":

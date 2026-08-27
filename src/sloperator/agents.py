@@ -74,6 +74,13 @@ existing work from its current state. Do not return another progress update, pro
 later, or stop while a child task is still running. Wait for or inspect the ongoing work as needed,
 then return only the final response required by the original request.
 """
+PATH_GUARD_RECOVERY_PROMPT = """\
+Your previous response was only the short correction requested by the reply-path Stop hook.
+Sloperator did not publish either the hook-blocked draft or that correction, so the Slack user has
+not received an answer. Continue the same session and now return the complete answer to the
+original request, incorporating the corrected or removed references. Do not return another
+correction-only note or discuss this recovery instruction.
+"""
 INITIAL_INSTRUCTION = """\
 Act as a pragmatic product analyst embedded in the Ultimate Guitar monetisation team.
 Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
@@ -99,6 +106,24 @@ waiting for terminal input.
 
 User request:
 """
+
+
+def is_reply_path_guard_correction(text: str) -> bool:
+    """Recognise a correction-only reply produced after reply_path_guard blocks a draft."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    correction_lines = [
+        line for line in lines if line.startswith("✗ ") and "→" in line
+    ]
+    if not correction_lines:
+        return False
+    non_meta_lines = [
+        line
+        for line in lines
+        if not line.startswith((":compass:", ":books:", "🧭", "📚"))
+    ]
+    return len(non_meta_lines) <= len(correction_lines) + 1
+
+
 CLAUDE_INITIAL_INSTRUCTION = INITIAL_INSTRUCTION.replace("AGENTS.md", "CLAUDE.md")
 
 
@@ -1549,6 +1574,46 @@ class AgentOrchestrator:
                             )
                             prompt = _claude_steering_prompt(additions)
                             force_resume = True
+                        path_guard_recoveries = 0
+                        while (
+                            is_reply_path_guard_correction(result.text)
+                            and path_guard_recoveries < 2
+                        ):
+                            path_guard_recoveries += 1
+                            LOGGER.warning(
+                                "Ignoring reply-path hook correction for Slack thread %s; "
+                                "requesting the complete response (%d/2)",
+                                thread_ts,
+                                path_guard_recoveries,
+                            )
+                            session = replace(
+                                session,
+                                external_session_id=result.session_id,
+                                status="cancelled",
+                            )
+                            result = await self._run_with_retries(
+                                partial(
+                                    run_claude,
+                                    replace(
+                                        self.settings,
+                                        agent_timeout_seconds=(
+                                            timeout_seconds
+                                            or self.settings.agent_timeout_seconds
+                                        ),
+                                    ),
+                                    session,
+                                    PATH_GUARD_RECOVERY_PROMPT,
+                                    control,
+                                    force_resume=True,
+                                    environment_overrides=environment_overrides,
+                                ),
+                                context=f"Slack thread {thread_ts} path-guard recovery",
+                            )
+                        if is_reply_path_guard_correction(result.text):
+                            raise AgentExecutionError(
+                                "Claude repeatedly returned a reply-path hook correction "
+                                "instead of the complete Slack response"
+                            )
                         if require_artifact and not has_required_deliverable(result.text):
                             LOGGER.warning(
                                 "Claude result for thread %s missed the required artifact "

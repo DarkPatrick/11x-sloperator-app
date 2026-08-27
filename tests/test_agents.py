@@ -11,6 +11,7 @@ from sloperator.agents import (
     CLAUDE_INITIAL_INSTRUCTION,
     FINAL_ARTIFACT_RECOVERY_PROMPT,
     INTERIM_RECOVERY_PROMPT,
+    PATH_GUARD_RECOVERY_PROMPT,
     RESTART_RECOVERY_PROMPT,
     TIME_LIMIT_NOTICE,
     TIMEOUT_RECOVERY_FAILURE_NOTICE,
@@ -26,6 +27,7 @@ from sloperator.agents import (
     fetch_thread_context,
     has_required_deliverable,
     is_authentication_failure,
+    is_reply_path_guard_correction,
     optional_reply_instruction,
     parse_agent_request,
     retry_agent_service_errors,
@@ -39,6 +41,23 @@ from sloperator.store import EventStore
 def test_claude_initial_instruction_references_claude_md() -> None:
     assert "CLAUDE.md" in CLAUDE_INITIAL_INSTRUCTION
     assert "AGENTS.md" not in CLAUDE_INITIAL_INSTRUCTION
+
+
+def test_reply_path_guard_correction_detection() -> None:
+    correction = """\
+:compass: Скилл: не использован
+:books: Контекст: Graylog
+
+✗ `/pro/tools/braintree/subscription` → (убрано — это HTTP-эндпоинт)
+✗ `/webhooks/braintree` → (убрано — это значение поля uri)
+
+Conclusions are unchanged.
+"""
+
+    assert is_reply_path_guard_correction(correction)
+    assert not is_reply_path_guard_correction(
+        "Причина установлена.\n\n- Проверили Graylog\n- События доставлены."
+    )
 
 
 def test_optional_reply_instruction_defaults_to_silence_and_forbids_local_links() -> None:
@@ -806,3 +825,51 @@ async def test_required_artifact_recovers_from_internal_claude_review_note(
         markdown_text="Actual finding",
     )
     upload.assert_awaited_once()
+
+
+async def test_slack_turn_recovers_from_reply_path_guard_correction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    correction = (
+        ":compass: Скилл: не использован\n"
+        "✗ `/webhooks/braintree` → (убрано — это HTTP-эндпоинт)\n"
+        "Conclusions are unchanged."
+    )
+    run_claude = AsyncMock(
+        side_effect=(
+            AgentRunResult(session_id="session-1", text=correction),
+            AgentRunResult(session_id="session-1", text="Полный исправленный ответ"),
+        )
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+    )
+    post_message = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message, files_upload_v2=AsyncMock())
+    orchestrator = AgentOrchestrator(settings, store)
+
+    await orchestrator.submit(
+        client,
+        channel_id="C123",
+        message_ts="100.1:followup",
+        thread_ts="100.1",
+        text="Уточни вывод",
+        show_status=False,
+    )
+    await orchestrator.drain()
+
+    assert run_claude.await_count == 2
+    assert run_claude.await_args.args[2] == PATH_GUARD_RECOVERY_PROMPT
+    assert run_claude.await_args.kwargs["force_resume"] is True
+    post_message.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        markdown_text="Полный исправленный ответ",
+    )

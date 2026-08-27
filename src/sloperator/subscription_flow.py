@@ -81,27 +81,25 @@ def _state(line: str) -> str:
     return "unspecified"
 
 
-def parse_serious_incident(text: str) -> SubscriptionFlowIncident | None:
-    """Derive a cross-platform incident nature from leg/probe states, not changing values."""
+def parse_serious_incidents(text: str) -> tuple[SubscriptionFlowIncident, ...]:
+    """Derive one stable incident nature per platform and flow kind."""
     title = TITLE_RE.search(text)
     if title is None:
-        return None
+        return ()
     title_kind = _flow_kind(title.group("kind"))
     title_platforms = {
         platform
         for platform in ("android", "ios", "web")
         if platform in title.group("platforms").lower()
     }
-    components: set[str] = set()
-    signatures: list[tuple[str, str, str]] = []
+    signatures: dict[str, tuple[str, str, str]] = {}
     current_platform: str | None = None
     upstream = downstream = probe = "unspecified"
 
     def finish_section() -> None:
         nonlocal upstream, downstream, probe
         if current_platform is not None:
-            components.add(f"{current_platform}:{title_kind}")
-            signatures.append((upstream, downstream, probe))
+            signatures[current_platform] = (upstream, downstream, probe)
         upstream = downstream = probe = "unspecified"
 
     for line in text.splitlines():
@@ -123,14 +121,26 @@ def parse_serious_incident(text: str) -> SubscriptionFlowIncident | None:
             else:
                 probe = "unknown"
     finish_section()
-    if not components:
-        components = {f"{platform}:{title_kind}" for platform in title_platforms}
-    if not components:
-        return None
-    stable_signatures = sorted(set(signatures)) or [("unspecified",) * 3]
-    canonical = "|".join(":".join(signature) for signature in stable_signatures)
-    nature_key = hashlib.sha256(canonical.encode()).hexdigest()
-    return SubscriptionFlowIncident(nature_key, frozenset(components), text)
+    if not signatures:
+        signatures = {platform: ("unspecified",) * 3 for platform in title_platforms}
+    incidents = []
+    for platform, signature in sorted(signatures.items()):
+        component = f"{platform}:{title_kind}"
+        canonical = ":".join((component, *signature))
+        incidents.append(
+            SubscriptionFlowIncident(
+                hashlib.sha256(canonical.encode()).hexdigest(),
+                frozenset({component}),
+                text,
+            )
+        )
+    return tuple(incidents)
+
+
+def parse_serious_incident(text: str) -> SubscriptionFlowIncident | None:
+    """Return the first platform incident for single-platform callers."""
+    incidents = parse_serious_incidents(text)
+    return incidents[0] if incidents else None
 
 
 def parse_recovered_component(text: str) -> str | None:
@@ -163,8 +173,8 @@ Detector context:
   downstream `ug_subscriptions_events` signal against trailing time-aware baselines. Renewals use
   a pooled same-hour baseline with a learned day-of-month correction. Acquisitions use the median
   of up to four same-hour, same-weekday reference weeks, require at least three clean samples, and
-  fall back to the pooled baseline when that floor is not met. Their day-of-month correction is disabled
-  because signup volume is calendar-flat.
+  fall back to the pooled baseline when that floor is not met. Acquisitions disable their
+  day-of-month correction because signup volume is calendar-flat.
 - SERIOUS means a catastrophic single-leg collapse or a corroborated/sustained drop, depending
   on the platform and flow shown in the alert. For corroborated acquisitions, a non-catastrophic
   single-hour drop is held at WATCH when the cleaned reference weeks disagree by more than 1.5x;
@@ -229,32 +239,34 @@ class SubscriptionFlowResponder:
                     resolved,
                 )
             return
-        incident = parse_serious_incident(text)
-        if incident is None:
+        incidents = parse_serious_incidents(text)
+        if not incidents:
             LOGGER.warning("Could not parse SERIOUS subscription-flow alert %s", message_ts)
             return
-        should_launch = await asyncio.to_thread(
-            self.store.claim_subscription_flow_incident,
-            incident.nature_key,
-            set(incident.components),
-            message_ts,
-        )
-        if not should_launch:
-            LOGGER.info(
-                "Suppressing repeated subscription-flow incident nature %s",
-                incident.nature_key[:12],
-            )
-            return
         channel = self.settings.subscription_flow_alert_channel
-        await self.agent.submit(
-            client,
-            channel_id=channel,
-            message_ts=f"{message_ts}:subscription-flow-analysis",
-            thread_ts=message_ts,
-            text=build_subscription_flow_agent_prompt(incident),
-            show_status=False,
-            automated=True,
-        )
+        for incident in incidents:
+            should_launch = await asyncio.to_thread(
+                self.store.claim_subscription_flow_incident,
+                incident.nature_key,
+                set(incident.components),
+                message_ts,
+            )
+            if not should_launch:
+                LOGGER.info(
+                    "Suppressing repeated subscription-flow incident nature %s",
+                    incident.nature_key[:12],
+                )
+                continue
+            component = next(iter(incident.components))
+            await self.agent.submit(
+                client,
+                channel_id=channel,
+                message_ts=(f"{message_ts}:subscription-flow-analysis:{component}"),
+                thread_ts=message_ts,
+                text=build_subscription_flow_agent_prompt(incident),
+                show_status=False,
+                automated=True,
+            )
 
     async def _is_own_bot(
         self,

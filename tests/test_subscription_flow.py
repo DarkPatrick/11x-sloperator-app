@@ -14,6 +14,7 @@ from sloperator.subscription_flow import (
     is_subscription_flow_event,
     parse_recovered_component,
     parse_serious_incident,
+    parse_serious_incidents,
 )
 
 
@@ -34,19 +35,37 @@ Evaluated hour (UTC): *2026-07-25 12:00*
 """
 
 
-def test_same_leg_pattern_is_one_nature_across_platforms_and_kinds() -> None:
-    recurring = parse_serious_incident(
-        _serious_alert("Android iOS recurring charges", "Android")
-    )
+def test_same_leg_pattern_is_separate_across_platforms_and_kinds() -> None:
+    recurring = parse_serious_incident(_serious_alert("Android iOS recurring charges", "Android"))
     acquisitions = parse_serious_incident(
         _serious_alert("Web new subscriptions / first purchases", "Web")
     )
 
     assert recurring is not None
     assert acquisitions is not None
-    assert recurring.nature_key == acquisitions.nature_key
+    assert recurring.nature_key != acquisitions.nature_key
     assert recurring.components == {"android:recurring"}
     assert acquisitions.components == {"web:acquisitions"}
+
+
+def test_multi_platform_alert_creates_one_incident_per_platform() -> None:
+    text = (
+        _serious_alert("Android iOS recurring charges", "Android")
+        + """
+*iOS* — diagnosis
+    • Upstream — source: *0* vs baseline *100* → *0% of normal* :red_circle:
+    • Downstream — events: *100* vs baseline *100* → *100% of normal* :large_green_circle:
+    • Ingestion check: our ingestion is healthy :large_green_circle:
+"""
+    )
+
+    incidents = parse_serious_incidents(text)
+
+    assert [incident.components for incident in incidents] == [
+        {"android:recurring"},
+        {"ios:recurring"},
+    ]
+    assert incidents[0].nature_key != incidents[1].nature_key
 
 
 def test_different_leg_pattern_is_a_different_nature() -> None:
@@ -117,7 +136,8 @@ def test_agent_prompt_contains_detector_context_and_skill() -> None:
     assert "AGENTS.md" not in prompt
     assert "upstream store/processor signal" in prompt
     assert "require at least three clean samples" in prompt
-    assert "day-of-month correction is disabled" in prompt
+    assert "day-of-month correction" in prompt
+    assert "signup volume is calendar-flat" in prompt
     assert "held at WATCH" in prompt
     assert "`Back to normal`" in prompt
     assert "SERIOUS — Web renewals" in prompt
@@ -158,6 +178,47 @@ async def test_concurrent_live_and_history_delivery_launches_one_agent(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_multi_platform_alert_launches_separate_agents(tmp_path) -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+    )
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    agent = SimpleNamespace(submit=AsyncMock())
+    client = SimpleNamespace(auth_test=AsyncMock(return_value={"user_id": "USELF"}))
+    responder = SubscriptionFlowResponder(settings, store, agent)
+    text = (
+        _serious_alert("Android iOS recurring charges", "Android")
+        + """
+*iOS* — diagnosis
+    • Upstream — source: *0* vs baseline *100* → *0% of normal* :red_circle:
+    • Downstream — events: *100* vs baseline *100* → *100% of normal* :large_green_circle:
+    • Ingestion check: our ingestion is healthy :large_green_circle:
+"""
+    )
+
+    await responder.handle(
+        {
+            "channel": settings.subscription_flow_alert_channel,
+            "user": "USELF",
+            "bot_id": "BSELF",
+            "ts": "100.1",
+            "text": text,
+        },
+        client,
+    )
+
+    assert agent.submit.await_count == 2
+    message_ids = {call.kwargs["message_ts"] for call in agent.submit.await_args_list}
+    assert message_ids == {
+        "100.1:subscription-flow-analysis:android:recurring",
+        "100.1:subscription-flow-analysis:ios:recurring",
+    }
+
+
+@pytest.mark.asyncio
 async def test_back_to_normal_closes_incident_and_rearms_same_nature(tmp_path) -> None:
     settings = Settings(
         slack_user_id="UOWNER",
@@ -182,7 +243,12 @@ async def test_back_to_normal_closes_incident_and_rearms_same_nature(tmp_path) -
         "bot_id": "BSELF",
         "ts": "103.1",
         "thread_ts": "100.1",
-        "text": ":large_green_circle: *Back to normal — Android new subscriptions / first purchases*",
+        "text": "".join(
+            (
+                ":large_green_circle: *Back to normal — ",
+                "Android new subscriptions / first purchases*",
+            )
+        ),
     }
 
     await responder.handle(alert, client)

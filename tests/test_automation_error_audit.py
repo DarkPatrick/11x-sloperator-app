@@ -25,6 +25,8 @@ def test_prompt_is_claude_read_only_and_uses_automated_response_style() -> None:
     assert AUTOMATED_RESPONSE_STYLE in AUDIT_PROMPT
     assert "preceding 24 hours" in AUDIT_PROMPT
     assert "Slack-triggered agent runs" in AUDIT_PROMPT
+    assert "expected operational state, not an automation failure" in AUDIT_PROMPT
+    assert "Do not report it" in AUDIT_PROMPT
     assert "Do not edit or create files" in AUDIT_PROMPT
     assert "Do not repair anything" in AUDIT_PROMPT
     assert NO_ERRORS in AUDIT_PROMPT

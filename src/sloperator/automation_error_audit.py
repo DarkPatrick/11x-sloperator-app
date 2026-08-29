@@ -34,6 +34,12 @@ systemd journal, cron definitions, and their referenced logs as read-only eviden
 real terminal failure from an active run, a recovered run, and stale append-only stderr left by an
 older execution. Ignore this audit's own currently-running record.
 
+The `sloperator-vpn` container being stopped, exited, unavailable, or awaiting an interactive VPN
+login is an expected operational state, not an automation failure. Do not report it, its restart
+policy, VPN authentication expiry, unavailable VPN proxy, or diagnostics disabled only because
+that container is down. Report a separate automation only if that automation itself actually
+failed; do not infer failure merely from VPN unavailability.
+
 STRICT SAFETY BOUNDARY: investigate and report only. Do not edit or create files, change the
 database, restart or signal services, alter cron/configuration, send Slack messages, invoke fixes,
 commit, or push. Do not repair anything even when the remedy looks obvious.

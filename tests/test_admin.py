@@ -49,7 +49,7 @@ def test_cron_history_extracts_launches_newest_first() -> None:
     assert [row["command"] for row in rows] == ["second-job", "first-job"]
     args = run.call_args.args[0]
     assert "--since" in args
-    assert "28 days ago" in args
+    assert "3 days ago" in args
     assert "--grep=^\\(egor\\) CMD \\(" in args
     assert "-n" not in args
 

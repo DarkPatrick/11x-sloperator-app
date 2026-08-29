@@ -217,7 +217,7 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <section id="panel-agents" class="panel"><h2>Agent sessions</h2>
 <div id="sessions" class="grid"></div></section>
 <section id="panel-cron" class="panel"><h2>Cron runs</h2><div class="cron-toolbar row spread">
-<span class="sub">Last 28 days · UTC</span><div class="cron-legend">
+<span class="sub">Last 28 days · UTC (journal-backed details: 3 days)</span><div class="cron-legend">
 <span class="legend-item"><i class="run-dot success"></i>Completed</span>
 <span class="legend-item"><i class="run-dot running"></i>Running</span>
 <span class="legend-item"><i class="run-dot"></i>Started, awaiting result</span>
@@ -814,7 +814,7 @@ def _cron_history() -> list[dict[str, str]]:
             "-t",
             "CRON",
             "--since",
-            "28 days ago",
+            "3 days ago",
             "--grep=^\\(egor\\) CMD \\(",
         ],
         capture_output=True,
@@ -1020,7 +1020,7 @@ def _one_systemd_scheduler_history(
             "-u",
             "sloperator",
             "--since",
-            "28 days ago",
+            "3 days ago",
             "--grep=" + job.logger_name.replace(".", "\\.") + ":",
             "--case-sensitive=yes",
         ],

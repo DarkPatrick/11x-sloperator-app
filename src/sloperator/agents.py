@@ -211,6 +211,24 @@ class HeadlessAgentRun:
 
 NO_REPLY_MARKER = "SLOPERATOR_NO_REPLY"
 THREAD_CONTEXT_LIMIT = 200
+SLACK_IDENTITY_POLICY = """\
+SLACK IDENTITY SAFETY (STRICT):
+- Never infer, guess, or copy a person's name from conversational hints, jokes, prior prose,
+  email-like text, or memory. A Slack user ID and a human name are not interchangeable.
+- Before addressing or describing any Slack participant by name, verify the current name from
+  Slack profile data using the Slack API/connector (`users.info` or an equivalent authoritative
+  lookup). Use the verified directory below when it contains that user ID.
+- If a profile lookup is unavailable, fails, or does not cover the person, do not use a guessed
+  name. Use their Slack mention (`<@U…>`), their exact user ID, or a neutral role such as "the
+  author of that message". A name asserted inside the thread is not verification.
+- This applies to every person mentioned in every Slack-facing response, not only the requester.
+"""
+
+
+def slack_identity_instruction(prompt: str, identity_directory: str = "") -> str:
+    """Apply verified-name rules to every Slack agent turn, including resumed sessions."""
+    directory = identity_directory or "(No Slack profiles were pre-verified for this turn.)"
+    return f"{SLACK_IDENTITY_POLICY}\nVerified Slack profile directory:\n{directory}\n\n{prompt}"
 
 
 def optional_reply_instruction(
@@ -288,13 +306,34 @@ async def fetch_thread_context(
             cursor = next_cursor.strip() if isinstance(next_cursor, str) else ""
             if not cursor or not page:
                 break
-    except SlackApiError:
+    except (SlackApiError, AttributeError):
         LOGGER.warning("Could not fetch Slack context for thread %s", thread_ts)
         return "(Full Slack thread unavailable; use the existing session context.)"
+
+    user_ids = {
+        user_id
+        for item in messages
+        if isinstance((user_id := item.get("user")), str)
+    }
+    verified_names: dict[str, str] = {}
+    for user_id in sorted(user_ids):
+        try:
+            response = await client.users_info(user=user_id)
+            user = response.get("user", {})
+            profile = user.get("profile", {}) if isinstance(user, dict) else {}
+            display_name = profile.get("display_name") if isinstance(profile, dict) else None
+            real_name = profile.get("real_name") if isinstance(profile, dict) else None
+            name = display_name or real_name
+            if isinstance(name, str) and name.strip():
+                verified_names[user_id] = name.strip()
+        except (SlackApiError, AttributeError):
+            LOGGER.warning("Could not resolve Slack profile for user %s", user_id)
 
     lines = []
     for item in messages[-THREAD_CONTEXT_LIMIT:]:
         author = item.get("user") or item.get("bot_id") or "unknown"
+        if author in verified_names:
+            author = f"{author} [verified Slack profile: {verified_names[author]}]"
         text = str(item.get("text") or "").strip()
         if text:
             lines.append(f"[{item.get('ts', '?')}] {author}: {text}")
@@ -767,6 +806,8 @@ class AgentOrchestrator:
         optional_reply: bool = False,
         require_artifact: bool = False,
         automated: bool = False,
+        reuse_key: str | None = None,
+        reuse_mention_line: str | None = None,
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
         claim = await asyncio.to_thread(
@@ -779,6 +820,40 @@ class AgentOrchestrator:
             return SubmitResult.DUPLICATE
         if claim == SubmitResult.EXPIRED:
             return SubmitResult.EXPIRED
+        if reuse_key is not None:
+            reused_thread = await asyncio.to_thread(
+                self.store.find_recent_completed_analysis,
+                channel_id,
+                reuse_key,
+            )
+            if reused_thread is not None and reused_thread != thread_ts:
+                permalink_response = await client.chat_getPermalink(
+                    channel=channel_id,
+                    message_ts=reused_thread,
+                )
+                permalink = permalink_response.get("permalink")
+                if isinstance(permalink, str) and permalink:
+                    prefix = f"{reuse_mention_line}\n" if reuse_mention_line else ""
+                    await self._reply(
+                        client,
+                        channel_id,
+                        thread_ts,
+                        f"{prefix}Повтор того же набора метрик — "
+                        f"[открыть недавний разбор]({permalink}).",
+                        disable_link_previews=True,
+                    )
+                    await asyncio.to_thread(
+                        self.store.finish_agent_request,
+                        channel_id,
+                        message_ts,
+                        "reused",
+                    )
+                    LOGGER.info(
+                        "Reused completed analysis thread %s for %s",
+                        reused_thread,
+                        message_ts,
+                    )
+                    return SubmitResult.QUEUED
         key = (channel_id, thread_ts)
         next_match = NEXT_RE.match(text)
         if (
@@ -808,6 +883,8 @@ class AgentOrchestrator:
                 "optional_reply": optional_reply,
                 "require_artifact": require_artifact,
                 "automated": automated,
+                "reuse_key": reuse_key,
+                "reuse_mention_line": reuse_mention_line,
             },
         )
         task = asyncio.create_task(
@@ -1467,8 +1544,21 @@ class AgentOrchestrator:
                     thread_ts,
                 )
                 parsed = parse_agent_request(text, self.settings)
+                thread_context = await fetch_thread_context(client, channel_id, thread_ts)
+                verified_entries = sorted(
+                    {
+                        match.group(1)
+                        for line in thread_context.splitlines()
+                        if (
+                            match := re.match(
+                                r"^\[[^]]+\] (.+? \[verified Slack profile: .+?\]):",
+                                line,
+                            )
+                        )
+                    }
+                )
+                identity_directory = "\n".join(verified_entries)
                 if optional_reply and session is not None:
-                    thread_context = await fetch_thread_context(client, channel_id, thread_ts)
                     parsed = replace(
                         parsed,
                         prompt=optional_reply_instruction(
@@ -1477,6 +1567,10 @@ class AgentOrchestrator:
                             self.settings.slack_user_id,
                         ),
                     )
+                parsed = replace(
+                    parsed,
+                    prompt=slack_identity_instruction(parsed.prompt, identity_directory),
+                )
                 if session is None:
                     preassigned_id = str(uuid.uuid4()) if parsed.provider == "claude" else None
                     session = await asyncio.to_thread(

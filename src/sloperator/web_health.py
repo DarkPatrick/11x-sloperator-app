@@ -10,13 +10,13 @@ from typing import Any
 
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.analysis_reuse import recent_analysis_reuse_policy
 from sloperator.anomaly_alerts import AgentSubmitter
 from sloperator.automated_session_policy import (
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
 from sloperator.config import Settings
-from sloperator.analysis_reuse import recent_analysis_reuse_policy
 
 LOGGER = logging.getLogger(__name__)
 REPORT_MARKER = "UG Monetisation: WEB health monitoring"
@@ -219,6 +219,11 @@ class WebHealthResponder:
                 require_artifact=True,
                 timeout_seconds=self.settings.mobile_health_timeout_seconds,
                 automated=True,
+                reuse_key="web:" + repr(sorted(
+                    (metric.query_title, metric.metric_line.split(" | ", 1)[0])
+                    for metric in metrics
+                )),
+                reuse_mention_line="<@U0149RHN7D3> <@U09CYCGN6H4> <@U0525MDT0MN>",
             )
         finally:
             self._in_flight.discard(message_ts)

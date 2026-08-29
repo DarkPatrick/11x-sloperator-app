@@ -1227,6 +1227,26 @@ class EventStore:
                 (status, channel_id, message_ts),
             )
 
+    def find_recent_completed_analysis(
+        self, channel_id: str, reuse_key: str, days: int = 5
+    ) -> str | None:
+        """Return the newest completed automated thread with the same identity set."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT thread_ts
+                FROM durable_agent_runs
+                WHERE channel_id = ?
+                  AND status = 'completed'
+                  AND json_extract(options_json, '$.reuse_key') = ?
+                  AND datetime(updated_at) >= datetime('now', ?)
+                ORDER BY datetime(updated_at) DESC
+                LIMIT 1
+                """,
+                (channel_id, reuse_key, f"-{days} days"),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
     def list_interrupted_durable_agent_runs(self) -> list[dict[str, object]]:
         """Return durable turns that did not reach a terminal result."""
         with self._connect() as connection:

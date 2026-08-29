@@ -139,6 +139,8 @@ class AgentSubmitter(Protocol):
         require_artifact: bool = False,
         automated: bool = False,
         timeout_seconds: int | None = None,
+        reuse_key: str | None = None,
+        reuse_mention_line: str | None = None,
     ) -> Awaitable[object]: ...
 
 
@@ -275,6 +277,7 @@ class AnomalyAlertResponder:
                     show_status=False,
                     require_artifact=True,
                     automated=True,
+                    reuse_key="analytics:" + repr(sorted(alert.key() for alert, _ in monetisation)),
                 )
         finally:
             self._in_flight.discard(trigger_ts)
@@ -634,6 +637,7 @@ Reserve enough time to package artifacts and return the final response before th
 
 When no reusable Slack analysis exists, read `.claude/reusable_analyses/README.md` and any linked
 cases that look similar. Reuse relevant metric definitions, diagnostic cuts, queries, report
-structure, and prior findings where they still apply, while validating the current incident independently.
+structure, and prior findings where they still apply, while validating the current incident
+independently.
 Do not add a case or update the index unless a human explicitly asks for that in this Slack thread.
 """

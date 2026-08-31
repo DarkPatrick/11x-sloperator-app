@@ -192,8 +192,8 @@ def format_slack_mrkdwn(text: str) -> str:
 def extract_project_links_and_clean_body(
     text: str,
     experiments: list[dict[str, Any]],
-) -> tuple[list[str], str]:
-    """Extract project URLs for the intro and remove duplicated identity/link lines."""
+) -> tuple[list[dict[str, Any]], list[str], str]:
+    """Extract linked issue experiments and remove duplicated identity/link lines."""
     project_urls_by_name: dict[str, str] = {}
     standalone_project_urls: list[str] = []
     body_lines: list[str] = []
@@ -220,16 +220,24 @@ def extract_project_links_and_clean_body(
                 project_urls_by_name[str(matching_experiment["name"])] = project_url
             continue
         body_lines.append(line)
+    linked_experiments: list[dict[str, Any]] = []
+    project_urls: list[str] = []
     standalone_urls = iter(standalone_project_urls)
-    project_urls = [
-        project_urls_by_name.get(str(experiment["name"])) or next(standalone_urls, "")
-        for experiment in experiments
-    ]
-    if len(project_urls) != len(experiments):
-        raise ValueError("agent response must contain one project link per experiment")
-    if any(not url for url in project_urls):
-        raise ValueError("agent response must contain one project link per experiment")
-    return project_urls, "\n".join(body_lines).strip()
+    for experiment in experiments:
+        project_url = project_urls_by_name.get(str(experiment["name"]))
+        if project_url is not None:
+            linked_experiments.append(experiment)
+            project_urls.append(project_url)
+    if not linked_experiments:
+        # The single-experiment format historically puts the project URL on a separate line.
+        # It is unambiguous only when exactly one experiment was requested.
+        standalone_url = next(standalone_urls, "")
+        if len(experiments) == 1 and standalone_url:
+            linked_experiments.append(experiments[0])
+            project_urls.append(standalone_url)
+    if not linked_experiments:
+        raise ValueError("agent response must link every experiment mentioned in the issue report")
+    return linked_experiments, project_urls, "\n".join(body_lines).strip()
 
 
 def build_notification_intro(
@@ -316,12 +324,12 @@ class ExperimentConfigResponder:
             LOGGER.info("Experiment config audit passed; suppressing Slack notification")
             return False
         conversation = await client.conversations_open(users=recipient_id)
-        project_urls, clean_body = extract_project_links_and_clean_body(
+        issue_experiments, project_urls, clean_body = extract_project_links_and_clean_body(
             visible_text,
             normalized["experiments"],
         )
         message_text = (
-            f"{build_notification_intro(recipient_id, normalized['experiments'], project_urls)}"
+            f"{build_notification_intro(recipient_id, issue_experiments, project_urls)}"
             f"\n\n{format_slack_mrkdwn(clean_body)}"
         )
         posted = await client.chat_postMessage(

@@ -118,7 +118,7 @@ def test_notification_intro_mentions_starter_and_experiment() -> None:
 
 
 def test_project_links_move_to_intro_and_identity_lines_leave_body() -> None:
-    projects, body = extract_project_links_and_clean_body(
+    issue_experiments, projects, body = extract_project_links_and_clean_body(
         "**[UG Monetization] Test** (id 7890)\n"
         "Проект: https://alice.mu.se/pages/123\n"
         "Админка: https://example.test/7890\n\n"
@@ -126,6 +126,7 @@ def test_project_links_move_to_intro_and_identity_lines_leave_body() -> None:
         [{"id": 7890, "name": "[UG Monetization] Test"}],
     )
 
+    assert issue_experiments == [{"id": 7890, "name": "[UG Monetization] Test"}]
     assert projects == ["https://alice.mu.se/pages/123"]
     assert body == "**Нужно исправить**\nWrong event."
 
@@ -136,7 +137,7 @@ def test_project_links_are_accepted_inside_experiment_headings() -> None:
         {"id": 7874, "name": "[UG Monetization] top propensity"},
     ]
 
-    projects, body = extract_project_links_and_clean_body(
+    issue_experiments, projects, body = extract_project_links_and_clean_body(
         "**[UG Monetization] iOS paywall** — "
         "[проект](https://alice.mu.se/pages/7898) · "
         "[админка](https://www.ultimate-guitar.com/components/ab/experiment/view?id=7898)\n"
@@ -147,11 +148,31 @@ def test_project_links_are_accepted_inside_experiment_headings() -> None:
         experiments,
     )
 
+    assert issue_experiments == experiments
     assert projects == [
         "https://alice.mu.se/pages/7898",
         "https://alice.mu.se/pages/7874",
     ]
     assert body == "**Нужно исправить**\nWrong segments."
+
+
+def test_issue_for_one_of_multiple_experiments_does_not_require_unrelated_link() -> None:
+    experiments = [
+        {"id": 7943, "name": "UG App: reduction in advertising volume (4 iteration)"},
+        {"id": 7916, "name": "UG iOS: flo-paywall for top segment"},
+    ]
+
+    issue_experiments, projects, body = extract_project_links_and_clean_body(
+        "**UG iOS: flo-paywall for top segment** — "
+        "[проект](https://alice.mu.se/pages/7916) · "
+        "[админка](https://www.ultimate-guitar.com/components/ab/experiment/view?id=7916)\n\n"
+        "**Нужно исправить**\nWrong branches.",
+        experiments,
+    )
+
+    assert issue_experiments == [experiments[1]]
+    assert projects == ["https://alice.mu.se/pages/7916"]
+    assert body == "**Нужно исправить**\nWrong branches."
 
 
 @pytest.mark.asyncio

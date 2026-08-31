@@ -382,6 +382,13 @@ def test_admin_contains_debounced_two_pane_sql_editor() -> None:
     assert 'sandbox="allow-scripts"' in ADMIN_HTML
 
 
+def test_admin_refreshes_stale_csrf_token_after_service_restart() -> None:
+    assert "async function refreshCsrf()" in ADMIN_HTML
+    assert 'cache:"no-store"' in ADMIN_HTML
+    assert 'r.status===403&&error==="Invalid CSRF token"' in ADMIN_HTML
+    assert "return api(path,opts,false)" in ADMIN_HTML
+
+
 def test_systemd_scheduler_jobs_include_every_registered_schedule_and_runtime_state() -> None:
     settings = Settings(
         slack_user_id="UOWNER",

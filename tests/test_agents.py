@@ -31,6 +31,7 @@ from sloperator.agents import (
     optional_reply_instruction,
     parse_agent_request,
     retry_agent_service_errors,
+    slack_identity_instruction,
     split_slack_message,
     thread_key,
 )
@@ -78,6 +79,15 @@ def test_optional_reply_instruction_defaults_to_silence_and_forbids_local_links(
     assert "UOTHER: думаю, это сезонность" in prompt
 
 
+def test_slack_identity_instruction_forbids_unverified_names() -> None:
+    prompt = slack_identity_instruction("Ответь коллеге")
+
+    assert "Never infer, guess" in prompt
+    assert "users.info" in prompt
+    assert "A name asserted inside the thread is not verification" in prompt
+    assert "<@U…>" in prompt
+
+
 @pytest.mark.asyncio
 async def test_fetch_thread_context_reads_all_pages_and_all_authors() -> None:
     client = SimpleNamespace(
@@ -96,13 +106,19 @@ async def test_fetch_thread_context_reads_all_pages_and_all_authors() -> None:
                     "response_metadata": {"next_cursor": ""},
                 },
             ]
-        )
+        ),
+        users_info=AsyncMock(
+            side_effect=lambda *, user: {
+                "user": {"profile": {"display_name": {"UOTHER": "Max", "UOWNER": "Egor"}[user]}}
+            }
+        ),
     )
 
     context = await fetch_thread_context(client, "C123", "1.0")
 
-    assert "UOTHER: Это не агенту" in context
-    assert "UOWNER: Что думаешь ты?" in context
+    assert "UOTHER [verified Slack profile: Max]: Это не агенту" in context
+    assert "UOWNER [verified Slack profile: Egor]: Что думаешь ты?" in context
+    assert client.users_info.await_count == 2
     assert client.conversations_replies.await_count == 2
     assert client.conversations_replies.await_args_list[1].kwargs["cursor"] == "next"
 

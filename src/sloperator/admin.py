@@ -273,7 +273,7 @@ title="SQL visualizations"></iframe></details></section></section></main>
 <div class="prompt-modal-body"><div id="run-details"></div></div>
 </section></div>
 <script>
-const csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
+let csrf="__CSRF__"; const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 ">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function preferredTheme(){const saved=localStorage.getItem("sloperator-theme");
 return saved|| (matchMedia("(prefers-color-scheme: light)").matches?"light":"dark")}
@@ -285,8 +285,13 @@ function setTab(tab){if(!["agents","cron","triggers","codex","sql"].includes(tab
 for(const name of ["agents","cron","triggers","codex","sql"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
 document.getElementById("tab-"+name).classList.toggle("active",name===tab)}
 if(location.hash!=="#"+tab)history.replaceState(null,"","#"+tab)}
-async function api(path,opts={}){opts.headers={...(opts.headers||{}),"X-Admin-CSRF":csrf};
-const r=await fetch("/admin/api"+path,opts);if(!r.ok)throw new Error(await r.text());return r.json()}
+async function refreshCsrf(){const page=await fetch(location.pathname,{cache:"no-store"});
+if(!page.ok)return false;const html=await page.text();const match=html.match(/let csrf="([^"]+)"/);
+if(!match)return false;csrf=match[1];return true}
+async function api(path,opts={},retry=true){opts.headers={...(opts.headers||{}),"X-Admin-CSRF":csrf};
+const r=await fetch("/admin/api"+path,opts);if(r.ok)return r.json();const error=await r.text();
+if(retry&&r.status===403&&error==="Invalid CSRF token"&&await refreshCsrf())return api(path,opts,false);
+throw new Error(error)}
 async function action(path,body){await api(path,{method:"POST",headers:{"Content-Type":"application/json"},
 body:JSON.stringify(body||{})});await load()}
 function sessionCard(s){const k=encodeURIComponent(s.channel_id)+"/"+encodeURIComponent(s.thread_ts);

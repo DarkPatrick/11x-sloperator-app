@@ -435,6 +435,23 @@ def split_slack_message(text: str, limit: int = 3_000) -> list[str]:
     return chunks
 
 
+SLACK_SUMMARY_FIELD_RE = re.compile(
+    r"^`(?P<field>Alert|Cause|Confidence|Impact|Next): (?P<value>[^`]+)`$"
+)
+
+
+def normalize_slack_markdown(text: str) -> str:
+    """Remove accidental full-line code styling from standard summary fields."""
+    normalized: list[str] = []
+    for line in text.splitlines():
+        match = SLACK_SUMMARY_FIELD_RE.fullmatch(line.strip())
+        if match is None:
+            normalized.append(line)
+        else:
+            normalized.append(f"**{match.group('field')}:** {match.group('value')}")
+    return "\n".join(normalized)
+
+
 def extract_artifact(text: str, workspace: Path) -> tuple[str, Path | None]:
     """Remove and validate one ZIP marker or render one reused-analysis marker."""
     artifact: Path | None = None
@@ -1474,6 +1491,7 @@ class AgentOrchestrator:
         disable_link_previews: bool = False,
     ) -> None:
         response, artifact = extract_artifact(text, self.settings.agent_workspace)
+        response = normalize_slack_markdown(response)
         for chunk in split_slack_message(response):
             # Agent CLIs return standard Markdown. Slack's legacy `text`
             # parameter expects its incompatible `mrkdwn` dialect, while

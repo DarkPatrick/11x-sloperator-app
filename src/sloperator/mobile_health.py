@@ -177,13 +177,16 @@ from the Slack response:
 
 For a fresh investigation, reply in this Slack thread with a TL;DR only, not a report. For each
 affected metric, use one bold
-Slack header line in the form `*platform | metric name*`, followed by exactly these five one-line
+Slack header line in the form `**platform | metric name**`, followed by exactly these five one-line
 fields in this order, with no sub-bullets and no extra prose under or between them:
-`Alert: <real, noise, mean-reversion, or transient — one plain sentence>`
-`Cause: <underlying issue, or "none found — alert fully explained by the above">`
-`Confidence: <high/medium/low> (<one short reason>)`
-`Impact: <one concrete number> (<optional one-clause context>)`
-`Next: <one sentence containing 1-2 concrete next steps>`
+**Alert:** <real, noise, mean-reversion, or transient — one plain sentence>
+**Cause:** <underlying issue, or "none found — alert fully explained by the above">
+**Confidence:** <high/medium/low> (<one short reason>)
+**Impact:** <one concrete number> (<optional one-clause context>)
+**Next:** <one sentence containing 1-2 concrete next steps>
+
+The bold field labels above are Markdown formatting, not code. Never wrap a complete field line in
+backticks or a code fence.
 
 The first Slack-facing response containing the analysis must begin with exactly this mention line:
 `<@U0149RHN7D3> <@U09CYCGN6H4> <@U0525MDT0MN>`

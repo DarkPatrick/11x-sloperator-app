@@ -35,6 +35,24 @@ from sloperator.experiment_config_check import (
     ExperimentConfigResponder,
     is_experiment_config_trigger,
 )
+from sloperator.experiment_design_planner import (
+    InvalidDesignResult,
+    is_preparation_result,
+    is_review_result,
+    parse_preparation_result,
+    publish_failure,
+    run_review,
+    task_key_from_review_result,
+)
+from sloperator.experiment_design_planner import (
+    cancel_task as cancel_experiment_design,
+)
+from sloperator.experiment_design_planner import (
+    publish_notification as publish_experiment_design,
+)
+from sloperator.experiment_design_planner import (
+    run_daily as run_daily_experiment_design,
+)
 from sloperator.experiment_finalizer import (
     InvalidFinalizationNotification,
     cancel_task,
@@ -77,6 +95,7 @@ async def serve(settings: Settings) -> None:
         settings.database_path.parent / "automation-controls.json"
     )
     finalizer_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["experiment-finalizer"]
+    experiment_design_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["experiment-design-planner"]
     error_audit_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["automation-error-audit"]
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
@@ -143,6 +162,7 @@ async def serve(settings: Settings) -> None:
     archive_task: asyncio.Task[None] | None = None
     vpn_task: asyncio.Task[None] | None = None
     experiment_finalizer_task: asyncio.Task[None] | None = None
+    experiment_design_task: asyncio.Task[None] | None = None
     automation_error_audit_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
@@ -198,6 +218,61 @@ async def serve(settings: Settings) -> None:
                     external_session_id=run.session_id,
                     result_text=run.text,
                 )
+        recovered_design_reviews = await orchestrator.resume_interrupted_headless(
+            settings.experiment_design_timeout_seconds,
+            job_name="experiment-design-reviewer",
+            accept_result=is_review_result,
+        )
+        for run in recovered_design_reviews:
+            try:
+                task_key = task_key_from_review_result(run.text)
+                await publish_experiment_design(
+                    app.client, orchestrator, settings, run, task_key
+                )
+            except InvalidDesignResult as error:
+                if str(error).startswith("Experiment design automation failed:"):
+                    await publish_failure(app.client, settings, str(error))
+                status = "failed"
+                last_error: str | None = repr(error)
+            else:
+                status = "completed"
+                last_error = None
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status=status,
+                    external_session_id=run.session_id,
+                    result_text=run.text,
+                    last_error=last_error,
+                )
+        recovered_design_preparations = await orchestrator.resume_interrupted_headless(
+            settings.experiment_design_timeout_seconds,
+            job_name="experiment-design-preparer",
+            accept_result=is_preparation_result,
+        )
+        for run in recovered_design_preparations:
+            try:
+                prepared = parse_preparation_result(run.text)
+            except InvalidDesignResult as error:
+                if str(error).startswith("Experiment design automation failed:"):
+                    await publish_failure(app.client, settings, str(error))
+                status = "failed"
+                last_error = repr(error)
+            else:
+                status = "completed"
+                last_error = None
+                if prepared is not None:
+                    await run_review(app.client, orchestrator, settings, *prepared)
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status=status,
+                    external_session_id=run.session_id,
+                    result_text=run.text,
+                    last_error=last_error,
+                )
         recovered_audits = await orchestrator.resume_interrupted_headless(
             TIMEOUT_SECONDS,
             job_name="automation-error-audit",
@@ -240,6 +315,18 @@ async def serve(settings: Settings) -> None:
                 ),
                 name="daily-experiment-finalizer",
             )
+        if settings.experiment_design_enabled:
+            experiment_design_task = asyncio.create_task(
+                run_daily_experiment_design(
+                    app.client,
+                    orchestrator,
+                    settings,
+                    lambda: not automation_controls.disabled(
+                        "crons", experiment_design_job.display_name
+                    ),
+                ),
+                name="daily-experiment-design-planner",
+            )
         automation_error_audit_task = asyncio.create_task(
             run_daily_automation_error_audit(
                 app.client,
@@ -267,6 +354,7 @@ async def serve(settings: Settings) -> None:
             with suppress(asyncio.CancelledError):
                 await vpn_task
         await cancel_task(experiment_finalizer_task)
+        await cancel_experiment_design(experiment_design_task)
         await cancel_automation_error_audit(automation_error_audit_task)
         await orchestrator.close()
         await slack_handler.close_async()  # type: ignore[no-untyped-call]

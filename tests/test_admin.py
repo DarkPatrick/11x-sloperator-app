@@ -407,6 +407,11 @@ def test_systemd_scheduler_jobs_include_every_registered_schedule_and_runtime_st
             "command": "embedded asyncio scheduler · active · PID 123",
         },
         {
+            "name": "experiment-design-planner (sloperator.service)",
+            "schedule": "daily 15:00 Asia/Nicosia",
+            "command": "embedded asyncio scheduler · active · PID 123",
+        },
+        {
             "name": "automation-error-audit (sloperator.service)",
             "schedule": "daily 14:00 Asia/Nicosia",
             "command": "embedded asyncio scheduler · active · PID 123",

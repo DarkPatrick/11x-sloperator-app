@@ -59,6 +59,11 @@ class Settings:
     experiment_finalizer_hour: int = 12
     experiment_finalizer_timeout_seconds: int = 7_200
     experiment_finalizer_channel: str = "C07A9FDQ14P"
+    experiment_design_enabled: bool = True
+    experiment_design_timezone: str = "Asia/Nicosia"
+    experiment_design_hour: int = 15
+    experiment_design_timeout_seconds: int = 7_200
+    experiment_design_channel: str = "C07A9FDQ14P"
     experiment_config_timeout_seconds: int = 7_200
     mobile_health_timeout_seconds: int = 3_600
     ldap_username: str | None = None
@@ -129,6 +134,15 @@ class Settings:
         experiment_finalizer_channel = os.environ.get(
             "EXPERIMENT_FINALIZER_CHANNEL", "C07A9FDQ14P"
         ).strip()
+        experiment_design_enabled = os.environ.get(
+            "EXPERIMENT_DESIGN_ENABLED", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        experiment_design_timezone = os.environ.get(
+            "EXPERIMENT_DESIGN_TIMEZONE", "Asia/Nicosia"
+        ).strip()
+        experiment_design_channel = os.environ.get(
+            "EXPERIMENT_DESIGN_CHANNEL", "C07A9FDQ14P"
+        ).strip()
         mobile_health_timeout_seconds = int(os.environ.get("MOBILE_HEALTH_TIMEOUT_SECONDS", "3600"))
         ldap_username = os.environ.get("LDAP_USERNAME")
         ldap_password = os.environ.get("LDAP_PASSWORD")
@@ -163,6 +177,10 @@ class Settings:
             experiment_finalizer_hour = int(os.environ.get("EXPERIMENT_FINALIZER_HOUR", "12"))
             experiment_finalizer_timeout_seconds = int(
                 os.environ.get("EXPERIMENT_FINALIZER_TIMEOUT_SECONDS", "7200")
+            )
+            experiment_design_hour = int(os.environ.get("EXPERIMENT_DESIGN_HOUR", "15"))
+            experiment_design_timeout_seconds = int(
+                os.environ.get("EXPERIMENT_DESIGN_TIMEOUT_SECONDS", "7200")
             )
             experiment_config_timeout_seconds = int(
                 os.environ.get("EXPERIMENT_CONFIG_TIMEOUT_SECONDS", "7200")
@@ -227,6 +245,20 @@ class Settings:
             ) from error
         if not experiment_finalizer_channel.startswith("C"):
             raise ConfigurationError("EXPERIMENT_FINALIZER_CHANNEL must be a Slack channel ID")
+        if not 0 <= experiment_design_hour <= 23:
+            raise ConfigurationError("EXPERIMENT_DESIGN_HOUR must be between 0 and 23")
+        if not 300 <= experiment_design_timeout_seconds <= 86_400:
+            raise ConfigurationError(
+                "EXPERIMENT_DESIGN_TIMEOUT_SECONDS must be between 300 and 86400"
+            )
+        try:
+            ZoneInfo(experiment_design_timezone)
+        except (KeyError, ValueError) as error:
+            raise ConfigurationError(
+                "EXPERIMENT_DESIGN_TIMEZONE must be a valid IANA timezone"
+            ) from error
+        if not experiment_design_channel.startswith("C"):
+            raise ConfigurationError("EXPERIMENT_DESIGN_CHANNEL must be a Slack channel ID")
         if not 1 <= vpn_proxy_port <= 65_535:
             raise ConfigurationError("SLOPERATOR_VPN_PROXY_PORT must be between 1 and 65535")
         if not anomaly_alert_channel.startswith("C"):
@@ -286,6 +318,11 @@ class Settings:
             experiment_finalizer_hour=experiment_finalizer_hour,
             experiment_finalizer_timeout_seconds=experiment_finalizer_timeout_seconds,
             experiment_finalizer_channel=experiment_finalizer_channel,
+            experiment_design_enabled=experiment_design_enabled,
+            experiment_design_timezone=experiment_design_timezone,
+            experiment_design_hour=experiment_design_hour,
+            experiment_design_timeout_seconds=experiment_design_timeout_seconds,
+            experiment_design_channel=experiment_design_channel,
             experiment_config_timeout_seconds=experiment_config_timeout_seconds,
             mobile_health_timeout_seconds=mobile_health_timeout_seconds,
             ldap_username=ldap_username,

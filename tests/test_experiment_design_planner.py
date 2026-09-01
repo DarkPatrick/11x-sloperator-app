@@ -23,15 +23,15 @@ from sloperator.experiment_design_planner import (
 )
 
 
-def test_next_run_is_daily_at_cyprus_wall_clock_and_preserves_dst() -> None:
+def test_next_run_is_weekdays_at_cyprus_wall_clock_and_preserves_dst() -> None:
     friday_after_run = dt.datetime(2026, 7, 31, 13, 0, tzinfo=dt.UTC)
     saturday_before_run = dt.datetime(2026, 8, 1, 10, 0, tzinfo=dt.UTC)
 
     assert next_run_at(friday_after_run) == dt.datetime(
-        2026, 8, 1, 15, 0, tzinfo=ZoneInfo("Asia/Nicosia")
+        2026, 8, 3, 15, 0, tzinfo=ZoneInfo("Asia/Nicosia")
     )
     assert next_run_at(saturday_before_run) == dt.datetime(
-        2026, 8, 1, 15, 0, tzinfo=ZoneInfo("Asia/Nicosia")
+        2026, 8, 3, 15, 0, tzinfo=ZoneInfo("Asia/Nicosia")
     )
 
 

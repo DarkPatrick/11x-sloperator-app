@@ -47,7 +47,7 @@ EMBEDDED_SCHEDULED_JOBS = (
         job_name="experiment-design-planner",
         display_name="experiment-design-planner (sloperator.service)",
         schedule=lambda settings: (
-            f"daily {settings.experiment_design_hour:02d}:00 "
+            f"weekdays Mon-Fri {settings.experiment_design_hour:02d}:00 "
             f"{settings.experiment_design_timezone}"
         ),
         logger_name="sloperator.experiment_design_planner",
@@ -56,7 +56,7 @@ EMBEDDED_SCHEDULED_JOBS = (
         completed_message="Experiment design run completed",
         prompt_source="sloperator.experiment_design_planner.PREPARATION_PROMPT",
         condition=(
-            "One oldest eligible Reach & Impact / Experiment design task per day; "
+            "One oldest eligible Reach & Impact / Experiment design task per weekday; "
             "silent when none"
         ),
         prompt=PREPARATION_PROMPT,

@@ -1138,6 +1138,10 @@ class AgentOrchestrator:
                     continue_provider,
                     context="scheduled agent turn final response",
                 )
+            if not accept_result(result.text):
+                raise AgentExecutionError(
+                    "Scheduled agent did not return an accepted terminal result"
+                )
         except asyncio.CancelledError:
             interrupted_status = (
                 "cancelled" if key in self._manual_cancellations else "interrupted"

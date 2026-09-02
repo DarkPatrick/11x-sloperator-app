@@ -16,12 +16,14 @@ class EmbeddedScheduledJob:
     """Metadata shared by the runtime controls and the admin UI."""
 
     job_name: str
+    run_job_names: tuple[str, ...]
     display_name: str
     schedule: Callable[[Settings], str]
     logger_name: str
     scheduled_prefix: str
     started_message: str
     completed_message: str
+    failed_message: str
     prompt_source: str
     condition: str
     prompt: str
@@ -30,6 +32,7 @@ class EmbeddedScheduledJob:
 EMBEDDED_SCHEDULED_JOBS = (
     EmbeddedScheduledJob(
         job_name="experiment-finalizer",
+        run_job_names=("experiment-finalizer",),
         display_name="experiment-finalizer (sloperator.service)",
         schedule=lambda settings: (
             f"weekdays Mon-Fri {settings.experiment_finalizer_hour:02d}:00 "
@@ -39,12 +42,14 @@ EMBEDDED_SCHEDULED_JOBS = (
         scheduled_prefix="Next experiment finalizer run scheduled for ",
         started_message="Starting scheduled experiment finalizer run",
         completed_message="Experiment finalizer run completed",
+        failed_message="Could not start the daily experiment finalizer",
         prompt_source="sloperator.experiment_finalizer.FINALIZATION_PROMPT",
         condition="One autonomous experiment-finalisation agent run per weekday",
         prompt=FINALIZATION_PROMPT,
     ),
     EmbeddedScheduledJob(
         job_name="experiment-design-planner",
+        run_job_names=("experiment-design-preparer", "experiment-design-reviewer"),
         display_name="experiment-design-planner (sloperator.service)",
         schedule=lambda settings: (
             f"weekdays Mon-Fri {settings.experiment_design_hour:02d}:00 "
@@ -54,6 +59,7 @@ EMBEDDED_SCHEDULED_JOBS = (
         scheduled_prefix="Next experiment design run scheduled for ",
         started_message="Starting scheduled experiment design run",
         completed_message="Experiment design run completed",
+        failed_message="Could not complete the daily experiment design run",
         prompt_source="sloperator.experiment_design_planner.PREPARATION_PROMPT",
         condition=(
             "One oldest eligible Reach & Impact / Experiment design task per weekday; "
@@ -63,12 +69,14 @@ EMBEDDED_SCHEDULED_JOBS = (
     ),
     EmbeddedScheduledJob(
         job_name="automation-error-audit",
+        run_job_names=("automation-error-audit",),
         display_name="automation-error-audit (sloperator.service)",
         schedule=lambda _settings: f"daily {HOUR:02d}:00 {TIMEZONE}",
         logger_name="sloperator.automation_error_audit",
         scheduled_prefix="Next automation error audit scheduled for ",
         started_message="Starting scheduled automation error audit",
         completed_message="Automation error audit completed",
+        failed_message="Could not complete the daily automation error audit",
         prompt_source="sloperator.automation_error_audit.AUDIT_PROMPT",
         condition="Daily read-only audit; sends a DM only when failures are found",
         prompt=AUDIT_PROMPT,

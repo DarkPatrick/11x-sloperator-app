@@ -1038,13 +1038,14 @@ def _one_systemd_scheduler_history(
         job.scheduled_prefix: ("scheduled: ", "scheduled"),
         job.started_message: ("started", "started"),
         job.completed_message: ("completed", "completed"),
+        job.failed_message: ("failed", "failed"),
     }
     rows: list[dict[str, str]] = []
     pending_starts: list[int] = []
     durable_statuses = {
         str(run["created_at"]): str(run["status"])
         for run in scheduled_runs or []
-        if run.get("channel_name") == job.job_name
+        if run.get("channel_name") in job.run_job_names
     }
     for line in result.stdout.splitlines():
         try:
@@ -1094,11 +1095,11 @@ def _one_systemd_scheduler_history(
             pending_starts.clear()
             pending_starts.append(len(rows))
             rows.append(row)
-        elif status == "completed" and pending_starts:
-            # Completion closes the latest run; it is not a second process.
+        elif status in {"completed", "failed"} and pending_starts:
+            # A terminal event closes the latest run; it is not a second process.
             started_row = rows[pending_starts.pop()]
             started_row["command"] = row["command"]
-            started_row["status"] = "completed"
+            started_row["status"] = status
         else:
             rows.append(row)
     return list(reversed(rows))

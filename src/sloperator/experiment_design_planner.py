@@ -24,7 +24,7 @@ from sloperator.config import Settings
 LOGGER = logging.getLogger(__name__)
 NO_OP_RESULT = "No eligible experiment-design task was found."
 PREPARED_RE = re.compile(
-    r"^DESIGN_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN-\d+)$"
+    r"DESIGN_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN-\d+)"
 )
 FAILURE_PREFIX = "Experiment design automation failed:"
 TASK_LINK_RE = re.compile(r"mu--se\.atlassian\.net/browse/(?P<task>UMN-\d+)")
@@ -170,15 +170,27 @@ class InvalidDesignResult(ValueError):
 
 
 def parse_preparation_result(text: str) -> tuple[str, str] | None:
-    """Return the prepared task/epic pair, or ``None`` for a clean no-op."""
+    """Extract one unambiguous terminal result despite surrounding agent prose."""
     stripped = text.strip()
-    if stripped.startswith(NO_OP_RESULT):
+    prepared = {
+        (match.group("task"), match.group("epic"))
+        for match in PREPARED_RE.finditer(stripped)
+    }
+    no_op = any(line.strip() == NO_OP_RESULT for line in stripped.splitlines())
+    failures = [
+        line.strip()
+        for line in stripped.splitlines()
+        if line.strip().startswith(FAILURE_PREFIX)
+    ]
+    terminal_kinds = bool(prepared) + no_op + bool(failures)
+    if terminal_kinds > 1 or len(prepared) > 1:
+        raise InvalidDesignResult("Preparation agent returned ambiguous terminal markers")
+    if no_op:
         return None
-    match = PREPARED_RE.fullmatch(stripped)
-    if match is not None:
-        return match.group("task"), match.group("epic")
-    if stripped.startswith(FAILURE_PREFIX):
-        raise InvalidDesignResult(stripped)
+    if prepared:
+        return next(iter(prepared))
+    if failures:
+        raise InvalidDesignResult(failures[0])
     raise InvalidDesignResult("Preparation agent returned no valid terminal marker")
 
 
@@ -192,15 +204,26 @@ def is_preparation_result(text: str) -> bool:
 
 
 def normalize_review_notification(text: str, task_key: str) -> str:
-    """Validate the compact Slack notification produced by the reviewer."""
+    """Extract and validate the single Slack-ready line produced by the reviewer."""
     stripped = text.strip()
-    if stripped.startswith(FAILURE_PREFIX):
-        return stripped
-    if "\n" in stripped or f"browse/{task_key}" not in stripped:
+    failure_lines = [
+        line.strip()
+        for line in stripped.splitlines()
+        if line.strip().startswith(FAILURE_PREFIX)
+    ]
+    candidates = {
+        line.strip()
+        for line in stripped.splitlines()
+        if f"browse/{task_key}" in line
+        and ("check" in line.lower() or "провер" in line.lower())
+    }
+    if failure_lines and candidates:
+        raise InvalidDesignResult("Review agent returned ambiguous terminal results")
+    if failure_lines:
+        return failure_lines[0]
+    if len(candidates) != 1:
         raise InvalidDesignResult("Review agent returned no valid compact task notification")
-    if "check" not in stripped.lower() and "провер" not in stripped.lower():
-        raise InvalidDesignResult("Review notification does not ask assignees to check the work")
-    return stripped
+    return next(iter(candidates))
 
 
 def review_result_validator(task_key: str) -> Callable[[str], bool]:

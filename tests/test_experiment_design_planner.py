@@ -70,15 +70,23 @@ def test_review_prompt_requires_independent_correction_and_final_actions() -> No
     assert "Do not send Slack messages yourself" in prompt
 
 
-def test_preparation_result_parser_is_strict() -> None:
+def test_preparation_result_parser_extracts_unambiguous_marker_from_agent_prose() -> None:
     assert parse_preparation_result(NO_OP_RESULT) is None
     assert parse_preparation_result(
         "DESIGN_PREPARED: UMN-12312 | UMN-12310"
     ) == ("UMN-12312", "UMN-12310")
     assert is_preparation_result("DESIGN_PREPARED: UMN-12312 | UMN-12310")
+    assert parse_preparation_result(
+        "DESIGN_PREPARED: UMN-12520 | UMN-12517\n\n"
+        "🧭 Skill: ug-experiment-design-power\n📚 Context: Data warehouse"
+    ) == ("UMN-12520", "UMN-12517")
     assert not is_preparation_result("Still working")
     with pytest.raises(InvalidDesignResult):
         parse_preparation_result("Done")
+    with pytest.raises(InvalidDesignResult, match="ambiguous"):
+        parse_preparation_result(
+            "DESIGN_PREPARED: UMN-1 | UMN-2\nDESIGN_PREPARED: UMN-3 | UMN-4"
+        )
 
 
 async def test_no_candidate_finishes_without_slack_or_second_agent() -> None:
@@ -161,11 +169,10 @@ def test_review_notification_rejects_wrong_task_or_verbose_output() -> None:
         normalize_review_notification(
             "Please check https://mu--se.atlassian.net/browse/UMN-99999", "UMN-12312"
         )
-    with pytest.raises(InvalidDesignResult):
-        normalize_review_notification(
-            "Please check https://mu--se.atlassian.net/browse/UMN-12312\nAudit: done",
-            "UMN-12312",
-        )
+    assert normalize_review_notification(
+        "Internal note\nPlease check https://mu--se.atlassian.net/browse/UMN-12312\nAudit: done",
+        "UMN-12312",
+    ) == "Please check https://mu--se.atlassian.net/browse/UMN-12312"
 
 
 def test_recovered_review_result_extracts_the_linked_task() -> None:

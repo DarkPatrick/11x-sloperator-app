@@ -519,3 +519,50 @@ def test_systemd_scheduler_history_uses_durable_recovery_status() -> None:
         rows = _systemd_scheduler_history(durable)
 
     assert [row["status"] for row in rows] == ["completed"]
+
+
+def test_design_scheduler_history_uses_preparer_durable_status() -> None:
+    started = {
+        "__REALTIME_TIMESTAMP": "1000000",
+        "MESSAGE": (
+            "INFO sloperator.experiment_design_planner: "
+            "Starting scheduled experiment design run"
+        ),
+    }
+    durable = [{
+        "channel_name": "experiment-design-preparer",
+        "created_at": "1970-01-01 00:00:01",
+        "status": "failed",
+    }]
+    with patch("sloperator.admin.subprocess.run") as run:
+        run.return_value.stdout = json.dumps(started)
+
+        rows = _systemd_scheduler_history(durable)
+
+    design_rows = [row for row in rows if "experiment-design-planner" in row["command"]]
+    assert [row["status"] for row in design_rows] == ["failed"]
+
+
+def test_systemd_scheduler_history_closes_start_on_failure() -> None:
+    started = {
+        "__REALTIME_TIMESTAMP": "1000000",
+        "MESSAGE": (
+            "INFO sloperator.experiment_design_planner: "
+            "Starting scheduled experiment design run"
+        ),
+    }
+    failed = {
+        "__REALTIME_TIMESTAMP": "2000000",
+        "MESSAGE": (
+            "ERROR sloperator.experiment_design_planner: "
+            "Could not complete the daily experiment design run"
+        ),
+    }
+    with patch("sloperator.admin.subprocess.run") as run:
+        run.return_value.stdout = "\n".join((json.dumps(started), json.dumps(failed)))
+
+        rows = _systemd_scheduler_history()
+
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["command"] == "sloperator.service · experiment-design-planner · failed"

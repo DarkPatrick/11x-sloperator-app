@@ -29,6 +29,7 @@ from sloperator.automation_controls import AutomationControls
 from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
 from sloperator.experiment_config_check import build_experiment_config_prompt
+from sloperator.experiment_design_planner import review_prompt
 from sloperator.mobile_health import MobileCriticalMetric, build_mobile_health_agent_prompt
 from sloperator.payment_layer import build_payment_layer_agent_prompt
 from sloperator.scheduled_jobs import (
@@ -495,7 +496,7 @@ if(dow!=="*"&&!cronFieldValues(dow,0,7).has(date.getUTCDay())&&
 if(job.command.includes("--only-at"))return 1;
 return cronFieldValues(fields[0],0,59).size*cronFieldValues(fields[1],0,23).size}
 function automationButton(kind,item){const verb=item.enabled?"stop":"start",label=item.enabled?"Stop":"Start";
-return `<button class="${item.enabled?"danger":""}" onclick="event.stopPropagation();action('/automations/${kind}/${encodeURIComponent(item.name||item.key)}/${verb}')">${label}</button>`}
+return `<button class="${item.enabled?"danger":""}" onclick="event.stopPropagation();action('/automations/${kind}/${encodeURIComponent(item.key||item.name)}/${verb}')">${label}</button>`}
 window.calendarRunGroups={};
 window.calendarRunSequence=0;
 function resetCalendarRuns(kind){for(const key of Object.keys(window.calendarRunGroups))
@@ -747,12 +748,43 @@ def _cron_agent_prompt_definitions(jobs: list[dict[str, Any]]) -> list[dict[str,
         job = by_name.get(scheduled_job.display_name)
         if job is None:
             continue
+        common = {
+            "key": job["name"],
+            "schedule": job["schedule"],
+            "enabled": job["enabled"],
+        }
+        if scheduled_job.job_name == "experiment-design-planner":
+            definitions.extend(
+                (
+                    {
+                        **common,
+                        "name": f"{job['name']} · preparation",
+                        "source": scheduled_job.prompt_source,
+                        "condition": (
+                            "First pass: select and prepare one eligible experiment design; "
+                            "stop silently when none is eligible"
+                        ),
+                        "prompt": scheduled_job.prompt,
+                    },
+                    {
+                        **common,
+                        "name": f"{job['name']} · independent review",
+                        "source": "sloperator.experiment_design_planner.review_prompt",
+                        "condition": (
+                            "Second pass: launched only after preparation succeeds; independently "
+                            "verify and correct the selected design, then complete Jira and Slack"
+                        ),
+                        "prompt": review_prompt(
+                            "{{ calculation task key }}", "{{ epic key }}"
+                        ),
+                    },
+                )
+            )
+            continue
         definitions.append(
             {
+                **common,
                 "name": job["name"],
-                "key": job["name"],
-                "schedule": job["schedule"],
-                "enabled": job["enabled"],
                 "source": scheduled_job.prompt_source,
                 "condition": scheduled_job.condition,
                 "prompt": scheduled_job.prompt,

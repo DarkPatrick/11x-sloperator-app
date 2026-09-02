@@ -283,6 +283,7 @@ def test_cron_agent_prompt_cards_share_the_slack_trigger_component() -> None:
 
     assert 'id="cron-prompts"' in ADMIN_HTML
     assert "function renderPromptCards(rootId,items,kind)" in ADMIN_HTML
+    assert "encodeURIComponent(item.key||item.name)" in ADMIN_HTML
     assert 'renderPromptCards("cron-prompts",d.cron_agent_prompts,"crons")' in ADMIN_HTML
     assert ".trigger-condition code{white-space:normal;overflow-wrap:anywhere" in ADMIN_HTML
     assert prompts[0]["name"] == jobs[0]["name"]
@@ -295,6 +296,28 @@ def test_admin_supports_headless_agent_runs() -> None:
     assert "s.headless" in ADMIN_HTML
     assert "PID ${esc(s.process_id)} + subprocess tree" in ADMIN_HTML
     assert 's.headless?"Prompt and result":"Thread messages"' in ADMIN_HTML
+
+
+def test_admin_lists_both_experiment_design_agent_prompts() -> None:
+    job_name = "experiment-design-planner (sloperator.service)"
+    prompts = _cron_agent_prompt_definitions([
+        {
+            "name": job_name,
+            "schedule": "weekdays Mon-Fri 15:00 Asia/Nicosia",
+            "command": "embedded scheduler",
+            "enabled": True,
+        }
+    ])
+
+    assert [prompt["name"] for prompt in prompts] == [
+        f"{job_name} · preparation",
+        f"{job_name} · independent review",
+    ]
+    assert {prompt["key"] for prompt in prompts} == {job_name}
+    assert "No eligible experiment-design task was found." in prompts[0]["prompt"]
+    assert "{{ calculation task key }}" in prompts[1]["prompt"]
+    assert "add one short English comment" in prompts[1]["prompt"]
+    assert "Do not send Slack messages yourself" in prompts[1]["prompt"]
 
 
 def test_admin_merges_published_scheduled_run_with_its_slack_session() -> None:

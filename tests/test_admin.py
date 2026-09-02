@@ -314,7 +314,7 @@ def test_admin_lists_both_experiment_design_agent_prompts() -> None:
         f"{job_name} · independent review",
     ]
     assert {prompt["key"] for prompt in prompts} == {job_name}
-    assert "No eligible experiment-design task was found." in prompts[0]["prompt"]
+    assert "stops before launching an agent" in prompts[0]["prompt"]
     assert "{{ calculation task key }}" in prompts[1]["prompt"]
     assert "add one short English comment" in prompts[1]["prompt"]
     assert "Do not send Slack messages yourself" in prompts[1]["prompt"]

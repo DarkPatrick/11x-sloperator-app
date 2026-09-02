@@ -6,7 +6,7 @@ import asyncio
 import datetime as dt
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import replace
 from typing import Protocol
@@ -20,12 +20,16 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
 from sloperator.config import Settings
+from sloperator.experiment_design_selector import (
+    DesignCandidate,
+    JiraRestReader,
+    SelectionError,
+    select_candidate,
+)
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_RESULT = "No eligible experiment-design task was found."
-PREPARED_RE = re.compile(
-    r"DESIGN_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN-\d+)"
-)
+PREPARED_RE = re.compile(r"DESIGN_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN-\d+)")
 FAILURE_PREFIX = "Experiment design automation failed:"
 TASK_LINK_RE = re.compile(r"mu--se\.atlassian\.net/browse/(?P<task>UMN-\d+)")
 
@@ -80,22 +84,40 @@ calculation helper, Confluence builder, and post-write verification. The schedul
 authorises the Redash and Confluence writes required by that skill for the selected task. Preserve
 unrelated page content and other iterations.
 
+Sloperator selects the Jira candidate deterministically before launching you. Do not search for or
+substitute another candidate. The exact selected keys will be appended to this prompt at runtime.
+When no candidate is eligible, Sloperator stops before launching an agent, so this prompt is never
+used for an empty selection.
+
 {SELECTION_RULES}
 
 Execution:
-1. If no eligible task exists, make no Redash, Confluence, Jira, or Slack writes and return exactly
-   `{NO_OP_RESULT}` with no other text.
-2. For the selected calculation task, resolve the correct project page and the matching iteration.
+1. For the selected calculation task, resolve the correct project page and the matching iteration.
    Use the skill's strict formats to fully calculate, build, and populate both `Reach & Impact` and
    `Experiment design`. Follow the skill's monetisation-first defaults, mature-cohort rules, exact
    metric naming, saved-Redash-query requirements, table builders, and rendered-structure checks.
-3. You are the preparation pass only. Do not comment on Jira, transition any Jira issue, or send a
+2. You are the preparation pass only. Do not comment on Jira, transition any Jira issue, or send a
    Slack message. Leave those actions to an independent reviewer.
-4. Re-fetch the page and verify both blocks are non-empty, belong to the selected iteration, contain
+3. Re-fetch the page and verify both blocks are non-empty, belong to the selected iteration, contain
    the required links and strict table structure, and did not remove unrelated content.
-5. On success return exactly `DESIGN_PREPARED: <calculation task key> | <epic key>` on one line.
+4. On success return exactly `DESIGN_PREPARED: <calculation task key> | <epic key>` on one line.
    On failure return one concise line beginning exactly `{FAILURE_PREFIX}`. Do not return progress,
    an audit, calculations, or any other text.
+"""
+
+
+def preparation_prompt(candidate: DesignCandidate) -> str:
+    """Bind the deterministic Jira selection to the preparation agent."""
+    return f"""{PREPARATION_PROMPT}
+
+Authoritative deterministic selection:
+- calculation task: `{candidate.task_key}`
+- paired Pitch task: `{candidate.pitch_key}`
+- epic: `{candidate.epic_key}`
+
+Work only on this exact task, pair, epic, and matching project-page iteration. If any current Jira
+fact contradicts this selection, make no writes and return `{FAILURE_PREFIX} selection changed`.
+Your success marker must contain `{candidate.task_key} | {candidate.epic_key}`.
 """
 
 
@@ -173,14 +195,11 @@ def parse_preparation_result(text: str) -> tuple[str, str] | None:
     """Extract one unambiguous terminal result despite surrounding agent prose."""
     stripped = text.strip()
     prepared = {
-        (match.group("task"), match.group("epic"))
-        for match in PREPARED_RE.finditer(stripped)
+        (match.group("task"), match.group("epic")) for match in PREPARED_RE.finditer(stripped)
     }
     no_op = any(line.strip() == NO_OP_RESULT for line in stripped.splitlines())
     failures = [
-        line.strip()
-        for line in stripped.splitlines()
-        if line.strip().startswith(FAILURE_PREFIX)
+        line.strip() for line in stripped.splitlines() if line.strip().startswith(FAILURE_PREFIX)
     ]
     terminal_kinds = bool(prepared) + no_op + bool(failures)
     if terminal_kinds > 1 or len(prepared) > 1:
@@ -207,15 +226,12 @@ def normalize_review_notification(text: str, task_key: str) -> str:
     """Extract and validate the single Slack-ready line produced by the reviewer."""
     stripped = text.strip()
     failure_lines = [
-        line.strip()
-        for line in stripped.splitlines()
-        if line.strip().startswith(FAILURE_PREFIX)
+        line.strip() for line in stripped.splitlines() if line.strip().startswith(FAILURE_PREFIX)
     ]
     candidates = {
         line.strip()
         for line in stripped.splitlines()
-        if f"browse/{task_key}" in line
-        and ("check" in line.lower() or "провер" in line.lower())
+        if f"browse/{task_key}" in line and ("check" in line.lower() or "провер" in line.lower())
     }
     if failure_lines and candidates:
         raise InvalidDesignResult("Review agent returned ambiguous terminal results")
@@ -333,10 +349,16 @@ async def run_once(
     client: AsyncWebClient,
     agent: AgentSubmitter,
     settings: Settings,
+    selector: Callable[[Settings], Awaitable[DesignCandidate | None]] | None = None,
 ) -> str | None:
     """Run preparation, stay silent on no-op, then run independent review."""
+    choose = selector or select_from_jira
+    selected = await choose(settings)
+    if selected is None:
+        LOGGER.info("No eligible experiment-design task; finishing silently")
+        return None
     prepared_run = await agent.execute_once(
-        PREPARATION_PROMPT,
+        preparation_prompt(selected),
         settings.experiment_design_timeout_seconds,
         job_name="experiment-design-preparer",
         accept_result=is_preparation_result,
@@ -348,9 +370,22 @@ async def run_once(
             await publish_failure(client, settings, str(error))
         raise
     if prepared is None:
-        LOGGER.info("No eligible experiment-design task; finishing silently")
-        return None
+        raise InvalidDesignResult("Preparation agent contradicted deterministic selection")
+    if prepared != (selected.task_key, selected.epic_key):
+        raise InvalidDesignResult("Preparation agent returned keys outside deterministic selection")
+    confirmed = await choose(settings)
+    if confirmed != selected:
+        raise InvalidDesignResult("Deterministic Jira selection changed before review")
     return await run_review(client, agent, settings, *prepared)
+
+
+async def select_from_jira(settings: Settings) -> DesignCandidate | None:
+    """Build the read-only Jira client and select one candidate."""
+    if not settings.jira_username or not settings.jira_api_token:
+        raise SelectionError("Jira credentials are unavailable to experiment-design selector")
+    return await select_candidate(
+        JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
+    )
 
 
 async def run_daily(

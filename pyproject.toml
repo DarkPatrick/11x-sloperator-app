@@ -26,6 +26,7 @@ dev = [
 sloperator = "sloperator.main:run"
 sloperator-inspect = "sloperator.inspect:run"
 sloperator-finalize-experiment = "sloperator.experiment_finalizer_cli:run"
+sloperator-select-experiment-design = "sloperator.experiment_design_selector_cli:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sloperator"]

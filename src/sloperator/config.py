@@ -64,6 +64,9 @@ class Settings:
     experiment_design_hour: int = 15
     experiment_design_timeout_seconds: int = 7_200
     experiment_design_channel: str = "C07A9FDQ14P"
+    jira_url: str = "https://mu--se.atlassian.net"
+    jira_username: str | None = None
+    jira_api_token: str | None = None
     experiment_config_timeout_seconds: int = 7_200
     mobile_health_timeout_seconds: int = 3_600
     ldap_username: str | None = None
@@ -118,6 +121,10 @@ class Settings:
                 "/home/egor/projects/ug-ai-analyst",
             )
         ).expanduser()
+        # The automated agents already use this repository-local environment. Loading it with
+        # setdefault semantics lets the deterministic runtime use the same Jira read credentials.
+        with suppress(PermissionError):
+            load_dotenv(agent_workspace / ".env", override=False, interpolate=False)
         default_agent = os.environ.get("SLOPERATOR_DEFAULT_AGENT", "claude").strip().lower()
         claude_model = os.environ.get("SLOPERATOR_CLAUDE_MODEL", "opus").strip()
         codex_model = os.environ.get("SLOPERATOR_CODEX_MODEL", "gpt-5.6-sol").strip()
@@ -143,6 +150,9 @@ class Settings:
         experiment_design_channel = os.environ.get(
             "EXPERIMENT_DESIGN_CHANNEL", "C07A9FDQ14P"
         ).strip()
+        jira_url = os.environ.get("JIRA_URL", "https://mu--se.atlassian.net").strip()
+        jira_username = os.environ.get("JIRA_USERNAME", "").strip() or None
+        jira_api_token = os.environ.get("JIRA_API_TOKEN", "").strip() or None
         mobile_health_timeout_seconds = int(os.environ.get("MOBILE_HEALTH_TIMEOUT_SECONDS", "3600"))
         ldap_username = os.environ.get("LDAP_USERNAME")
         ldap_password = os.environ.get("LDAP_PASSWORD")
@@ -259,6 +269,10 @@ class Settings:
             ) from error
         if not experiment_design_channel.startswith("C"):
             raise ConfigurationError("EXPERIMENT_DESIGN_CHANNEL must be a Slack channel ID")
+        if not jira_url.startswith("https://"):
+            raise ConfigurationError("JIRA_URL must be an HTTPS URL")
+        if bool(jira_username) != bool(jira_api_token):
+            raise ConfigurationError("JIRA_USERNAME and JIRA_API_TOKEN must be set together")
         if not 1 <= vpn_proxy_port <= 65_535:
             raise ConfigurationError("SLOPERATOR_VPN_PROXY_PORT must be between 1 and 65535")
         if not anomaly_alert_channel.startswith("C"):
@@ -323,6 +337,9 @@ class Settings:
             experiment_design_hour=experiment_design_hour,
             experiment_design_timeout_seconds=experiment_design_timeout_seconds,
             experiment_design_channel=experiment_design_channel,
+            jira_url=jira_url,
+            jira_username=jira_username,
+            jira_api_token=jira_api_token,
             experiment_config_timeout_seconds=experiment_config_timeout_seconds,
             mobile_health_timeout_seconds=mobile_health_timeout_seconds,
             ldap_username=ldap_username,

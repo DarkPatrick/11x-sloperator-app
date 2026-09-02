@@ -42,6 +42,7 @@ from sloperator.experiment_design_planner import (
     parse_preparation_result,
     publish_failure,
     run_review,
+    select_from_jira,
     task_key_from_review_result,
 )
 from sloperator.experiment_design_planner import (
@@ -53,6 +54,7 @@ from sloperator.experiment_design_planner import (
 from sloperator.experiment_design_planner import (
     run_daily as run_daily_experiment_design,
 )
+from sloperator.experiment_design_selector import SelectionError
 from sloperator.experiment_finalizer import (
     InvalidFinalizationNotification,
     cancel_task,
@@ -254,7 +256,17 @@ async def serve(settings: Settings) -> None:
         for run in recovered_design_preparations:
             try:
                 prepared = parse_preparation_result(run.text)
-            except InvalidDesignResult as error:
+                if prepared is not None:
+                    selected = await select_from_jira(settings)
+                    if selected is None or prepared != (
+                        selected.task_key,
+                        selected.epic_key,
+                    ):
+                        raise InvalidDesignResult(
+                            "Recovered preparation no longer matches deterministic selection"
+                        )
+                    await run_review(app.client, orchestrator, settings, *prepared)
+            except (InvalidDesignResult, SelectionError) as error:
                 if str(error).startswith("Experiment design automation failed:"):
                     await publish_failure(app.client, settings, str(error))
                 status = "failed"
@@ -262,8 +274,6 @@ async def serve(settings: Settings) -> None:
             else:
                 status = "completed"
                 last_error = None
-                if prepared is not None:
-                    await run_review(app.client, orchestrator, settings, *prepared)
             if run.run_id is not None:
                 await asyncio.to_thread(
                     store.finish_scheduled_agent_run,

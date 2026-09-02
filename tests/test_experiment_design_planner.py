@@ -21,6 +21,15 @@ from sloperator.experiment_design_planner import (
     run_once,
     task_key_from_review_result,
 )
+from sloperator.experiment_design_selector import DesignCandidate
+
+SELECTED = DesignCandidate(
+    task_key="UMN-12312",
+    epic_key="UMN-12310",
+    pitch_key="UMN-12311",
+    task_created_at="2026-08-01T10:00:30+00:00",
+    pitch_reviewed_at="2026-08-31T10:00:00+00:00",
+)
 
 
 def test_next_run_is_weekdays_at_cyprus_wall_clock_and_preserves_dst() -> None:
@@ -51,7 +60,8 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
     assert "Realistic and Pessimistic" in PREPARATION_PROMPT
     assert "Reach & Impact" in PREPARATION_PROMPT
     assert "Experiment design" in PREPARATION_PROMPT
-    assert NO_OP_RESULT in PREPARATION_PROMPT
+    assert "stops before launching an agent" in PREPARATION_PROMPT
+    assert NO_OP_RESULT not in PREPARATION_PROMPT
 
 
 def test_review_prompt_requires_independent_correction_and_final_actions() -> None:
@@ -72,9 +82,10 @@ def test_review_prompt_requires_independent_correction_and_final_actions() -> No
 
 def test_preparation_result_parser_extracts_unambiguous_marker_from_agent_prose() -> None:
     assert parse_preparation_result(NO_OP_RESULT) is None
-    assert parse_preparation_result(
-        "DESIGN_PREPARED: UMN-12312 | UMN-12310"
-    ) == ("UMN-12312", "UMN-12310")
+    assert parse_preparation_result("DESIGN_PREPARED: UMN-12312 | UMN-12310") == (
+        "UMN-12312",
+        "UMN-12310",
+    )
     assert is_preparation_result("DESIGN_PREPARED: UMN-12312 | UMN-12310")
     assert parse_preparation_result(
         "DESIGN_PREPARED: UMN-12520 | UMN-12517\n\n"
@@ -84,9 +95,7 @@ def test_preparation_result_parser_extracts_unambiguous_marker_from_agent_prose(
     with pytest.raises(InvalidDesignResult):
         parse_preparation_result("Done")
     with pytest.raises(InvalidDesignResult, match="ambiguous"):
-        parse_preparation_result(
-            "DESIGN_PREPARED: UMN-1 | UMN-2\nDESIGN_PREPARED: UMN-3 | UMN-4"
-        )
+        parse_preparation_result("DESIGN_PREPARED: UMN-1 | UMN-2\nDESIGN_PREPARED: UMN-3 | UMN-4")
 
 
 async def test_no_candidate_finishes_without_slack_or_second_agent() -> None:
@@ -108,8 +117,11 @@ async def test_no_candidate_finishes_without_slack_or_second_agent() -> None:
         app_token="xapp-test",
     )
 
-    assert await run_once(client, agent, settings) is None
-    assert agent.execute_once.await_count == 1
+    selector = AsyncMock(return_value=None)
+
+    assert await run_once(client, agent, settings, selector) is None
+    assert agent.execute_once.await_count == 0
+    selector.assert_awaited_once_with(settings)
     client.chat_postMessage.assert_not_awaited()
     agent.attach_session.assert_not_awaited()
 
@@ -148,12 +160,16 @@ async def test_preparation_then_independent_review_publishes_once() -> None:
         experiment_design_channel="CDESIGN",
     )
 
-    assert await run_once(client, agent, settings) == notification
+    selector = AsyncMock(return_value=SELECTED)
+
+    assert await run_once(client, agent, settings, selector) == notification
     assert agent.execute_once.await_count == 2
     first, second = agent.execute_once.await_args_list
     assert first.kwargs["job_name"] == "experiment-design-preparer"
     assert second.kwargs["job_name"] == "experiment-design-reviewer"
     assert "UMN-12312" in second.args[0]
+    assert "UMN-12311" in first.args[0]
+    assert selector.await_count == 2
     client.chat_postMessage.assert_awaited_once_with(
         channel="CDESIGN",
         markdown_text=notification,
@@ -169,10 +185,40 @@ def test_review_notification_rejects_wrong_task_or_verbose_output() -> None:
         normalize_review_notification(
             "Please check https://mu--se.atlassian.net/browse/UMN-99999", "UMN-12312"
         )
-    assert normalize_review_notification(
-        "Internal note\nPlease check https://mu--se.atlassian.net/browse/UMN-12312\nAudit: done",
-        "UMN-12312",
-    ) == "Please check https://mu--se.atlassian.net/browse/UMN-12312"
+    assert (
+        normalize_review_notification(
+            "Internal note\nPlease check "
+            "https://mu--se.atlassian.net/browse/UMN-12312\nAudit: done",
+            "UMN-12312",
+        )
+        == "Please check https://mu--se.atlassian.net/browse/UMN-12312"
+    )
+
+
+async def test_changed_selection_stops_before_review() -> None:
+    prepared = HeadlessAgentRun(
+        provider="claude",
+        model="opus",
+        session_id="prepare-session",
+        text="DESIGN_PREPARED: UMN-12312 | UMN-12310",
+    )
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(return_value=prepared),
+        attach_session=AsyncMock(),
+    )
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+    )
+    selector = AsyncMock(side_effect=[SELECTED, None])
+
+    with pytest.raises(InvalidDesignResult, match="changed before review"):
+        await run_once(client, agent, settings, selector)
+
+    assert agent.execute_once.await_count == 1
+    client.chat_postMessage.assert_not_awaited()
 
 
 def test_recovered_review_result_extracts_the_linked_task() -> None:

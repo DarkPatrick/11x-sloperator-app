@@ -48,6 +48,21 @@ AUTOMATED RESPONSE STYLE (WORKER HANDOFF, STRICT):
 """
 
 
+AUTOMATED_ATLASSIAN_IDENTITY = """\
+AUTOMATED ATLASSIAN IDENTITY (STRICT, applies to this autonomous workflow only):
+- Perform every Jira and Confluence operation in this workflow through the repository helpers and
+  pass `--as-bot` on every command, including reads, writes, uploads, transitions, and post-write
+  verification. This makes all outward changes attributable to the service accounts.
+- Do not use Atlassian MCP/connector tools or a hand-written API client for these operations: those
+  paths can silently use the interactive user's credentials instead of the service accounts.
+- If either service account credential, authentication flow, or required permission is unavailable,
+  fail closed before the affected write and report the incomplete step. Never fall back to personal
+  Jira or Confluence credentials in an autonomous workflow.
+- This opt-in is limited to the autonomous workflow. Normal interactive sessions keep the helpers'
+  default personal credentials unless the user explicitly asks to use a service account.
+"""
+
+
 SLACK_WORKER_HANDOFF = """\
 SLACK WORKER HANDOFF (STRICT):
 - Do the requested substantive work and return the complete factual result to Sloperator.

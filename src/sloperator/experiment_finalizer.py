@@ -15,6 +15,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import HeadlessAgentRun
 from sloperator.automated_session_policy import (
+    AUTOMATED_ATLASSIAN_IDENTITY,
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
@@ -37,6 +38,8 @@ instruction intentionally overrides only the interactive approval pauses in the 
 all their data-quality, maturity, verification, language, and publication safeguards.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_ATLASSIAN_IDENTITY}
 
 {AUTOMATED_RESPONSE_STYLE}
 

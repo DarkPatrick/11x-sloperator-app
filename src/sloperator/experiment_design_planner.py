@@ -16,6 +16,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import HeadlessAgentRun
 from sloperator.automated_session_policy import (
+    AUTOMATED_ATLASSIAN_IDENTITY,
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
@@ -76,6 +77,8 @@ Realistic and Pessimistic. Never invent measured data.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 
+{AUTOMATED_ATLASSIAN_IDENTITY}
+
 {AUTOMATED_RESPONSE_STYLE}
 
 Use the `ug-experiment-design-power` skill for the entire design workflow, including every required
@@ -132,6 +135,8 @@ Another agent has already populated the project page for calculation task `{task
 whole workflow autonomously.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_ATLASSIAN_IDENTITY}
 
 {AUTOMATED_RESPONSE_STYLE}
 

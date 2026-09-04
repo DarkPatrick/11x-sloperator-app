@@ -47,6 +47,8 @@ def test_next_run_is_weekdays_at_cyprus_wall_clock_and_preserves_dst() -> None:
 def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
     assert "[claude]" in PREPARATION_PROMPT
     assert "AUTOMATED RESPONSE STYLE" in PREPARATION_PROMPT
+    assert "AUTOMATED ATLASSIAN IDENTITY" in PREPARATION_PROMPT
+    assert "pass `--as-bot` on every command" in PREPARATION_PROMPT
     assert "ug-experiment-design-power" in PREPARATION_PROMPT
     assert "cannot\ncommunicate with a human" in PREPARATION_PROMPT
     assert "Project - Hypothesis" in PREPARATION_PROMPT
@@ -66,6 +68,9 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
 
 def test_review_prompt_requires_independent_correction_and_final_actions() -> None:
     prompt = review_prompt("UMN-12312", "UMN-12310")
+    assert "AUTOMATED ATLASSIAN IDENTITY" in prompt
+    assert "pass `--as-bot` on every command" in prompt
+    assert "Never fall back to personal" in prompt
 
     assert "[claude]" in prompt
     assert "ug-experiment-design-power" in prompt

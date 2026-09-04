@@ -28,6 +28,7 @@ from sloperator.anomaly_alerts import Alert, AlertBatch, build_monetisation_agen
 from sloperator.automation_controls import AutomationControls
 from sloperator.codex_app_server import CodexAppServerError
 from sloperator.config import Settings
+from sloperator.experiment_analytics_planner import review_prompt as analytics_review_prompt
 from sloperator.experiment_config_check import build_experiment_config_prompt
 from sloperator.experiment_design_planner import review_prompt
 from sloperator.mobile_health import MobileCriticalMetric, build_mobile_health_agent_prompt
@@ -776,6 +777,34 @@ def _cron_agent_prompt_definitions(jobs: list[dict[str, Any]]) -> list[dict[str,
                         ),
                         "prompt": review_prompt(
                             "{{ calculation task key }}", "{{ epic key }}"
+                        ),
+                    },
+                )
+            )
+            continue
+        if scheduled_job.job_name == "experiment-analytics-planner":
+            definitions.extend(
+                (
+                    {
+                        **common,
+                        "name": f"{job['name']} · preparation",
+                        "source": scheduled_job.prompt_source,
+                        "condition": (
+                            "First pass: select and prepare one eligible analytics specification; "
+                            "stop silently when none is eligible"
+                        ),
+                        "prompt": scheduled_job.prompt,
+                    },
+                    {
+                        **common,
+                        "name": f"{job['name']} · independent review",
+                        "source": "sloperator.experiment_analytics_planner.review_prompt",
+                        "condition": (
+                            "Second pass: independently verify and correct the analytics "
+                            "specification, then complete Jira and Slack"
+                        ),
+                        "prompt": analytics_review_prompt(
+                            "{{ Analytics task key }}", "{{ epic key }}"
                         ),
                     },
                 )

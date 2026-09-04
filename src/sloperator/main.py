@@ -31,6 +31,35 @@ from sloperator.automation_error_audit import (
 )
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
+from sloperator.experiment_analytics_planner import (
+    InvalidAnalyticsResult,
+)
+from sloperator.experiment_analytics_planner import cancel_task as cancel_experiment_analytics
+from sloperator.experiment_analytics_planner import (
+    is_preparation_result as is_analytics_preparation_result,
+)
+from sloperator.experiment_analytics_planner import (
+    is_review_result as is_analytics_review_result,
+)
+from sloperator.experiment_analytics_planner import (
+    parse_preparation_result as parse_analytics_preparation_result,
+)
+from sloperator.experiment_analytics_planner import (
+    publish_failure as publish_analytics_failure,
+)
+from sloperator.experiment_analytics_planner import (
+    publish_notification as publish_experiment_analytics,
+)
+from sloperator.experiment_analytics_planner import run_daily as run_daily_experiment_analytics
+from sloperator.experiment_analytics_planner import (
+    run_review as run_analytics_review,
+)
+from sloperator.experiment_analytics_planner import (
+    select_from_jira as select_analytics_from_jira,
+)
+from sloperator.experiment_analytics_planner import (
+    task_key_from_review_result as analytics_task_key_from_review_result,
+)
 from sloperator.experiment_config_check import (
     ExperimentConfigResponder,
     is_experiment_config_trigger,
@@ -103,6 +132,9 @@ async def serve(settings: Settings) -> None:
     )
     finalizer_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["experiment-finalizer"]
     experiment_design_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["experiment-design-planner"]
+    experiment_analytics_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME[
+        "experiment-analytics-planner"
+    ]
     error_audit_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["automation-error-audit"]
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
@@ -170,6 +202,7 @@ async def serve(settings: Settings) -> None:
     vpn_task: asyncio.Task[None] | None = None
     experiment_finalizer_task: asyncio.Task[None] | None = None
     experiment_design_task: asyncio.Task[None] | None = None
+    experiment_analytics_task: asyncio.Task[None] | None = None
     automation_error_audit_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
@@ -282,6 +315,66 @@ async def serve(settings: Settings) -> None:
                     result_text=run.text,
                     last_error=last_error,
                 )
+        recovered_analytics_reviews = await orchestrator.resume_interrupted_headless(
+            settings.experiment_analytics_timeout_seconds,
+            job_name="experiment-analytics-reviewer",
+            accept_result=is_analytics_review_result,
+        )
+        for run in recovered_analytics_reviews:
+            try:
+                task_key = analytics_task_key_from_review_result(run.text)
+                await publish_experiment_analytics(
+                    app.client, orchestrator, settings, run, task_key
+                )
+            except InvalidAnalyticsResult as error:
+                if str(error).startswith("Experiment analytics automation failed:"):
+                    await publish_analytics_failure(app.client, settings, str(error))
+                status = "failed"
+                last_error = repr(error)
+            else:
+                status = "completed"
+                last_error = None
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status=status,
+                    external_session_id=run.session_id,
+                    result_text=run.text,
+                    last_error=last_error,
+                )
+        recovered_analytics_preparations = await orchestrator.resume_interrupted_headless(
+            settings.experiment_analytics_timeout_seconds,
+            job_name="experiment-analytics-preparer",
+            accept_result=is_analytics_preparation_result,
+        )
+        for run in recovered_analytics_preparations:
+            try:
+                prepared = parse_analytics_preparation_result(run.text)
+                if prepared is not None:
+                    selected = await select_analytics_from_jira(settings)
+                    if selected is None or prepared != (selected.task_key, selected.epic_key):
+                        raise InvalidAnalyticsResult(
+                            "Recovered preparation no longer matches deterministic selection"
+                        )
+                    await run_analytics_review(app.client, orchestrator, settings, *prepared)
+            except (InvalidAnalyticsResult, SelectionError) as error:
+                if str(error).startswith("Experiment analytics automation failed:"):
+                    await publish_analytics_failure(app.client, settings, str(error))
+                status = "failed"
+                last_error = repr(error)
+            else:
+                status = "completed"
+                last_error = None
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status=status,
+                    external_session_id=run.session_id,
+                    result_text=run.text,
+                    last_error=last_error,
+                )
         recovered_audits = await orchestrator.resume_interrupted_headless(
             TIMEOUT_SECONDS,
             job_name="automation-error-audit",
@@ -338,6 +431,18 @@ async def serve(settings: Settings) -> None:
                 ),
                 name="daily-experiment-design-planner",
             )
+        if settings.experiment_analytics_enabled:
+            experiment_analytics_task = asyncio.create_task(
+                run_daily_experiment_analytics(
+                    app.client,
+                    orchestrator,
+                    settings,
+                    lambda: not automation_controls.disabled(
+                        "crons", experiment_analytics_job.display_name
+                    ),
+                ),
+                name="daily-experiment-analytics-planner",
+            )
         automation_error_audit_task = asyncio.create_task(
             run_daily_automation_error_audit(
                 app.client,
@@ -366,6 +471,7 @@ async def serve(settings: Settings) -> None:
                 await vpn_task
         await cancel_task(experiment_finalizer_task)
         await cancel_experiment_design(experiment_design_task)
+        await cancel_experiment_analytics(experiment_analytics_task)
         await cancel_automation_error_audit(automation_error_audit_task)
         await orchestrator.close()
         await slack_handler.close_async()  # type: ignore[no-untyped-call]

@@ -153,6 +153,47 @@ async def test_selects_oldest_eligible_pair_deterministically() -> None:
     assert jira.requested_changelogs == ["UMN-101", "UMN-103"]
 
 
+async def test_can_select_analytics_task_with_the_same_pairing_rules() -> None:
+    jira = FakeJira(
+        epics=[
+            raw_issue(
+                "UMN-200",
+                "Analytics epic",
+                "3",
+                "2026-08-01T00:00:00Z",
+                issue_type="Epic",
+                components=("Project - Hypothesis",),
+            )
+        ],
+        children=[
+            raw_issue(
+                "UMN-201",
+                "Проектирование и Питч — iteration 2",
+                "5",
+                "2026-08-20T10:00:00Z",
+                parent="UMN-200",
+            ),
+            raw_issue(
+                "UMN-202",
+                "Аналитика — iteration 2",
+                "1",
+                "2026-08-20T10:00:40Z",
+                parent="UMN-200",
+            ),
+        ],
+        changelogs={"UMN-201": [transition("2026-08-25T12:00:00Z", "5")]},
+    )
+
+    candidate = await select_candidate(jira, now=NOW, task_title="Аналитика")
+
+    assert candidate is not None
+    assert (candidate.task_key, candidate.pitch_key, candidate.epic_key) == (
+        "UMN-202",
+        "UMN-201",
+        "UMN-200",
+    )
+
+
 async def test_excludes_old_transition_wrong_columns_and_pair_outside_window() -> None:
     jira = FakeJira(
         epics=[

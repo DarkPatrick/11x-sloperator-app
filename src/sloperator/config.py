@@ -66,6 +66,11 @@ class Settings:
     experiment_design_hour: int = 15
     experiment_design_timeout_seconds: int = 7_200
     experiment_design_channel: str = "C07A9FDQ14P"
+    experiment_analytics_enabled: bool = True
+    experiment_analytics_timezone: str = "Asia/Nicosia"
+    experiment_analytics_hour: int = 16
+    experiment_analytics_timeout_seconds: int = 7_200
+    experiment_analytics_channel: str = "C07A9FDQ14P"
     jira_url: str = "https://mu--se.atlassian.net"
     jira_username: str | None = None
     jira_api_token: str | None = None
@@ -158,6 +163,15 @@ class Settings:
         experiment_design_channel = os.environ.get(
             "EXPERIMENT_DESIGN_CHANNEL", "C07A9FDQ14P"
         ).strip()
+        experiment_analytics_enabled = os.environ.get(
+            "EXPERIMENT_ANALYTICS_ENABLED", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        experiment_analytics_timezone = os.environ.get(
+            "EXPERIMENT_ANALYTICS_TIMEZONE", "Asia/Nicosia"
+        ).strip()
+        experiment_analytics_channel = os.environ.get(
+            "EXPERIMENT_ANALYTICS_CHANNEL", "C07A9FDQ14P"
+        ).strip()
         jira_url = os.environ.get("JIRA_URL", "https://mu--se.atlassian.net").strip()
         jira_username = os.environ.get("JIRA_USERNAME", "").strip() or None
         jira_api_token = os.environ.get("JIRA_API_TOKEN", "").strip() or None
@@ -199,6 +213,12 @@ class Settings:
             experiment_design_hour = int(os.environ.get("EXPERIMENT_DESIGN_HOUR", "15"))
             experiment_design_timeout_seconds = int(
                 os.environ.get("EXPERIMENT_DESIGN_TIMEOUT_SECONDS", "7200")
+            )
+            experiment_analytics_hour = int(
+                os.environ.get("EXPERIMENT_ANALYTICS_HOUR", "16")
+            )
+            experiment_analytics_timeout_seconds = int(
+                os.environ.get("EXPERIMENT_ANALYTICS_TIMEOUT_SECONDS", "7200")
             )
             experiment_config_timeout_seconds = int(
                 os.environ.get("EXPERIMENT_CONFIG_TIMEOUT_SECONDS", "7200")
@@ -277,6 +297,20 @@ class Settings:
             ) from error
         if not experiment_design_channel.startswith("C"):
             raise ConfigurationError("EXPERIMENT_DESIGN_CHANNEL must be a Slack channel ID")
+        if not 0 <= experiment_analytics_hour <= 23:
+            raise ConfigurationError("EXPERIMENT_ANALYTICS_HOUR must be between 0 and 23")
+        if not 300 <= experiment_analytics_timeout_seconds <= 86_400:
+            raise ConfigurationError(
+                "EXPERIMENT_ANALYTICS_TIMEOUT_SECONDS must be between 300 and 86400"
+            )
+        try:
+            ZoneInfo(experiment_analytics_timezone)
+        except (KeyError, ValueError) as error:
+            raise ConfigurationError(
+                "EXPERIMENT_ANALYTICS_TIMEZONE must be a valid IANA timezone"
+            ) from error
+        if not experiment_analytics_channel.startswith("C"):
+            raise ConfigurationError("EXPERIMENT_ANALYTICS_CHANNEL must be a Slack channel ID")
         if not jira_url.startswith("https://"):
             raise ConfigurationError("JIRA_URL must be an HTTPS URL")
         if bool(jira_username) != bool(jira_api_token):
@@ -353,6 +387,11 @@ class Settings:
             experiment_design_hour=experiment_design_hour,
             experiment_design_timeout_seconds=experiment_design_timeout_seconds,
             experiment_design_channel=experiment_design_channel,
+            experiment_analytics_enabled=experiment_analytics_enabled,
+            experiment_analytics_timezone=experiment_analytics_timezone,
+            experiment_analytics_hour=experiment_analytics_hour,
+            experiment_analytics_timeout_seconds=experiment_analytics_timeout_seconds,
+            experiment_analytics_channel=experiment_analytics_channel,
             jira_url=jira_url,
             jira_username=jira_username,
             jira_api_token=jira_api_token,

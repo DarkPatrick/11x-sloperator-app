@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from sloperator.automation_error_audit import AUDIT_PROMPT, HOUR, TIMEZONE
 from sloperator.config import Settings
+from sloperator.experiment_analytics_planner import PREPARATION_PROMPT as ANALYTICS_PROMPT
 from sloperator.experiment_design_planner import PREPARATION_PROMPT
 from sloperator.experiment_finalizer import FINALIZATION_PROMPT
 
@@ -66,6 +67,23 @@ EMBEDDED_SCHEDULED_JOBS = (
             "silent when none"
         ),
         prompt=PREPARATION_PROMPT,
+    ),
+    EmbeddedScheduledJob(
+        job_name="experiment-analytics-planner",
+        run_job_names=("experiment-analytics-preparer", "experiment-analytics-reviewer"),
+        display_name="experiment-analytics-planner (sloperator.service)",
+        schedule=lambda settings: (
+            f"weekdays Mon-Fri {settings.experiment_analytics_hour:02d}:00 "
+            f"{settings.experiment_analytics_timezone}"
+        ),
+        logger_name="sloperator.experiment_analytics_planner",
+        scheduled_prefix="Next experiment analytics run scheduled for ",
+        started_message="Starting scheduled experiment analytics run",
+        completed_message="Experiment analytics run completed",
+        failed_message="Could not complete the daily experiment analytics run",
+        prompt_source="sloperator.experiment_analytics_planner.PREPARATION_PROMPT",
+        condition="One oldest eligible Analytics task per weekday; silent when none",
+        prompt=ANALYTICS_PROMPT,
     ),
     EmbeddedScheduledJob(
         job_name="automation-error-audit",

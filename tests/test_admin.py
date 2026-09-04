@@ -320,6 +320,25 @@ def test_admin_lists_both_experiment_design_agent_prompts() -> None:
     assert "Do not send Slack messages yourself" in prompts[1]["prompt"]
 
 
+def test_admin_lists_both_experiment_analytics_agent_prompts() -> None:
+    job_name = "experiment-analytics-planner (sloperator.service)"
+    prompts = _cron_agent_prompt_definitions([
+        {
+            "name": job_name,
+            "schedule": "weekdays Mon-Fri 16:00 Asia/Nicosia",
+            "command": "embedded scheduler",
+            "enabled": True,
+        }
+    ])
+
+    assert [prompt["name"] for prompt in prompts] == [
+        f"{job_name} · preparation",
+        f"{job_name} · independent review",
+    ]
+    assert "ug-analytics-spec-writer" in prompts[0]["prompt"]
+    assert "{{ Analytics task key }}" in prompts[1]["prompt"]
+
+
 def test_admin_merges_published_scheduled_run_with_its_slack_session() -> None:
     scheduled = {
         "channel_id": "scheduled",
@@ -432,6 +451,11 @@ def test_systemd_scheduler_jobs_include_every_registered_schedule_and_runtime_st
         {
             "name": "experiment-design-planner (sloperator.service)",
             "schedule": "weekdays Mon-Fri 15:00 Asia/Nicosia",
+            "command": "embedded asyncio scheduler · active · PID 123",
+        },
+        {
+            "name": "experiment-analytics-planner (sloperator.service)",
+            "schedule": "weekdays Mon-Fri 16:00 Asia/Nicosia",
             "command": "embedded asyncio scheduler · active · PID 123",
         },
         {

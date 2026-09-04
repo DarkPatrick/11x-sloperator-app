@@ -17,6 +17,7 @@ BOARD_TIMEZONE = "Asia/Nicosia"
 EPIC_COMPONENT = "Project - Hypothesis"
 PITCH_TITLE = "проектирование и питч"
 CALCULATION_TITLE = "расчет сверху и план тестирования"
+ANALYTICS_TITLE = "аналитика"
 PAIR_WINDOW_SECONDS = 60
 
 
@@ -232,14 +233,12 @@ def _latest_transition(
     return max(matches, default=None)
 
 
-def _pair_children(children: list[Issue]) -> list[tuple[Issue, Issue]]:
+def _pair_children(children: list[Issue], task_title: str) -> list[tuple[Issue, Issue]]:
     pairs: list[tuple[Issue, Issue]] = []
     for parent_key in sorted({issue.parent_key for issue in children if issue.parent_key}):
         siblings = [issue for issue in children if issue.parent_key == parent_key]
         pitches = [issue for issue in siblings if PITCH_TITLE in _normalize(issue.summary)]
-        calculations = [
-            issue for issue in siblings if CALCULATION_TITLE in _normalize(issue.summary)
-        ]
+        calculations = [issue for issue in siblings if task_title in _normalize(issue.summary)]
         used: set[str] = set()
         for calculation in sorted(calculations, key=lambda issue: (issue.created_at, issue.key)):
             options = [
@@ -272,6 +271,7 @@ async def select_candidate(
     *,
     now: dt.datetime | None = None,
     board_id: int = BOARD_ID,
+    task_title: str = CALCULATION_TITLE,
 ) -> DesignCandidate | None:
     """Select the oldest eligible calculation task from one authoritative snapshot."""
     moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
@@ -300,7 +300,8 @@ async def select_candidate(
     lower_bound = _previous_calendar_month(moment.astimezone(ZoneInfo(BOARD_TIMEZONE))).astimezone(
         dt.UTC
     )
-    for pitch, calculation in _pair_children(children):
+    normalized_task_title = _normalize(task_title)
+    for pitch, calculation in _pair_children(children, normalized_task_title):
         if calculation.parent_key not in epic_keys:
             continue
         if (

@@ -71,6 +71,11 @@ def test_review_prompt_requires_independent_correction_and_final_actions() -> No
     assert "AUTOMATED ATLASSIAN IDENTITY" in prompt
     assert "pass `--as-bot` on every command" in prompt
     assert "Never fall back to personal" in prompt
+    assert "Session ownership after publication" in prompt
+    assert "own the final corrected solution" in prompt
+    assert "responsible\n  author" in prompt
+    assert "Never describe yourself as merely a reviewer" in prompt
+    assert "no-human constraint above ends" in prompt
 
     assert "[claude]" in prompt
     assert "ug-experiment-design-power" in prompt

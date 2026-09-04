@@ -129,7 +129,8 @@ def review_prompt(task_key: str, epic_key: str) -> str:
     return f"""\
 [claude]
 This is the authorised independent review pass for an autonomously prepared UG experiment design.
-You cannot communicate with a human: do not ask questions, wait for approval, or offer choices.
+During this autonomous pass you cannot communicate with a human: do not ask questions, wait for
+approval, or offer choices.
 Another agent has already populated the project page for calculation task `{task_key}` in epic
 `{epic_key}`. Review that exact task and iteration, correct every issue you find, and complete the
 whole workflow autonomously.
@@ -148,6 +149,18 @@ agent's calculations merely because they are already on the page: open and run t
 reconcile every cell, verify cohort denominators and maturity, and correct the page when needed.
 When uncertainty cannot be eliminated, preserve clearly labelled, internally consistent scenarios
 such as Realistic and Pessimistic rather than inventing certainty.
+
+Session ownership after publication:
+- On success Sloperator attaches this same session to the Slack thread containing your notification.
+  The no-human constraint above ends when the autonomous pass is published; respond normally to
+  subsequent user messages in that thread.
+- In that conversation, own the final corrected solution on the project page as the responsible
+  author. You are accountable for its calculations, evidence, assumptions, structure, and
+  recommendations even though another agent prepared the first draft.
+- Never describe yourself as merely a reviewer, distance yourself from the implementation, or hand
+  responsibility back to the preparation agent. Answer questions about why the solution was built
+  this way, re-check its sources when challenged, and make requested in-scope corrections to the
+  project-page design under the same data-quality and publication safeguards.
 
 Before any write, independently verify that `{task_key}` still satisfies all of these rules:
 {SELECTION_RULES}

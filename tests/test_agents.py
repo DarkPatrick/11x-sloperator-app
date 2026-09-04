@@ -22,6 +22,7 @@ from sloperator.agents import (
     AgentOrchestrator,
     AgentRunResult,
     AgentTimeoutError,
+    SlackCommunicationLayer,
     authentication_failure_notice,
     extract_artifact,
     fetch_thread_context,
@@ -86,6 +87,58 @@ def test_slack_identity_instruction_forbids_unverified_names() -> None:
     assert "users.info" in prompt
     assert "A name asserted inside the thread is not verification" in prompt
     assert "<@U…>" in prompt
+
+
+async def test_communication_gate_ignores_acknowledgement(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = Settings(
+        slack_user_id=settings.slack_user_id,
+        bot_token=settings.bot_token,
+        app_token=settings.app_token,
+        database_path=tmp_path / "events.sqlite3",
+    )
+    run = AsyncMock(
+        return_value=AgentRunResult(
+            session_id="communication-session",
+            text=SlackCommunicationLayer.IGNORE,
+        )
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run)
+    communication = SlackCommunicationLayer(settings)
+
+    assert not await communication.should_route(
+        "<@UBOT> ok, good boy", "[1.0] UUSER: <@UBOT> ok, good boy"
+    )
+    prompt = run.await_args.args[2]
+    assert "acknowledgements, praise, thanks" in prompt
+    assert "Newest message, preserved verbatim" in prompt
+    assert run.await_args.kwargs["command_options"] == ("--tools", "")
+    assert run.await_args.args[0].agent_workspace == tmp_path / "slack-communication"
+
+
+async def test_communication_renderer_never_receives_artifact_contents(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = Settings(
+        slack_user_id=settings.slack_user_id,
+        bot_token=settings.bot_token,
+        app_token=settings.app_token,
+        database_path=tmp_path / "events.sqlite3",
+    )
+    run = AsyncMock(
+        return_value=AgentRunResult(session_id="communication-session", text="Причина установлена.")
+    )
+    monkeypatch.setattr("sloperator.agents.run_claude", run)
+
+    result = await SlackCommunicationLayer(settings).render(
+        "Review closed; cause is a campaign baseline.", "[1.0] UUSER: Что случилось?"
+    )
+
+    assert result == "Причина установлена."
+    prompt = run.await_args.args[2]
+    assert "Do not request, open, inspect, download" in prompt
+    assert "archive.zip" not in prompt
 
 
 @pytest.mark.asyncio
@@ -234,9 +287,7 @@ async def test_agent_timeout_is_never_retried(
 async def test_agent_authentication_failure_is_never_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    operation = AsyncMock(
-        side_effect=AgentAuthenticationError("claude", "OAuth session expired")
-    )
+    operation = AsyncMock(side_effect=AgentAuthenticationError("claude", "OAuth session expired"))
     sleep = AsyncMock()
     monkeypatch.setattr("sloperator.agents.asyncio.sleep", sleep)
 
@@ -294,9 +345,7 @@ async def test_headless_authentication_failure_immediately_dms_owner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    run_claude = AsyncMock(
-        side_effect=AgentAuthenticationError("claude", "OAuth session expired")
-    )
+    run_claude = AsyncMock(side_effect=AgentAuthenticationError("claude", "OAuth session expired"))
     monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()
@@ -328,9 +377,7 @@ async def test_headless_run_can_override_agent_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    run_claude = AsyncMock(
-        return_value=AgentRunResult(session_id="session-1", text="done")
-    )
+    run_claude = AsyncMock(return_value=AgentRunResult(session_id="session-1", text="done"))
     monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()
@@ -451,9 +498,7 @@ async def test_interrupted_automated_turn_resumes_same_session_after_restart(
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()
     store.prepare_agent_request("C123", "100.1:analysis", "100.1")
-    store.create_agent_session(
-        "C123", "100.1", "claude", "opus", "existing-session"
-    )
+    store.create_agent_session("C123", "100.1", "claude", "opus", "existing-session")
     store.cancel_agent_turn("C123", "100.1")
     store.save_durable_agent_run(
         "C123",
@@ -553,9 +598,7 @@ async def test_headless_run_ignores_interim_result_and_continues(
     assert run_claude.await_count == 2
     assert run_claude.await_args_list[1].args[2] == INTERIM_RECOVERY_PROMPT
     assert result.text == "Final notification"
-    assert store.list_scheduled_agent_runs()[0]["messages"][-1]["text"] == (
-        "Final notification"
-    )
+    assert store.list_scheduled_agent_runs()[0]["messages"][-1]["text"] == ("Final notification")
 
 
 async def test_headless_timeout_returns_partial_failure_without_retry(
@@ -598,8 +641,12 @@ async def test_interrupted_headless_turn_resumes_original_session(
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()
     store.create_scheduled_agent_run(
-        "run-1", "experiment-finalizer", "claude", "opus", "scheduled-session",
-        "Original cron request"
+        "run-1",
+        "experiment-finalizer",
+        "claude",
+        "opus",
+        "scheduled-session",
+        "Original cron request",
     )
     store.finish_scheduled_agent_run("run-1", status="interrupted")
     orchestrator = AgentOrchestrator(settings, store)
@@ -636,8 +683,12 @@ async def test_interrupted_headless_turn_ignores_interim_result_and_continues(
     store = EventStore(tmp_path / "events.sqlite3")
     store.initialize()
     store.create_scheduled_agent_run(
-        "run-1", "experiment-finalizer", "claude", "opus", "scheduled-session",
-        "Original cron request"
+        "run-1",
+        "experiment-finalizer",
+        "claude",
+        "opus",
+        "scheduled-session",
+        "Original cron request",
     )
     store.finish_scheduled_agent_run("run-1", status="interrupted")
     orchestrator = AgentOrchestrator(settings, store)
@@ -650,9 +701,7 @@ async def test_interrupted_headless_turn_ignores_interim_result_and_continues(
     assert run_claude.await_count == 2
     assert run_claude.await_args_list[1].args[2] == INTERIM_RECOVERY_PROMPT
     assert recovered[0].text == "Final notification"
-    assert store.list_interrupted_scheduled_agent_runs()[0]["result_text"] == (
-        "Final notification"
-    )
+    assert store.list_interrupted_scheduled_agent_runs()[0]["result_text"] == ("Final notification")
 
 
 def test_split_slack_message_preserves_all_text() -> None:

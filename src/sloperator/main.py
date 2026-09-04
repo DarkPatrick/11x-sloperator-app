@@ -13,7 +13,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
 from sloperator.admin import create_admin_routes
-from sloperator.agents import AgentOrchestrator, validate_agent_runtime
+from sloperator.agents import AgentOrchestrator, SlackCommunicationLayer, validate_agent_runtime
 from sloperator.archive import periodically_synchronize_archive, synchronize_archive
 from sloperator.automation_controls import AutomationControls
 from sloperator.automation_error_audit import PROJECT_ROOT, TIMEOUT_SECONDS
@@ -92,7 +92,12 @@ async def serve(settings: Settings) -> None:
     if recovered:
         LOGGER.warning("Recovered %d interrupted agent session(s)", recovered)
     vpn = VpnManager(settings)
-    orchestrator = AgentOrchestrator(settings, store, vpn)
+    orchestrator = AgentOrchestrator(
+        settings,
+        store,
+        vpn,
+        communication=SlackCommunicationLayer(settings),
+    )
     automation_controls = AutomationControls(
         settings.database_path.parent / "automation-controls.json"
     )
@@ -188,9 +193,7 @@ async def serve(settings: Settings) -> None:
             try:
                 await publish_run(app.client, orchestrator, settings, run)
             except InvalidFinalizationNotification as error:
-                LOGGER.error(
-                    "Recovered experiment finalizer returned an invalid interim response"
-                )
+                LOGGER.error("Recovered experiment finalizer returned an invalid interim response")
                 if run.run_id is not None:
                     await asyncio.to_thread(
                         store.finish_scheduled_agent_run,
@@ -200,9 +203,7 @@ async def serve(settings: Settings) -> None:
                         result_text=run.text,
                         last_error=repr(error),
                     )
-                conversation = await app.client.conversations_open(
-                    users=settings.slack_user_id
-                )
+                conversation = await app.client.conversations_open(users=settings.slack_user_id)
                 await app.client.chat_postMessage(
                     channel=conversation["channel"]["id"],
                     markdown_text=(
@@ -228,9 +229,7 @@ async def serve(settings: Settings) -> None:
         for run in recovered_design_reviews:
             try:
                 task_key = task_key_from_review_result(run.text)
-                await publish_experiment_design(
-                    app.client, orchestrator, settings, run, task_key
-                )
+                await publish_experiment_design(app.client, orchestrator, settings, run, task_key)
             except InvalidDesignResult as error:
                 if str(error).startswith("Experiment design automation failed:"):
                     await publish_failure(app.client, settings, str(error))
@@ -331,8 +330,10 @@ async def serve(settings: Settings) -> None:
                     app.client,
                     orchestrator,
                     settings,
-                    lambda: not automation_controls.disabled(
-                        "crons", experiment_design_job.display_name
+                    lambda: (
+                        not automation_controls.disabled(
+                            "crons", experiment_design_job.display_name
+                        )
                     ),
                 ),
                 name="daily-experiment-design-planner",

@@ -28,8 +28,11 @@ AUTOMATED SESSION REPOSITORY BOUNDARY (STRICT, applies for this session's entire
 
 
 AUTOMATED_RESPONSE_STYLE = """\
-AUTOMATED RESPONSE STYLE (STRICT):
-- Keep the Slack-facing first response short, direct, and free of filler, repetition, generic
+AUTOMATED RESPONSE STYLE (WORKER HANDOFF, STRICT):
+- Your result is handed to Sloperator's isolated communication layer before publication. Supply
+  the complete factual answer and artifact marker, but do not narrate internal work, review rounds,
+  agent orchestration, skills, local paths, or refer to a message that has not been published.
+- Make the reader-facing answer short, direct, and free of filler, repetition, generic
   preambles, and unnecessary technical detail. Lead with the conclusion; every sentence must help
   the reader understand the situation or decide what to do next.
 - Write in plain language that any team member can understand without specialist context. Expand
@@ -43,3 +46,19 @@ AUTOMATED RESPONSE STYLE (STRICT):
 - Follow any stricter trigger-specific output shape or length limit below. This policy is a ceiling
   on verbosity, not permission to add sections or lines.
 """
+
+
+SLACK_WORKER_HANDOFF = """\
+SLACK WORKER HANDOFF (STRICT):
+- Do the requested substantive work and return the complete factual result to Sloperator.
+- Never decide whether to answer a Slack message and never return `SLOPERATOR_NO_REPLY`.
+- Never address the user as though you have already sent an earlier draft. Internal planning,
+  review, child-agent discussion, tool activity, and local artifact paths are not conversation.
+- Sloperator's communication layer is solely responsible for the final public wording, addressee,
+  brevity, and whether a non-request warrants silence.
+"""
+
+
+def slack_worker_prompt(body: str) -> str:
+    """Build the common skeleton for any new Slack-facing worker prompt."""
+    return f"{SLACK_WORKER_HANDOFF}\n\n{body.strip()}"

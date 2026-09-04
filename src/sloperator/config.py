@@ -50,6 +50,8 @@ class Settings:
     default_agent: str = "claude"
     claude_model: str = "opus"
     codex_model: str = "gpt-5.6-sol"
+    slack_communication_model: str = "haiku"
+    slack_communication_timeout_seconds: int = 120
     claude_cli: Path = Path("/home/egor/.local/bin/claude")
     codex_cli: Path = Path("/usr/bin/codex")
     agent_timeout_seconds: int = 2_700
@@ -128,6 +130,12 @@ class Settings:
         default_agent = os.environ.get("SLOPERATOR_DEFAULT_AGENT", "claude").strip().lower()
         claude_model = os.environ.get("SLOPERATOR_CLAUDE_MODEL", "opus").strip()
         codex_model = os.environ.get("SLOPERATOR_CODEX_MODEL", "gpt-5.6-sol").strip()
+        slack_communication_model = os.environ.get(
+            "SLOPERATOR_SLACK_COMMUNICATION_MODEL", "haiku"
+        ).strip()
+        slack_communication_timeout_seconds = int(
+            os.environ.get("SLOPERATOR_SLACK_COMMUNICATION_TIMEOUT_SECONDS", "120")
+        )
         claude_cli = Path(
             os.environ.get("SLOPERATOR_CLAUDE_CLI", "/home/egor/.local/bin/claude")
         ).expanduser()
@@ -307,6 +315,12 @@ class Settings:
             raise ConfigurationError("LDAP_PASSWORD must not contain line breaks")
         if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ConfigurationError("SLOPERATOR_LOG_LEVEL is invalid")
+        if not slack_communication_model:
+            raise ConfigurationError("SLOPERATOR_SLACK_COMMUNICATION_MODEL must not be empty")
+        if slack_communication_timeout_seconds <= 0:
+            raise ConfigurationError(
+                "SLOPERATOR_SLACK_COMMUNICATION_TIMEOUT_SECONDS must be positive"
+            )
 
         return cls(
             slack_user_id=user_id,
@@ -323,6 +337,8 @@ class Settings:
             default_agent=default_agent,
             claude_model=claude_model,
             codex_model=codex_model,
+            slack_communication_model=slack_communication_model,
+            slack_communication_timeout_seconds=slack_communication_timeout_seconds,
             claude_cli=claude_cli,
             codex_cli=codex_cli,
             agent_timeout_seconds=agent_timeout_seconds,

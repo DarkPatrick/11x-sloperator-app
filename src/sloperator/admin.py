@@ -219,10 +219,11 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <section id="panel-agents" class="panel"><h2>Agent sessions</h2>
 <div id="sessions" class="grid"></div></section>
 <section id="panel-cron" class="panel"><h2>Cron runs</h2><div class="cron-toolbar row spread">
-<span class="sub">Last 28 days · UTC (journal-backed details: 3 days)</span><div class="cron-legend">
+<span class="sub">Last 28 days · UTC</span><div class="cron-legend">
 <span class="legend-item"><i class="run-dot success"></i>Completed</span>
 <span class="legend-item"><i class="run-dot running"></i>Running</span>
 <span class="legend-item"><i class="run-dot"></i>Started, awaiting result</span>
+<span class="legend-item"><i class="run-dot"></i>Outcome unavailable</span>
 <span class="legend-item"><i class="run-dot failed"></i>Failed</span>
 <span class="legend-item"><i class="run-dot scheduled"></i>Scheduled</span>
 <span class="legend-item"><i class="run-dot missed"></i>No record</span>
@@ -880,7 +881,7 @@ def _cron_history() -> list[dict[str, str]]:
             "-t",
             "CRON",
             "--since",
-            "3 days ago",
+            "28 days ago",
             "--grep=^\\(egor\\) CMD \\(",
         ],
         capture_output=True,
@@ -923,7 +924,13 @@ def _label_cron_history(
             ),
             command.split()[0] if command else "unknown",
         )
-        labelled.append({**row, "job": job, "status": "launched"})
+        timestamp = dt.datetime.strptime(row["time"], "%Y-%m-%d %H:%M:%S UTC").replace(
+            tzinfo=dt.UTC
+        )
+        status = (
+            "unknown" if dt.datetime.now(dt.UTC) - timestamp > dt.timedelta(hours=1) else "launched"
+        )
+        labelled.append({**row, "job": job, "status": status})
     return labelled
 
 
@@ -1035,6 +1042,37 @@ def _cron_execution_history(
     return rows, authoritative
 
 
+def _unmatched_cron_launches(
+    jobs: list[dict[str, str]],
+    history: list[dict[str, str]],
+    execution_history: list[dict[str, str]],
+    authoritative_jobs: set[str],
+) -> list[dict[str, str]]:
+    """Retain unknown historical launches before per-job outcome logging began."""
+    first_outcomes = {
+        name: _utc_string(
+            min(
+                dt.datetime.fromisoformat(
+                    match.group(1) if (match := re.search(r"started_at=([^ ]+)", row["command"]))
+                    else row["time"].removesuffix(" UTC") + "+00:00"
+                )
+                for row in execution_history if row["job"] == name
+            ) - dt.timedelta(minutes=1)
+        )
+        for name in authoritative_jobs
+        if any(row["job"] == name for row in execution_history)
+    }
+    return [
+        row
+        for row in _label_cron_history(jobs, history)
+        if row["job"] not in authoritative_jobs
+        or (
+            row["status"] == "unknown"
+            and row["time"] < first_outcomes.get(row["job"], "")
+        )
+    ]
+
+
 def _systemd_scheduler_jobs(settings: Settings) -> list[dict[str, Any]]:
     """Describe every scheduler registered inside sloperator.service."""
     result = subprocess.run(
@@ -1086,7 +1124,7 @@ def _one_systemd_scheduler_history(
             "-u",
             "sloperator",
             "--since",
-            "3 days ago",
+            "28 days ago",
             "--grep=" + job.logger_name.replace(".", "\\.") + ":",
             "--case-sensitive=yes",
         ],
@@ -1140,9 +1178,7 @@ def _one_systemd_scheduler_history(
         if status == "started":
             durable_status = durable_statuses.get(row["time"].removesuffix(" UTC"))
             if durable_status in {"completed", "failed", "cancelled"}:
-                row["command"] = (
-                    f"sloperator.service · {job.job_name} · {durable_status}"
-                )
+                row["command"] = f"sloperator.service · {job.job_name} · {durable_status}"
                 row["status"] = durable_status
                 pending_starts.append(len(rows))
                 rows.append(row)
@@ -1163,7 +1199,26 @@ def _one_systemd_scheduler_history(
             started_row["status"] = status
         else:
             rows.append(row)
-    return list(reversed(rows))
+    # Journal retention/restarts must not erase durable run history. Supplement
+    # only the scheduler's first stage; reviewer sessions are not separate fires.
+    seen_times = {row["time"].removesuffix(" UTC") for row in rows if row["status"] != "scheduled"}
+    for run in scheduled_runs or []:
+        if run.get("channel_name") != job.run_job_names[0]:
+            continue
+        created_at = str(run["created_at"])
+        if created_at in seen_times:
+            continue
+        status = str(run["status"])
+        rows.append(
+            {
+                "time": created_at + " UTC",
+                "command": f"sloperator.service · {job.job_name} · durable run · {status}",
+                "job": job.display_name,
+                "status": "started" if status == "running" else status,
+            }
+        )
+        seen_times.add(created_at)
+    return sorted(rows, key=lambda row: row["time"], reverse=True)
 
 
 def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
@@ -1330,6 +1385,7 @@ def create_admin_routes(
             (session["channel_id"], session["thread_ts"]) for session in runtime_headless
         }
         persisted_headless = await asyncio.to_thread(store.list_scheduled_agent_runs)
+        scheduler_runs = await asyncio.to_thread(store.scheduled_run_history)
         sessions = [
             *runtime_headless,
             *(
@@ -1352,7 +1408,7 @@ def create_admin_routes(
             asyncio.to_thread(_crontab),
             asyncio.to_thread(_cron_history),
             asyncio.to_thread(_systemd_scheduler_jobs, orchestrator.settings),
-            asyncio.to_thread(_systemd_scheduler_history, persisted_headless),
+            asyncio.to_thread(_systemd_scheduler_history, scheduler_runs),
         )
         cron_jobs = _cron_jobs(crontab)
         for service_job in service_jobs:
@@ -1363,11 +1419,9 @@ def create_admin_routes(
         execution_history, authoritative_jobs = await asyncio.to_thread(
             _cron_execution_history, cron_jobs
         )
-        journal_history = [
-            row
-            for row in _label_cron_history(cron_jobs, history)
-            if row["job"] not in authoritative_jobs
-        ]
+        journal_history = _unmatched_cron_launches(
+            cron_jobs, history, execution_history, authoritative_jobs
+        )
         return web.json_response(
             {
                 "sessions": sessions,

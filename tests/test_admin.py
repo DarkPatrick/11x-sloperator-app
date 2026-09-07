@@ -19,6 +19,7 @@ from sloperator.admin import (
     _slack_trigger_definitions,
     _systemd_scheduler_history,
     _systemd_scheduler_jobs,
+    _unmatched_cron_launches,
 )
 from sloperator.config import Settings
 
@@ -49,7 +50,7 @@ def test_cron_history_extracts_launches_newest_first() -> None:
     assert [row["command"] for row in rows] == ["second-job", "first-job"]
     args = run.call_args.args[0]
     assert "--since" in args
-    assert "3 days ago" in args
+    assert "28 days ago" in args
     assert "--grep=^\\(egor\\) CMD \\(" in args
     assert "-n" not in args
 
@@ -110,7 +111,7 @@ def test_cron_history_is_labelled_for_calendar() -> None:
             "time": "2026-07-28 08:00:00 UTC",
             "command": "cd /repo && run-health",
             "job": "health",
-            "status": "launched",
+            "status": "unknown",
         }
     ]
 
@@ -509,8 +510,7 @@ def test_systemd_scheduler_history_extracts_automation_audit_events() -> None:
     started = {
         "__REALTIME_TIMESTAMP": "1000000",
         "MESSAGE": (
-            "INFO sloperator.automation_error_audit: "
-            "Starting scheduled automation error audit"
+            "INFO sloperator.automation_error_audit: Starting scheduled automation error audit"
         ),
     }
     completed = {
@@ -534,8 +534,7 @@ def test_systemd_scheduler_history_closes_superseded_start() -> None:
     first = {
         "__REALTIME_TIMESTAMP": "1000000",
         "MESSAGE": (
-            "INFO sloperator.experiment_finalizer: "
-            "Starting scheduled experiment finalizer run"
+            "INFO sloperator.experiment_finalizer: Starting scheduled experiment finalizer run"
         ),
     }
     second = {**first, "__REALTIME_TIMESTAMP": "2000000"}
@@ -551,15 +550,16 @@ def test_systemd_scheduler_history_uses_durable_recovery_status() -> None:
     started = {
         "__REALTIME_TIMESTAMP": "1000000",
         "MESSAGE": (
-            "INFO sloperator.experiment_finalizer: "
-            "Starting scheduled experiment finalizer run"
+            "INFO sloperator.experiment_finalizer: Starting scheduled experiment finalizer run"
         ),
     }
-    durable = [{
-        "channel_name": "experiment-finalizer",
-        "created_at": "1970-01-01 00:00:01",
-        "status": "completed",
-    }]
+    durable = [
+        {
+            "channel_name": "experiment-finalizer",
+            "created_at": "1970-01-01 00:00:01",
+            "status": "completed",
+        }
+    ]
     with patch("sloperator.admin.subprocess.run") as run:
         run.return_value.stdout = json.dumps(started)
 
@@ -572,15 +572,16 @@ def test_design_scheduler_history_uses_preparer_durable_status() -> None:
     started = {
         "__REALTIME_TIMESTAMP": "1000000",
         "MESSAGE": (
-            "INFO sloperator.experiment_design_planner: "
-            "Starting scheduled experiment design run"
+            "INFO sloperator.experiment_design_planner: Starting scheduled experiment design run"
         ),
     }
-    durable = [{
-        "channel_name": "experiment-design-preparer",
-        "created_at": "1970-01-01 00:00:01",
-        "status": "failed",
-    }]
+    durable = [
+        {
+            "channel_name": "experiment-design-preparer",
+            "created_at": "1970-01-01 00:00:01",
+            "status": "failed",
+        }
+    ]
     with patch("sloperator.admin.subprocess.run") as run:
         run.return_value.stdout = json.dumps(started)
 
@@ -594,8 +595,7 @@ def test_systemd_scheduler_history_closes_start_on_failure() -> None:
     started = {
         "__REALTIME_TIMESTAMP": "1000000",
         "MESSAGE": (
-            "INFO sloperator.experiment_design_planner: "
-            "Starting scheduled experiment design run"
+            "INFO sloperator.experiment_design_planner: Starting scheduled experiment design run"
         ),
     }
     failed = {
@@ -613,3 +613,62 @@ def test_systemd_scheduler_history_closes_start_on_failure() -> None:
     assert len(rows) == 1
     assert rows[0]["status"] == "failed"
     assert rows[0]["command"] == "sloperator.service · experiment-design-planner · failed"
+
+
+def test_scheduler_history_survives_missing_journal() -> None:
+    durable = [
+        {
+            "channel_name": "experiment-finalizer",
+            "created_at": "2026-09-04 09:00:00",
+            "status": "completed",
+        }
+    ]
+    with patch("sloperator.admin.subprocess.run") as run:
+        run.return_value.stdout = ""
+        rows = _systemd_scheduler_history(durable)
+    assert len(rows) == 1
+    assert rows[0]["time"] == "2026-09-04 09:00:00 UTC"
+    assert rows[0]["status"] == "completed"
+    assert rows[0]["job"] == "experiment-finalizer (sloperator.service)"
+    assert "28 days ago" in run.call_args.args[0]
+
+
+def test_scheduler_does_not_count_reviewer_as_another_fire() -> None:
+    durable = [
+        {
+            "channel_name": "experiment-design-preparer",
+            "created_at": "2026-09-04 09:00:00",
+            "status": "completed",
+        },
+        {
+            "channel_name": "experiment-design-reviewer",
+            "created_at": "2026-09-04 09:10:00",
+            "status": "completed",
+        },
+    ]
+    with patch("sloperator.admin.subprocess.run") as run:
+        run.return_value.stdout = ""
+        rows = _systemd_scheduler_history(durable)
+    assert len(rows) == 1
+
+
+def test_recent_cron_launch_is_still_pending() -> None:
+    timestamp = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    rows = _label_cron_history([], [{"time": timestamp, "command": "test"}])
+    assert rows[0]["status"] == "launched"
+
+
+def test_new_outcome_logging_preserves_older_launches_without_duplicate() -> None:
+    jobs = [{"name": "poller", "command": "poll"}]
+    history = [
+        {"time": "2026-08-20 09:00:00 UTC", "command": "poll"},
+        {"time": "2026-08-20 10:00:00 UTC", "command": "poll"},
+    ]
+    outcomes = [{
+        "time": "2026-08-20 10:05:00 UTC", "job": "poller", "status": "completed",
+        "command": "execution log · started_at=2026-08-20T10:00:02+00:00 · exit_code=0",
+    }]
+    rows = _unmatched_cron_launches(jobs, history, outcomes, {"poller"})
+    assert len(rows) == 1
+    assert rows[0]["time"] == history[0]["time"]
+    assert rows[0]["status"] == "unknown"

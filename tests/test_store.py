@@ -350,3 +350,23 @@ def test_store_redacts_vpn_otp_from_event_and_message(tmp_path: Path) -> None:
     assert "123456" not in payload
     assert "123456" not in text
     assert "123456" not in raw
+
+
+def test_scheduler_history_is_not_limited_by_recent_agent_sessions(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "history.sqlite3")
+    store.initialize()
+    with store._connect() as connection:
+        for number in range(105):
+            connection.execute(
+                "INSERT INTO scheduled_agent_runs(run_id,job_name,provider,model,prompt,status) "
+                "VALUES (?, ?, 'claude', 'opus', '', 'completed')",
+                (str(number), "experiment-finalizer" if number == 0 else "other"),
+            )
+        connection.execute(
+            "UPDATE scheduled_agent_runs SET created_at=datetime('now','-10 days'), "
+            "updated_at=datetime('now','-10 days') WHERE run_id='0'"
+        )
+    assert len(store.list_scheduled_agent_runs()) == 100
+    history = store.scheduled_run_history()
+    assert len(history) == 105
+    assert any(row["channel_name"] == "experiment-finalizer" for row in history)

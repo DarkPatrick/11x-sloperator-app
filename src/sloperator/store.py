@@ -629,6 +629,20 @@ class EventStore:
                 (status, external_session_id, status, result_text, last_error, run_id),
             )
 
+    def scheduled_run_history(self) -> list[dict[str, Any]]:
+        """Read 28 days of scheduler outcomes without the agent UI's session limit."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT job_name AS channel_name, status, created_at, updated_at
+                FROM scheduled_agent_runs
+                WHERE datetime(created_at) >= datetime('now', '-28 days')
+                ORDER BY datetime(created_at) DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_scheduled_agent_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         """Return durable cron/headless runs in the agent-session UI shape."""
         with self._connect() as connection:
@@ -1135,12 +1149,15 @@ class EventStore:
             if session is not None:
                 status, last_activity_at = session
                 terminal = status in {"expired", "closed"}
-                expired = terminal or connection.execute(
-                    """
+                expired = (
+                    terminal
+                    or connection.execute(
+                        """
                     SELECT datetime(?) <= datetime('now', ?)
                     """,
-                    (last_activity_at, f"-{inactivity_hours} hours"),
-                ).fetchone()[0]
+                        (last_activity_at, f"-{inactivity_hours} hours"),
+                    ).fetchone()[0]
+                )
                 if expired:
                     if not terminal:
                         connection.execute(

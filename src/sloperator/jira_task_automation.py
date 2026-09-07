@@ -67,7 +67,7 @@ REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the review
 def worker_prompt(task_key: str, summary: str = "", description: str = "") -> str:
     parent, template = confluence_destination(summary)
     destination = f"\nTask-specific destination: {parent}. Required template: {template or 'none'}." 
-    request = f"\nAUTHORITATIVE JIRA REQUEST (read and follow exactly):\n{description or summary}\n"
+    request = f"\nAUTHORITATIVE TASK SOURCE: https://mu--se.atlassian.net/browse/{task_key}\nOpen this task through the Jira helper with --as-bot and read its complete current description, acceptance criteria, attachments, and all recent comments. Treat the Jira task as the source of truth; do not rely on copied text in this prompt.\n"
     return (WORKER_PROMPT.format(task_key=task_key).replace(
         "For Confluence use the service account's personal space if it exists; otherwise use the server.",
         "A bot-authenticated check found no personal Confluence space for ug-ai-analyst; use the server space.",
@@ -75,7 +75,7 @@ def worker_prompt(task_key: str, summary: str = "", description: str = "") -> st
 
 
 def reviewer_prompt(task_key: str, description: str = "") -> str:
-    return REVIEWER_PROMPT.format(task_key=task_key) + f"\nAUTHORITATIVE JIRA REQUEST:\n{description}"
+    return REVIEWER_PROMPT.format(task_key=task_key) + f"\nAUTHORITATIVE TASK SOURCE: https://mu--se.atlassian.net/browse/{task_key}\nOpen it through the Jira helper with --as-bot and read its complete current description, acceptance criteria, attachments, and all recent comments before reviewing."
 
 
 async def read_confluence_comments(page_url: str, workspace: Path) -> list[dict[str, Any]]:

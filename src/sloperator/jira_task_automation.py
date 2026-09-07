@@ -112,6 +112,7 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
                 if agent.store.jira_task_agent_link(candidate.key) is None
                 or agent.store.jira_task_agent_link(candidate.key).get("terminal_at") is not None
             ]
+            LOGGER.info("Jira task automation found %d eligible queued task(s)", len(candidates))
             if not candidates:
                 continue
             task = candidates[0]

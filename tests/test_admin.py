@@ -50,7 +50,7 @@ def test_cron_history_extracts_launches_newest_first() -> None:
     assert [row["command"] for row in rows] == ["second-job", "first-job"]
     args = run.call_args.args[0]
     assert "--since" in args
-    assert "28 days ago" in args
+    assert "3 days ago" in args
     assert "--grep=^\\(egor\\) CMD \\(" in args
     assert "-n" not in args
 
@@ -630,7 +630,7 @@ def test_scheduler_history_survives_missing_journal() -> None:
     assert rows[0]["time"] == "2026-09-04 09:00:00 UTC"
     assert rows[0]["status"] == "completed"
     assert rows[0]["job"] == "experiment-finalizer (sloperator.service)"
-    assert "28 days ago" in run.call_args.args[0]
+    assert "3 days ago" in run.call_args.args[0]
 
 
 def test_scheduler_does_not_count_reviewer_as_another_fire() -> None:

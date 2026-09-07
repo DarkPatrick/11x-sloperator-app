@@ -1426,6 +1426,21 @@ class AgentOrchestrator:
                     run_id,
                     type(error).__name__,
                 )
+                task_match = re.search(r"\b(UMN-\d+)\b", str(row.get("prompt", "")))
+                if task_match:
+                    task_key = task_match.group(1)
+                    helper = run_settings.agent_workspace / ".claude" / "jira" / "jira_issue.py"
+                    try:
+                        process = await asyncio.create_subprocess_exec(
+                            str(run_settings.agent_workspace / ".venv" / "bin" / "python"),
+                            str(helper), "add-comment", task_key, "--as-bot", "--text",
+                            "@Egor Semin: автоматический reviewer не смог завершить запуск после исчерпания попыток. Задача приостановлена; Sloperator зафиксировал ошибку, требуется ручная проверка.",
+                            cwd=str(run_settings.agent_workspace),
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                        )
+                        await asyncio.wait_for(process.communicate(), timeout=60)
+                    except Exception:
+                        LOGGER.exception("Failed to post Jira recovery failure comment for %s", task_key)
                 await asyncio.to_thread(
                     self.store.finish_scheduled_agent_run,
                     run_id,

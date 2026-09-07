@@ -49,11 +49,13 @@ WORKER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the worker f
 REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the reviewer and communication owner for Jira task {{task_key}}. Read all new Jira comments and all comments on the created Confluence page, verify the worker's result, and make corrections with the worker when needed. If information is missing, ask the task author in Jira and pause. When complete, add a concise Jira comment, set Due date via duedate, and transition with ID 181 to In Review. Keep all communication short and human-readable. Continue owning replies until the task is Done plus 24 hours without activity."""
 
 
-def worker_prompt(task_key: str) -> str:
+def worker_prompt(task_key: str, summary: str = "") -> str:
+    parent, template = confluence_destination(summary)
+    destination = f"\nTask-specific destination: {parent}. Required template: {template or 'none'}." 
     return (WORKER_PROMPT.format(task_key=task_key).replace(
         "For Confluence use the service account's personal space if it exists; otherwise use the server.",
         "A bot-authenticated check found no personal Confluence space for ug-ai-analyst; use the server space.",
-    ) + "\nReturn a final line `CONFLUENCE_PAGE: <URL>` when you created or updated a page.")
+    ) + destination + "\nReturn a final line `CONFLUENCE_PAGE: <URL>` when you created or updated a page.")
 
 
 def reviewer_prompt(task_key: str) -> str:
@@ -90,7 +92,7 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
             task = candidates[0]
             link = agent.store.jira_task_agent_link(task.key)
             worker = await agent.execute_once(
-                worker_prompt(task.key), 7200, job_name="jira-task-worker",
+                worker_prompt(task.key, task.summary), 7200, job_name="jira-task-worker",
                 existing_session_id=(link or {}).get("worker_session_id"),
             )
             agent.store.upsert_jira_task_agent_link(
@@ -139,7 +141,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                 page_context = str(link.get("confluence_page_url") or "No Confluence page URL is recorded yet.")
                 if task.status in QUEUED_STATUSES and link.get("phase") == "reviewer":
                     worker = await agent.execute_once(
-                        worker_prompt(task.key)
+                        worker_prompt(task.key, task.summary)
                         + "\nThe task was returned to the queue. Read its newest comment and perform the requested follow-up.",
                         7200,
                         job_name="jira-task-worker",

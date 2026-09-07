@@ -217,6 +217,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                 if is_reserved_experiment_task(task.summary):
                     continue
                 comments = await reader.recent_comments(task.key)
+                returned_to_work = await reader.was_returned_to_work(task.key, since=link.get("last_jira_updated_at"))
                 comment_context = json.dumps(comments[-5:], ensure_ascii=False)[:8000]
                 page_context = str(link.get("confluence_page_url") or "No Confluence page URL is recorded yet.")
                 page_comments: list[dict[str, Any]] = []
@@ -234,6 +235,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     previous_jira
                     and task.updated_at <= dt.datetime.fromisoformat(str(previous_jira))
                     and (page_version is None or page_version == previous_page)
+                    and not returned_to_work
                 ):
                     continue
                 if await abuse_precheck(settings, task.summary, comments):
@@ -241,7 +243,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     if on_abuse: await on_abuse(task, comments)
                     if pause: pause()
                     continue
-                if task.status in QUEUED_STATUSES and link.get("phase") == "reviewer":
+                if (task.status in QUEUED_STATUSES or returned_to_work) and link.get("phase") == "reviewer":
                     worker = await agent.execute_once(
                         worker_prompt(task.key, task.summary, task.description)
                         + "\nThe task was returned to the queue. Read its newest comment and perform the requested follow-up.",
@@ -368,3 +370,21 @@ class JiraTaskReader:
                     raise RuntimeError(f"Jira comment read failed with HTTP {response.status}")
                 payload: dict[str, Any] = json.loads(await response.text())
         return [item for item in payload.get("comments", []) if isinstance(item, dict)]
+
+    async def was_returned_to_work(self, task_key: str, since: str | None = None) -> bool:
+        async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
+            async with session.get(
+                f"{self.base_url}/rest/api/3/issue/{task_key}",
+                params={"expand": "changelog", "fields": "status"},
+            ) as response:
+                if response.status >= 400:
+                    return False
+                payload: dict[str, Any] = json.loads(await response.text())
+        histories = payload.get("changelog", {}).get("histories", [])
+        for history in reversed(histories):
+            if since and str(history.get("created", "")) <= since:
+                continue
+            for item in history.get("items", []):
+                if item.get("field") == "status":
+                    return item.get("fromString") == "In Review" and item.get("toString") in {"In Progress", "В работе"}
+        return False

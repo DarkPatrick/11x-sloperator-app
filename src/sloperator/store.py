@@ -144,6 +144,18 @@ CREATE TABLE IF NOT EXISTS scheduled_agent_runs (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS jira_task_agent_links (
+    task_key TEXT PRIMARY KEY,
+    worker_session_id TEXT,
+    reviewer_session_id TEXT,
+    phase TEXT NOT NULL DEFAULT 'worker',
+    last_jira_updated_at TEXT,
+    last_confluence_activity_at TEXT,
+    last_activity_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    terminal_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS admin_codex_sessions (
     session_id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -603,6 +615,47 @@ class EventStore:
                 """,
                 (run_id, job_name, provider, model, external_session_id, prompt),
             )
+
+    def upsert_jira_task_agent_link(
+        self,
+        task_key: str,
+        *,
+        worker_session_id: str | None = None,
+        reviewer_session_id: str | None = None,
+        phase: str = "worker",
+        last_jira_updated_at: str | None = None,
+        last_confluence_activity_at: str | None = None,
+        terminal_at: str | None = None,
+    ) -> None:
+        """Persist the durable worker/reviewer ownership for a Jira task."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO jira_task_agent_links(
+                    task_key, worker_session_id, reviewer_session_id, phase,
+                    last_jira_updated_at, last_confluence_activity_at, terminal_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_key) DO UPDATE SET
+                    worker_session_id = COALESCE(excluded.worker_session_id, worker_session_id),
+                    reviewer_session_id = COALESCE(excluded.reviewer_session_id, reviewer_session_id),
+                    phase = excluded.phase,
+                    last_jira_updated_at = COALESCE(excluded.last_jira_updated_at, last_jira_updated_at),
+                    last_confluence_activity_at = COALESCE(excluded.last_confluence_activity_at, last_confluence_activity_at),
+                    terminal_at = excluded.terminal_at,
+                    last_activity_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (task_key, worker_session_id, reviewer_session_id, phase,
+                 last_jira_updated_at, last_confluence_activity_at, terminal_at),
+            )
+
+    def jira_task_agent_link(self, task_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM jira_task_agent_links WHERE task_key = ?", (task_key,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def finish_scheduled_agent_run(
         self,

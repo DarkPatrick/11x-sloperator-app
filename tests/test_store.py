@@ -370,3 +370,17 @@ def test_scheduler_history_is_not_limited_by_recent_agent_sessions(tmp_path: Pat
     history = store.scheduled_run_history()
     assert len(history) == 105
     assert any(row["channel_name"] == "experiment-finalizer" for row in history)
+def test_jira_task_agent_link_is_durable(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "tasks.sqlite3")
+    store.initialize()
+    store.upsert_jira_task_agent_link(
+        "UMN-14000", worker_session_id="worker-1", phase="reviewer"
+    )
+    store.upsert_jira_task_agent_link(
+        "UMN-14000", reviewer_session_id="reviewer-1", phase="worker"
+    )
+    link = store.jira_task_agent_link("UMN-14000")
+    assert link is not None
+    assert link["worker_session_id"] == "worker-1"
+    assert link["reviewer_session_id"] == "reviewer-1"
+    assert link["phase"] == "worker"

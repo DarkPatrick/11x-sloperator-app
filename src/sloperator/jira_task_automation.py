@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 BOARD_ID = 175
 SERVICE_ACCOUNT_ID = "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"
-QUEUED_STATUSES = frozenset({"Backlog", "To Do"})
+QUEUED_STATUSES = frozenset({"Backlog", "To Do", "К выполнению"})
 RETURNED_MARKER = "returned to work"
 RESERVED_EXPERIMENT_PATTERNS = ("analytics", "аналитик", "experiment design", "experiment-design", "дизайн эксперимента", "расчет сверху", "план тестирования", "experiment final", "experiment-final", "finaliz", "финализ", "итоги", "results")
 PAGE_RE = re.compile(r"^CONFLUENCE_PAGE:\s*(https://\S+)\s*$", re.MULTILINE)

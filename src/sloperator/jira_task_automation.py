@@ -42,7 +42,7 @@ def _parse_reset_day(value: str, now: dt.datetime) -> dt.datetime:
     cleaned = value.replace("(UTC)", "").strip()
     for fmt in ("%b %d, %I:%M%p", "%b %d, %I%p"):
         try:
-            parsed = dt.datetime.strptime(cleaned, fmt).replace(year=now.year, tzinfo=dt.UTC)
+            parsed = dt.datetime.strptime(f"{cleaned} {now.year}", f"{fmt} %Y").replace(tzinfo=dt.UTC)
             if parsed < now - dt.timedelta(days=180):
                 parsed = parsed.replace(year=now.year + 1)
             return parsed

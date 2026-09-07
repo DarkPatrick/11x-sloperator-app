@@ -1103,7 +1103,11 @@ def _systemd_scheduler_history(
 ) -> list[dict[str, str]]:
     """Return scheduler history with each start/completion represented once."""
     rows: list[dict[str, str]] = []
-    for job in EMBEDDED_SCHEDULED_JOBS:
+    jobs = sorted(
+        EMBEDDED_SCHEDULED_JOBS,
+        key=lambda job: job.job_name == "jira-task-automation",
+    )
+    for job in jobs:
         rows.extend(_one_systemd_scheduler_history(job, scheduled_runs))
     return sorted(rows, key=lambda row: row["time"], reverse=True)
 
@@ -1141,7 +1145,7 @@ def _one_systemd_scheduler_history(
     durable_statuses = {
         str(run["created_at"]): str(run["status"])
         for run in scheduled_runs or []
-        if run.get("channel_name") in job.run_job_names
+        if run.get("channel_name") in {*job.run_job_names, job.job_name}
     }
     for line in result.stdout.splitlines():
         try:
@@ -1200,7 +1204,7 @@ def _one_systemd_scheduler_history(
     # only the scheduler's first stage; reviewer sessions are not separate fires.
     seen_times = {row["time"].removesuffix(" UTC") for row in rows if row["status"] != "scheduled"}
     for run in scheduled_runs or []:
-        if run.get("channel_name") != job.run_job_names[0]:
+        if run.get("channel_name") not in {job.run_job_names[0], job.job_name}:
             continue
         created_at = str(run["created_at"])
         if created_at in seen_times:

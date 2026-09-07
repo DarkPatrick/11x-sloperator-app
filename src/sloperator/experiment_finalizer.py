@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import re
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
@@ -30,8 +31,8 @@ FAILURE_PREFIXES = (
 )
 
 FINALIZATION_PROMPT = f"""\
-This is the authorised daily autonomous experiment-finalisation job. Complete the whole
-workflow in this single turn. The user explicitly pre-approves progression through all three
+This is the authorised daily autonomous experiment-finalisation preparation pass. Complete the
+calculation and Confluence publication in this turn. The user explicitly pre-approves progression through all three
 publication stages (Results, then Insights, then Decision / Next steps), including the required
 Confluence update and Jira comment. Do not pause to request approval between stages. This
 instruction intentionally overrides only the interactive approval pauses in the skills; keep
@@ -134,14 +135,16 @@ Execution for the selected experiment:
    Never put local/server paths or links to logs, SQL, scripts, CSVs, ZIPs, or other run artifacts
    into the project-page body. Package useful reader-safe analysis artifacts into one bundle and
    upload it as an attachment to the existing project page instead. Verify the attachment upload.
-5. Resolve the project's Jira epic, then the Results/Итоги task for the matching iteration. Use the
-   repository Jira helper and add one short English comment saying the results were calculated and
-   published automatically, with the experiment id and project-page link. Re-fetch the issue and
-   verify the comment. Do not comment on a guessed epic, a different iteration, or a generic task;
-   if the exact task cannot be established, report that as an incomplete step.
+5. Do not write to Jira, send Slack, or transition issues in this preparation pass. Leave the Jira
+   comment, assignee/date update, transition, and final notification to the independent reviewer.
 
-Notification:
-- Return the final notification to Sloperator; it will publish it as one top-level message in the
+Preparation result:
+- Return exactly `FINALIZATION_PREPARED: <experiment id> | <project page URL> | Iteration <n>` after
+  Confluence verification. Return `{NO_OP_NOTIFICATION}` for no eligible candidates, or a concise
+  `Experiment finalisation failed: <reason>` line on failure. Do not return any other text.
+
+Final notification (reviewer only):
+- Return the final notification to Sloperator only from the independent reviewer; it will publish it as one top-level message in the
   configured production channel and attach this same agent session to the resulting Slack thread.
 - Do not send any kickoff, progress, validation, QA, waiting, or completion-soon messages through
   Slack tools. In particular, never post messages such as "starting the daily finalisation" or
@@ -175,6 +178,22 @@ Use the current date/time in Asia/Nicosia for all relative-date and completion d
 Never finalise more than one experiment in this run.
 """
 
+REVIEW_PROMPT = f"""\
+[claude]
+This is the authorised independent review pass for one prepared UG experiment finalisation.
+Review only the exact experiment, project page, and iteration supplied below. Re-fetch the page and
+verify Results, Insights, Decision, and Next steps are complete, valid, and belong to that iteration.
+Use the repository Jira helper with `--as-bot` for every Jira command. Resolve the service account from
+`/myself` (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`), assign the exact Results task to it, set
+`Start date` (`customfield_10312`) and `Due date` (`duedate`) to today's `YYYY-MM-DD` date, add the
+short English publication comment, re-fetch and verify it, then transition with ID `181` to `In Review`
+and verify. Return the final Slack notification in the exact production format from the preparation
+prompt. Do not send Slack yourself. On any failure return exactly `Experiment finalisation failed: <reason>`.
+
+Preparation result:
+{{prepared_result}}
+"""
+
 
 class AgentSubmitter(Protocol):
     async def execute_once(
@@ -197,6 +216,14 @@ class AgentSubmitter(Protocol):
 
 class InvalidFinalizationNotification(ValueError):
     """The scheduled agent returned text that is unsafe to publish directly."""
+
+
+PREPARED_RE = re.compile(r"FINALIZATION_PREPARED:\s*(\d+)\s*\|\s*(\S+)\s*\|\s*Iteration\s+(\d+)")
+
+
+def is_preparation_result(text: str) -> bool:
+    stripped = text.strip()
+    return bool(PREPARED_RE.search(stripped) or stripped.startswith(NO_OP_PREFIX) or stripped.startswith(FAILURE_PREFIXES))
 
 
 def normalize_finalization_notification(text: str) -> str:
@@ -252,13 +279,26 @@ async def run_once(
     settings: Settings,
 ) -> str:
     """Run headlessly, publish once, and attach the resumable session."""
-    run = await agent.execute_once(
+    prepared_run = await agent.execute_once(
         FINALIZATION_PROMPT,
         settings.experiment_finalizer_timeout_seconds,
-        job_name="experiment-finalizer",
+        job_name="experiment-finalizer-preparer",
+        accept_result=is_preparation_result,
+    )
+    prepared_text = prepared_run.text.strip()
+    if prepared_text.startswith(NO_OP_PREFIX) or prepared_text.startswith(FAILURE_PREFIXES):
+        if prepared_text.startswith(NO_OP_PREFIX):
+            return await publish_run(client, agent, settings, replace(prepared_run, text=NO_OP_NOTIFICATION))
+        raise InvalidFinalizationNotification(prepared_text)
+    if PREPARED_RE.search(prepared_text) is None:
+        raise InvalidFinalizationNotification("Preparation agent returned no FINALIZATION_PREPARED marker")
+    review_run = await agent.execute_once(
+        REVIEW_PROMPT.format(prepared_result=prepared_text),
+        settings.experiment_finalizer_timeout_seconds,
+        job_name="experiment-finalizer-reviewer",
         accept_result=is_finalization_notification,
     )
-    return await publish_run(client, agent, settings, run)
+    return await publish_run(client, agent, settings, review_run)
 
 
 async def publish_run(

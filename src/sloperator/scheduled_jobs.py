@@ -33,7 +33,7 @@ class EmbeddedScheduledJob:
 EMBEDDED_SCHEDULED_JOBS = (
     EmbeddedScheduledJob(
         job_name="experiment-finalizer",
-        run_job_names=("experiment-finalizer",),
+        run_job_names=("experiment-finalizer-preparer", "experiment-finalizer-reviewer"),
         display_name="experiment-finalizer (sloperator.service)",
         schedule=lambda settings: (
             f"weekdays Mon-Fri {settings.experiment_finalizer_hour:02d}:00 "

@@ -11,6 +11,7 @@ from sloperator.agents import HeadlessAgentRun
 from sloperator.config import Settings
 from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
+    REVIEW_PROMPT,
     NO_OP_NOTIFICATION,
     InvalidFinalizationNotification,
     is_finalization_notification,
@@ -109,14 +110,15 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     client = SimpleNamespace(
         chat_postMessage=AsyncMock(return_value={"channel": "DOWNER", "ts": "100.1"}),
     )
-    run = HeadlessAgentRun(
+    prep_run = HeadlessAgentRun(
         provider="claude",
         model="opus",
         session_id="session-1",
-        text=VALID_NOTIFICATION,
+        text="FINALIZATION_PREPARED: 7607 | https://alice.example/project | Iteration 3",
     )
+    review_run = HeadlessAgentRun(provider="claude", model="opus", session_id="session-2", text=VALID_NOTIFICATION)
     agent = SimpleNamespace(
-        execute_once=AsyncMock(return_value=run),
+        execute_once=AsyncMock(side_effect=[prep_run, review_run]),
         attach_session=AsyncMock(),
     )
     settings = Settings(
@@ -129,12 +131,14 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     result = await run_once(client, agent, settings)
 
     assert result == VALID_NOTIFICATION.strip()
-    agent.execute_once.assert_awaited_once_with(
-        FINALIZATION_PROMPT,
-        7_200,
-        job_name="experiment-finalizer",
-        accept_result=is_finalization_notification,
-    )
+    assert agent.execute_once.await_count == 2
+    first_call = agent.execute_once.await_args_list[0]
+    assert first_call.args[0] == FINALIZATION_PROMPT
+    assert first_call.kwargs["job_name"] == "experiment-finalizer-preparer"
+    second_call = agent.execute_once.await_args_list[1]
+    assert second_call.kwargs["job_name"] == "experiment-finalizer-reviewer"
+    assert "FINALIZATION_PREPARED: 7607" in second_call.args[0]
+    assert second_call.args[0].startswith("[claude]\nThis is the authorised independent review pass")
     client.chat_postMessage.assert_awaited_once_with(
         channel="CFINAL",
         markdown_text=VALID_NOTIFICATION.strip(),
@@ -143,7 +147,7 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     )
     attached_run = agent.attach_session.await_args.args[2]
     assert attached_run.text == VALID_NOTIFICATION.strip()
-    assert attached_run.session_id == run.session_id
+    assert attached_run.session_id == review_run.session_id
 
 
 def test_notification_normalizer_removes_operational_preamble() -> None:

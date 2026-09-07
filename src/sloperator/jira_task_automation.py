@@ -178,6 +178,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                 agent.store.upsert_jira_task_agent_link(
                     task.key, reviewer_session_id=result.session_id, phase="reviewer",
                     last_jira_updated_at=task.updated_at.isoformat(),
+                    last_confluence_activity_at=dt.datetime.now(dt.UTC).isoformat(),
                 )
         except Exception:
             LOGGER.exception("Jira task automation polling failed")

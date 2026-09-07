@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -132,6 +133,8 @@ they should make, never an audit trail. Apply these output rules strictly:
 - Do not include skill/context disclosure lines in the Slack-facing content; Sloperator strips any
   mandatory internal disclosure lines before publication.
 - Keep the visible result under 2,500 characters and use at most four bullets total.
+- No archive is attached by this workflow. Never promise or refer to an attached archive.
+- Put each experiment title on its own line, followed by `Проект: <URL>` and `Админка: <URL>`.
 
 If there is no material actionable change after applying those filters, return a concise internal
 summary followed by the exact final line
@@ -194,49 +197,62 @@ def extract_project_links_and_clean_body(
     experiments: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str], str]:
     """Extract linked issue experiments and remove duplicated identity/link lines."""
-    project_urls_by_name: dict[str, str] = {}
-    standalone_project_urls: list[str] = []
+    project_urls_by_id: dict[int, str] = {}
+    mentioned_ids: set[int] = set()
     body_lines: list[str] = []
+    current: dict[str, Any] | None = None
+    in_code = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("Проект:"):
-            match = re.search(r"https?://[^\s>|)]+", stripped)
-            if match is not None:
-                standalone_project_urls.append(match.group(0))
+        if stripped.startswith("```"):
+            in_code = not in_code
+            body_lines.append(line)
             continue
-        if stripped.startswith("Админка:"):
+        if in_code:
+            body_lines.append(line)
             continue
-        matching_experiment = next(
-            (experiment for experiment in experiments if str(experiment["name"]) in stripped),
-            None,
+        matching = [item for item in experiments if str(item["name"]).strip() in stripped]
+        if len(matching) > 1:
+            raise ValueError("ambiguous experiment heading in issue report")
+        if matching:
+            current = matching[0]
+            mentioned_ids.add(current["id"])
+        # Accept labelled plain, Markdown and native Slack links on their own line,
+        # or project links in the experiment heading. Never infer links from code.
+        labelled = re.search(
+            r"\[проект\]\((https?://[^\s)]+)\)|"
+            r"<(https?://[^\s>|]+)\|проект>|"
+            r"^\*{0,2}Проект:\*{0,2}\s*(?:<)?(https?://[^\s>|)]+)",
+            stripped,
+            re.IGNORECASE,
         )
-        if matching_experiment is not None:
-            urls = re.findall(r"https?://[^\s>|)]+", stripped)
+        project_url = (
+            next((value for value in labelled.groups() if value), None) if labelled else None
+        )
+        if project_url is None and matching:
             project_url = next(
-                (url for url in urls if "ultimate-guitar.com/components/ab/experiment" not in url),
+                (
+                    url
+                    for url in re.findall(r"https?://[^\s>|)]+", stripped)
+                    if "ultimate-guitar.com/components/ab/experiment" not in url
+                ),
                 None,
             )
-            if project_url is not None:
-                project_urls_by_name[str(matching_experiment["name"])] = project_url
+        if project_url:
+            target = current or (experiments[0] if len(experiments) == 1 else None)
+            if target is None:
+                raise ValueError("ambiguous standalone project link in issue report")
+            previous = project_urls_by_id.get(target["id"])
+            if previous is not None and previous != project_url:
+                raise ValueError("conflicting project links in issue report")
+            project_urls_by_id[target["id"]] = project_url
+        if matching or labelled or stripped.startswith("Админка:"):
             continue
         body_lines.append(line)
-    linked_experiments: list[dict[str, Any]] = []
-    project_urls: list[str] = []
-    standalone_urls = iter(standalone_project_urls)
-    for experiment in experiments:
-        project_url = project_urls_by_name.get(str(experiment["name"]))
-        if project_url is not None:
-            linked_experiments.append(experiment)
-            project_urls.append(project_url)
-    if not linked_experiments:
-        # The single-experiment format historically puts the project URL on a separate line.
-        # It is unambiguous only when exactly one experiment was requested.
-        standalone_url = next(standalone_urls, "")
-        if len(experiments) == 1 and standalone_url:
-            linked_experiments.append(experiments[0])
-            project_urls.append(standalone_url)
-    if not linked_experiments:
+    if not project_urls_by_id or mentioned_ids - project_urls_by_id.keys():
         raise ValueError("agent response must link every experiment mentioned in the issue report")
+    linked_experiments = [item for item in experiments if item["id"] in project_urls_by_id]
+    project_urls = [project_urls_by_id[item["id"]] for item in linked_experiments]
     return linked_experiments, project_urls, "\n".join(body_lines).strip()
 
 
@@ -319,19 +335,60 @@ class ExperimentConfigResponder:
             timeout_seconds,
             job_name="experiment-config-check",
         )
+        try:
+            return await self._publish_review(normalized, client, run)
+        except Exception as error:
+            # A completed provider turn is not a completed notification workflow.
+            if isinstance(getattr(run, "run_id", None), str):
+                await asyncio.to_thread(
+                    self.agent.store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status="failed",
+                    last_error=f"Experiment config publication failed: {error}",
+                )
+            LOGGER.exception("Experiment config publication failed for %s", recipient_id)
+            raise
+
+    async def _publish_review(
+        self,
+        normalized: dict[str, Any],
+        client: AsyncWebClient,
+        run: HeadlessAgentRun,
+    ) -> bool:
+        recipient_id = str(normalized["recipient_id"])
         verdict, visible_text = normalize_experiment_config_result(run.text)
         if verdict == "OK":
             LOGGER.info("Experiment config audit passed; suppressing Slack notification")
             return False
-        conversation = await client.conversations_open(users=recipient_id)
         issue_experiments, project_urls, clean_body = extract_project_links_and_clean_body(
             visible_text,
             normalized["experiments"],
         )
+        communication = getattr(self.agent, "communication", None)
+        if communication is not None:
+            rendered = await communication.render(
+                clean_body,
+                "No prior Slack message.",
+                output_requirements=AUTOMATED_RESPONSE_STYLE
+                + "\nAutomated experiment configuration notification. "
+                "No attachment will be uploaded. Return only the Russian issue body, "
+                "under 2,500 characters, with at most four bullets. Preserve the complete "
+                "copy-paste configuration code verbatim. Do not add an introduction or "
+                "experiment links: the publisher adds them separately. "
+                "Remove evidence walkthroughs, passed checks and archive claims.",
+            )
+            original_code = re.findall(r"```[^\n]*\n(.*?)```", clean_body, re.DOTALL)
+            rendered_code = re.findall(r"```[^\n]*\n(.*?)```", rendered, re.DOTALL)
+            if original_code != rendered_code:
+                raise ValueError("communication layer changed experiment configuration code")
+            _, clean_body = normalize_experiment_config_result(
+                f"{rendered}\n{VERDICT_MARKER} ISSUES"
+            )
         message_text = (
             f"{build_notification_intro(recipient_id, issue_experiments, project_urls)}"
             f"\n\n{format_slack_mrkdwn(clean_body)}"
         )
+        conversation = await client.conversations_open(users=recipient_id)
         posted = await client.chat_postMessage(
             channel=conversation["channel"]["id"],
             text=message_text,

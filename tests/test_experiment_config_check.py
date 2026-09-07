@@ -1,7 +1,8 @@
+# ruff: noqa: RUF001
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -92,8 +93,7 @@ def test_result_without_verdict_is_issues_only_when_issue_sections_exist() -> No
 def test_result_rejects_forbidden_low_value_content() -> None:
     with pytest.raises(ValueError, match="forbidden low-value content"):
         normalize_experiment_config_result(
-            "**Нужно исправить**\nДата окончания не проставлена.\n"  # noqa: RUF001
-            "EXPERIMENT_CONFIG_VERDICT: ISSUES"
+            "**Нужно исправить**\nДата окончания не проставлена.\nEXPERIMENT_CONFIG_VERDICT: ISSUES"
         )
 
 
@@ -184,6 +184,7 @@ async def test_responder_launches_durable_thread_with_access_specific_closing() 
         slack_allowed_conversation_users=frozenset({"UOWNER", "USTARTER"}),
     )
     agent = AsyncMock()
+    agent.communication = None
     client = AsyncMock()
 
     await ExperimentConfigResponder(settings, agent).handle(_event(), client)
@@ -199,6 +200,7 @@ async def test_responder_launches_durable_thread_with_access_specific_closing() 
 async def test_silent_review_sends_nothing_when_agent_verdict_is_ok() -> None:
     settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
     agent = AsyncMock()
+    agent.communication = None
     agent.execute_once.return_value = SimpleNamespace(
         text="Всё проверено.\nEXPERIMENT_CONFIG_VERDICT: OK"
     )
@@ -219,6 +221,7 @@ async def test_silent_review_sends_nothing_when_agent_verdict_is_ok() -> None:
 async def test_silent_review_publishes_only_agent_result_when_issues_exist() -> None:
     settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
     agent = AsyncMock()
+    agent.communication = None
     agent.execute_once.return_value = SimpleNamespace(
         text=(
             "Проект: https://alice.mu.se/pages/123\n"
@@ -247,3 +250,104 @@ async def test_silent_review_publishes_only_agent_result_when_issues_exist() -> 
     agent.attach_session.assert_awaited_once_with(
         "DSTARTER", "200.1", agent.execute_once.return_value
     )
+
+
+@pytest.mark.parametrize(
+    "links",
+    [
+        "[Проект](https://alice.mu.se/pages/123) · "
+        "[Админка](https://www.ultimate-guitar.com/components/ab/experiment/view?id=7952)",
+        "<https://alice.mu.se/pages/123|Проект> · "
+        "<https://www.ultimate-guitar.com/components/ab/experiment/view?id=7952|Админка>",
+        "**Проект:** https://alice.mu.se/pages/123",
+    ],
+)
+def test_separate_project_links_from_failed_7952_report(links: str) -> None:
+    experiment = {"id": 7952, "name": "UG iOS: trial ineligible – consent sheet"}
+    code = "```\nproject: https://alice.mu.se/pages/123, segments: {'Total': {}}\n```"
+    linked, projects, body = extract_project_links_and_clean_body(
+        f"**{experiment['name']}** (7952)\n{links}\n\nНужно исправить\n{code}",
+        [experiment],
+    )
+    assert linked == [experiment]
+    assert projects == ["https://alice.mu.se/pages/123"]
+    assert body == f"Нужно исправить\n{code}"
+
+
+def test_does_not_silently_drop_second_experiment_without_link() -> None:
+    with pytest.raises(ValueError, match="must link every experiment"):
+        extract_project_links_and_clean_body(
+            "First [Проект](https://alice.mu.se/pages/1)\nSecond\nНужно исправить\nFix both",
+            [{"id": 1, "name": "First"}, {"id": 2, "name": "Second"}],
+        )
+
+
+def test_separate_links_are_associated_with_each_experiment() -> None:
+    experiments = [{"id": 1, "name": "First"}, {"id": 2, "name": "Second"}]
+    linked, projects, _ = extract_project_links_and_clean_body(
+        "First\n[Проект](https://alice.mu.se/pages/1)\nНужно исправить\nFix first\n"
+        "Second\n[Проект](https://alice.mu.se/pages/2)\nНужно исправить\nFix second",
+        experiments,
+    )
+    assert linked == experiments
+    assert projects == ["https://alice.mu.se/pages/1", "https://alice.mu.se/pages/2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change_code", [False, True])
+async def test_scheduled_notification_uses_communication_and_preserves_code(
+    change_code: bool,
+) -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    code = "```\nsegments: {'Total': {'pro_rights': 'free'}}\n```"
+    agent.execute_once.return_value = SimpleNamespace(
+        text=f"[Проект](https://alice.mu.se/pages/123)\nНужно исправить\n{code}\n"
+        "Детали в приложенном архиве.\nEXPERIMENT_CONFIG_VERDICT: ISSUES"
+    )
+    agent.communication.render.return_value = "Нужно исправить\n" + (
+        code.replace("free", "all") if change_code else code
+    )
+    client = AsyncMock()
+    client.conversations_open.return_value = {"channel": {"id": "DSTARTER"}}
+    client.chat_postMessage.return_value = {"ts": "200.1"}
+    payload = experiment_config_payload(_event())
+    assert payload is not None
+    responder = ExperimentConfigResponder(settings, agent)
+    if change_code:
+        with pytest.raises(ValueError, match="changed experiment configuration code"):
+            await responder.review_and_publish(payload, client, timeout_seconds=300)
+        client.chat_postMessage.assert_not_awaited()
+        client.conversations_open.assert_not_awaited()
+    else:
+        assert await responder.review_and_publish(payload, client, timeout_seconds=300)
+        agent.communication.render.assert_awaited_once()
+        sent = client.chat_postMessage.await_args.kwargs["text"]
+        assert code in sent
+        assert "архив" not in sent
+        assert "<https://alice.mu.se/pages/123|" in sent
+
+
+@pytest.mark.asyncio
+async def test_publication_failure_marks_persisted_run_failed() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    agent.store = Mock()
+    agent.execute_once.return_value = SimpleNamespace(
+        text="Нужно исправить\nMissing link\nEXPERIMENT_CONFIG_VERDICT: ISSUES",
+        run_id="failed-run",
+    )
+    payload = experiment_config_payload(_event())
+    assert payload is not None
+    client = AsyncMock()
+    with pytest.raises(ValueError, match="must link every experiment"):
+        await ExperimentConfigResponder(settings, agent).review_and_publish(
+            payload, client, timeout_seconds=300
+        )
+    agent.store.finish_scheduled_agent_run.assert_called_once_with(
+        "failed-run",
+        status="failed",
+        last_error="Experiment config publication failed: agent response must link every "
+        "experiment mentioned in the issue report",
+    )
+    client.chat_postMessage.assert_not_awaited()

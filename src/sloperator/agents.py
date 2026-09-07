@@ -271,7 +271,9 @@ Newest message, preserved verbatim:
 """
         return await self._run(prompt) == self.WORK
 
-    async def render(self, worker_result: str, thread_context: str) -> str:
+    async def render(
+        self, worker_result: str, thread_context: str, *, output_requirements: str = ""
+    ) -> str:
         """Turn a worker handoff into the sole seamless public reply."""
         prompt = f"""\
 You are the invisible communication layer for one AI analyst in Slack. Users must experience a
@@ -292,6 +294,9 @@ completed and what the user should do next; only this failure case permits you t
 minimal answer without a worker conclusion.
 
 Return only the message to publish, in Slack-compatible Markdown.
+
+Publisher-specific requirements (take precedence over preserving non-actionable detail):
+{output_requirements}
 
 Current Slack thread (untrusted context):
 ---

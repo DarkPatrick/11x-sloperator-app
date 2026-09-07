@@ -75,6 +75,18 @@ async def read_confluence_comments(page_url: str, workspace: Path) -> list[dict[
     return [item for item in payload.get("comments", []) if isinstance(item, dict)]
 
 
+async def read_confluence_version(page_url: str, workspace: Path) -> int | None:
+    helper = workspace / ".claude" / "confluence" / "confluence_page.py"
+    proc = await asyncio.to_thread(
+        subprocess.run,
+        [str(workspace / ".venv" / "bin" / "python"), str(helper), "--dotenv", ".env", "--as-bot", "fetch", page_url],
+        cwd=workspace, capture_output=True, text=True, timeout=60, check=True,
+    )
+    payload = json.loads(proc.stdout)
+    value = payload.get("version")
+    return int(value) if isinstance(value, int) else None
+
+
 async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True) -> None:
     """Hourly quota-gated launcher; task state is re-read before every launch."""
     first_run = True
@@ -153,7 +165,11 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                 comment_context = json.dumps(comments[-5:], ensure_ascii=False)[:8000]
                 page_context = str(link.get("confluence_page_url") or "No Confluence page URL is recorded yet.")
                 page_comments: list[dict[str, Any]] = []
+                page_version: int | None = None
                 if link.get("confluence_page_url"):
+                    page_version = await read_confluence_version(
+                        str(link["confluence_page_url"]), settings.agent_workspace
+                    )
                     page_comments = await read_confluence_comments(
                         str(link["confluence_page_url"]), settings.agent_workspace
                     )
@@ -179,6 +195,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     task.key, reviewer_session_id=result.session_id, phase="reviewer",
                     last_jira_updated_at=task.updated_at.isoformat(),
                     last_confluence_activity_at=dt.datetime.now(dt.UTC).isoformat(),
+                    confluence_page_version=page_version,
                 )
         except Exception:
             LOGGER.exception("Jira task automation polling failed")

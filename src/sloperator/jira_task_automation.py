@@ -102,6 +102,8 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                 if task.status == "Done":
                     agent.store.upsert_jira_task_agent_link(task.key, phase="done", terminal_at=dt.datetime.now(dt.UTC).isoformat())
                     continue
+                comments = await reader.recent_comments(task.key)
+                comment_context = json.dumps(comments[-5:], ensure_ascii=False)[:8000]
                 if task.status in QUEUED_STATUSES and link.get("phase") == "reviewer":
                     worker = await agent.execute_once(
                         worker_prompt(task.key)
@@ -115,7 +117,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     )
                 reviewer_id = link.get("reviewer_session_id")
                 result = await agent.execute_once(
-                    reviewer_prompt(task.key) + "\nRead all new Jira comments and all comments on the task's Confluence page; continue only if there is new activity or a pending review.",
+                    reviewer_prompt(task.key) + "\nRead all new Jira comments and all comments on the task's Confluence page; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context,
                     7200,
                     job_name="jira-task-reviewer",
                     existing_session_id=reviewer_id,
@@ -213,3 +215,14 @@ class JiraTaskReader:
             status=str(fields["status"]["name"]),
             updated_at=dt.datetime.fromisoformat(str(fields["updated"]).replace("Z", "+00:00")),
         )
+
+    async def recent_comments(self, task_key: str) -> list[dict[str, Any]]:
+        async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
+            async with session.get(
+                f"{self.base_url}/rest/api/3/issue/{task_key}/comment",
+                params={"orderBy": "-created", "maxResults": 20},
+            ) as response:
+                if response.status >= 400:
+                    raise RuntimeError(f"Jira comment read failed with HTTP {response.status}")
+                payload: dict[str, Any] = json.loads(await response.text())
+        return [item for item in payload.get("comments", []) if isinstance(item, dict)]

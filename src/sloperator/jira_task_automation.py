@@ -107,6 +107,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     continue
                 comments = await reader.recent_comments(task.key)
                 comment_context = json.dumps(comments[-5:], ensure_ascii=False)[:8000]
+                page_context = str(link.get("confluence_page_url") or "No Confluence page URL is recorded yet.")
                 if task.status in QUEUED_STATUSES and link.get("phase") == "reviewer":
                     worker = await agent.execute_once(
                         worker_prompt(task.key)
@@ -120,7 +121,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     )
                 reviewer_id = link.get("reviewer_session_id")
                 result = await agent.execute_once(
-                    reviewer_prompt(task.key) + "\nRead all new Jira comments and all comments on the task's Confluence page; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context,
+                    reviewer_prompt(task.key) + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context,
                     7200,
                     job_name="jira-task-reviewer",
                     existing_session_id=reviewer_id,

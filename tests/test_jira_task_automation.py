@@ -29,7 +29,11 @@ def test_worker_and_reviewer_prompts_are_task_scoped() -> None:
     reviewer = reviewer_prompt("UMN-14000")
     assert "AUTOMATED RESPONSE STYLE" in worker
     assert "customfield_10312" in worker
+    assert "Product release" in worker
+    assert "Hypotheses" in worker
+    assert "103614364" in worker
     assert "UMN-14000" in worker
     assert "AUTOMATED RESPONSE STYLE" in reviewer
     assert "duedate" in reviewer
     assert "transition with ID 181" in reviewer
+    assert "Confluence page" in reviewer

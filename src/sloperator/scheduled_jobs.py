@@ -10,6 +10,7 @@ from sloperator.config import Settings
 from sloperator.experiment_analytics_planner import PREPARATION_PROMPT as ANALYTICS_PROMPT
 from sloperator.experiment_design_planner import PREPARATION_PROMPT
 from sloperator.experiment_finalizer import FINALIZATION_PROMPT
+from sloperator.jira_task_automation import WORKER_PROMPT
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,20 @@ class EmbeddedScheduledJob:
 
 
 EMBEDDED_SCHEDULED_JOBS = (
+    EmbeddedScheduledJob(
+        job_name="jira-task-automation",
+        run_job_names=("jira-task-worker", "jira-task-reviewer"),
+        display_name="jira-task-automation (sloperator.service)",
+        schedule=lambda _settings: "hourly; quota-gated UMN Jira tasks",
+        logger_name="sloperator.jira_task_automation",
+        scheduled_prefix="Next Jira task automation run scheduled for ",
+        started_message="Starting Jira task automation run",
+        completed_message="Jira task automation run completed",
+        failed_message="Could not complete Jira task automation run",
+        prompt_source="sloperator.jira_task_automation.WORKER_PROMPT",
+        condition="Queued UMN tasks assigned to ug-ai-analyst when Claude quota permits",
+        prompt=WORKER_PROMPT,
+    ),
     EmbeddedScheduledJob(
         job_name="experiment-finalizer",
         run_job_names=("experiment-finalizer-preparer", "experiment-finalizer-reviewer"),

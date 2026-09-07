@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +13,9 @@ from aiohttp import BasicAuth, ClientSession, ClientTimeout
 
 from sloperator.claude_usage import ClaudeUsage
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
+from sloperator.config import Settings
+
+LOGGER = logging.getLogger(__name__)
 
 BOARD_ID = 175
 SERVICE_ACCOUNT_ID = "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"
@@ -27,6 +32,32 @@ def worker_prompt(task_key: str) -> str:
 
 def reviewer_prompt(task_key: str) -> str:
     return REVIEWER_PROMPT.format(task_key=task_key)
+
+
+async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True) -> None:
+    """Hourly quota-gated launcher; task state is re-read before every launch."""
+    while True:
+        await asyncio.sleep(3600)
+        if not enabled() or not settings.jira_username or not settings.jira_api_token:
+            continue
+        try:
+            from sloperator.claude_usage import read_usage
+            usage = await read_usage(settings.claude_cli, model=settings.claude_model)
+            if not weekly_quota_allows_launch(usage, now=dt.datetime.now(dt.UTC)):
+                LOGGER.info("Jira task agents held: Claude quota gate is closed")
+                continue
+            candidates = await JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token).queued_tasks()
+            if not candidates:
+                continue
+            task = candidates[0]
+            worker = await agent.execute_once(worker_prompt(task.key), 7200, job_name="jira-task-worker")
+            await agent.execute_once(
+                reviewer_prompt(task.key) + f"\n\nWorker handoff:\n{worker.text}",
+                7200,
+                job_name="jira-task-reviewer",
+            )
+        except Exception:
+            LOGGER.exception("Jira task automation hourly run failed")
 
 
 @dataclass(frozen=True, slots=True)

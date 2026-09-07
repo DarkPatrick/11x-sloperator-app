@@ -92,6 +92,7 @@ from sloperator.experiment_finalizer import (
     run_daily,
 )
 from sloperator.health import create_health_app
+from sloperator.jira_task_automation import run_hourly as run_jira_task_automation
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
 from sloperator.scheduled_jobs import EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME
 from sloperator.store import EventStore
@@ -203,6 +204,7 @@ async def serve(settings: Settings) -> None:
     experiment_finalizer_task: asyncio.Task[None] | None = None
     experiment_design_task: asyncio.Task[None] | None = None
     experiment_analytics_task: asyncio.Task[None] | None = None
+    jira_task_automation_task: asyncio.Task[None] | None = None
     automation_error_audit_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
@@ -443,6 +445,14 @@ async def serve(settings: Settings) -> None:
                 ),
                 name="daily-experiment-analytics-planner",
             )
+        jira_task_automation_task = asyncio.create_task(
+            run_jira_task_automation(
+                settings,
+                orchestrator,
+                lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
+            ),
+            name="hourly-jira-task-automation",
+        )
         automation_error_audit_task = asyncio.create_task(
             run_daily_automation_error_audit(
                 app.client,
@@ -470,6 +480,7 @@ async def serve(settings: Settings) -> None:
             with suppress(asyncio.CancelledError):
                 await vpn_task
         await cancel_task(experiment_finalizer_task)
+        await cancel_task(jira_task_automation_task)
         await cancel_experiment_design(experiment_design_task)
         await cancel_experiment_analytics(experiment_analytics_task)
         await cancel_automation_error_audit(automation_error_audit_task)

@@ -672,3 +672,15 @@ def test_new_outcome_logging_preserves_older_launches_without_duplicate() -> Non
     assert len(rows) == 1
     assert rows[0]["time"] == history[0]["time"]
     assert rows[0]["status"] == "unknown"
+
+
+def test_recent_launch_before_first_outcome_log_is_not_hidden() -> None:
+    now = dt.datetime.now(dt.UTC)
+    history = [{"time": (now - dt.timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "command": "poll"}]
+    outcomes = [{"time": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                 "job": "poller", "status": "completed", "command": "execution log"}]
+    rows = _unmatched_cron_launches([{"name": "poller", "command": "poll"}],
+                                   history, outcomes, {"poller"})
+    assert len(rows) == 1
+    assert rows[0]["status"] == "unknown"

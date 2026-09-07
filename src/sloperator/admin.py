@@ -1063,13 +1063,10 @@ def _unmatched_cron_launches(
         if any(row["job"] == name for row in execution_history)
     }
     return [
-        row
+        {**row, "status": "unknown"} if row["job"] in authoritative_jobs else row
         for row in _label_cron_history(jobs, history)
         if row["job"] not in authoritative_jobs
-        or (
-            row["status"] == "unknown"
-            and row["time"] < first_outcomes.get(row["job"], "")
-        )
+        or row["time"] < first_outcomes.get(row["job"], "")
     ]
 
 

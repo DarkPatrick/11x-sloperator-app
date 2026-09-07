@@ -36,8 +36,11 @@ def reviewer_prompt(task_key: str) -> str:
 
 async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True) -> None:
     """Hourly quota-gated launcher; task state is re-read before every launch."""
+    first_run = True
     while True:
-        await asyncio.sleep(3600)
+        if not first_run:
+            await asyncio.sleep(3600)
+        first_run = False
         if not enabled() or not settings.jira_username or not settings.jira_api_token:
             continue
         try:
@@ -73,8 +76,11 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
 
 async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambda: True) -> None:
     """Ten-minute Jira poll that resumes the durable reviewer after task activity."""
+    first_run = True
     while True:
-        await asyncio.sleep(600)
+        if not first_run:
+            await asyncio.sleep(600)
+        first_run = False
         if not enabled() or not settings.jira_username or not settings.jira_api_token:
             continue
         reader = JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token)

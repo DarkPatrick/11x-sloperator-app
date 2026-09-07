@@ -445,6 +445,11 @@ def test_systemd_scheduler_jobs_include_every_registered_schedule_and_runtime_st
 
     assert jobs == [
         {
+            "name": "jira-task-automation (sloperator.service)",
+            "schedule": "hourly; quota-gated UMN Jira tasks",
+            "command": "embedded asyncio scheduler · active · PID 123",
+        },
+        {
             "name": "experiment-finalizer (sloperator.service)",
             "schedule": "weekdays Mon-Fri 12:00 Asia/Nicosia",
             "command": "embedded asyncio scheduler · active · PID 123",

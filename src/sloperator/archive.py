@@ -86,12 +86,18 @@ async def _list_conversations(
     channels: list[Mapping[str, Any]] = []
     cursor: str | None = None
     while True:
-        response = await client.conversations_list(
-            types=conversation_types,
-            exclude_archived=False,
-            limit=200,
-            cursor=cursor,
-        )
+        try:
+            response = await client.conversations_list(
+                types=conversation_types,
+                exclude_archived=False,
+                limit=200,
+                cursor=cursor,
+            )
+        except SlackApiError as error:
+            if error.response.get("error") == "ratelimited":
+                LOGGER.warning("Slack conversation list rate-limited; keeping existing archive")
+                return channels
+            raise
         response_data = _response_data(response)
         channels.extend(response_data.get("channels", []))
         response_metadata = response_data.get("response_metadata")

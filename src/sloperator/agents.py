@@ -1080,6 +1080,7 @@ class AgentOrchestrator:
         *,
         job_name: str = "scheduled-agent",
         workspace: Path | None = None,
+        existing_session_id: str | None = None,
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
     ) -> HeadlessAgentRun:
@@ -1091,9 +1092,9 @@ class AgentOrchestrator:
             thread_ts=run_id,
             provider=parsed.provider,
             model=parsed.model,
-            external_session_id=str(uuid.uuid4()) if parsed.provider == "claude" else None,
+            external_session_id=existing_session_id or (str(uuid.uuid4()) if parsed.provider == "claude" else None),
             status="queued",
-            turn_count=0,
+            turn_count=1 if existing_session_id else 0,
             last_error=None,
         )
         run_settings = replace(

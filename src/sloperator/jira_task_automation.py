@@ -50,11 +50,22 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
             if not candidates:
                 continue
             task = candidates[0]
-            worker = await agent.execute_once(worker_prompt(task.key), 7200, job_name="jira-task-worker")
-            await agent.execute_once(
+            link = agent.store.jira_task_agent_link(task.key)
+            worker = await agent.execute_once(
+                worker_prompt(task.key), 7200, job_name="jira-task-worker",
+                existing_session_id=(link or {}).get("worker_session_id"),
+            )
+            agent.store.upsert_jira_task_agent_link(
+                task.key, worker_session_id=worker.session_id, phase="reviewer"
+            )
+            reviewer = await agent.execute_once(
                 reviewer_prompt(task.key) + f"\n\nWorker handoff:\n{worker.text}",
                 7200,
                 job_name="jira-task-reviewer",
+                existing_session_id=(link or {}).get("reviewer_session_id"),
+            )
+            agent.store.upsert_jira_task_agent_link(
+                task.key, reviewer_session_id=reviewer.session_id, phase="reviewer"
             )
         except Exception:
             LOGGER.exception("Jira task automation hourly run failed")

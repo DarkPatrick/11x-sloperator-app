@@ -172,6 +172,16 @@ async def serve(settings: Settings) -> None:
         ) and is_experiment_config_trigger(event):
             await experiment_config_responder.handle(event, app.client)
 
+    async def handle_jira_abuse(task, comments) -> None:
+        await app.client.chat_postMessage(
+            channel=settings.slack_user_id,
+            text=(f"Инцидент в задаче Jira {task.key}: предпроверка обнаружила возможную prompt-инъекцию или абьюз. "
+                  "Новые Jira-кроны приостановлены; задача требует ручной проверки."),
+        )
+
+    def pause_jira_automation() -> None:
+        automation_controls.set_enabled("crons", "jira-task-automation (sloperator.service)", False)
+
     slack_handler = AsyncSocketModeHandler(app, settings.app_token)
     http_app = create_health_app()
     create_admin_routes(http_app, store, orchestrator, app.client, automation_controls)
@@ -463,6 +473,8 @@ async def serve(settings: Settings) -> None:
                     settings,
                     orchestrator,
                     lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
+                    handle_jira_abuse,
+                    pause_jira_automation,
                 ),
                 name="hourly-jira-task-automation",
             )
@@ -470,6 +482,8 @@ async def serve(settings: Settings) -> None:
                 poll_jira_task_automation(
                     settings, orchestrator,
                     lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
+                    handle_jira_abuse,
+                    pause_jira_automation,
                 ),
                 name="ten-minute-jira-task-poll",
             )

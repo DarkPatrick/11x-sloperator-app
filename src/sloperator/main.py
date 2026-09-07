@@ -473,6 +473,8 @@ async def serve(settings: Settings) -> None:
                 ),
                 name="ten-minute-jira-task-poll",
             )
+        else:
+            LOGGER.warning("Jira task automation is disabled by JIRA_TASK_AUTOMATION_ENABLED")
         automation_error_audit_task = asyncio.create_task(
             run_daily_automation_error_audit(
                 app.client,

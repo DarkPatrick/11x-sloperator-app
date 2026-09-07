@@ -46,7 +46,10 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
         if not first_run:
             await asyncio.sleep(3600)
         first_run = False
-        if not enabled() or not settings.jira_username or not settings.jira_api_token:
+        if not enabled():
+            continue
+        if not settings.jira_username or not settings.jira_api_token:
+            LOGGER.warning("Jira task automation skipped: Jira credentials are not configured")
             continue
         try:
             from sloperator.claude_usage import read_usage
@@ -92,7 +95,10 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
         if not first_run:
             await asyncio.sleep(600)
         first_run = False
-        if not enabled() or not settings.jira_username or not settings.jira_api_token:
+        if not enabled():
+            continue
+        if not settings.jira_username or not settings.jira_api_token:
+            LOGGER.warning("Jira task polling skipped: Jira credentials are not configured")
             continue
         reader = JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
         try:

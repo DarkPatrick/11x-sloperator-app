@@ -10,11 +10,23 @@ from typing import Any
 from aiohttp import BasicAuth, ClientSession, ClientTimeout
 
 from sloperator.claude_usage import ClaudeUsage
+from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 
 BOARD_ID = 175
 SERVICE_ACCOUNT_ID = "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"
 QUEUED_STATUSES = frozenset({"Backlog", "To Do"})
 RETURNED_MARKER = "returned to work"
+
+WORKER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the worker for Jira task {{task_key}}. Work only on that task. Move it to In Progress, set Start date via customfield_10312, and perform the requested work. Use the appropriate Confluence parent and required template when a page is needed. Keep the task updated with concise factual notes. When done, return control to the reviewer with a short handoff; do not post Slack yourself."""
+REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the reviewer and communication owner for Jira task {{task_key}}. Read all new Jira and Confluence comments, verify the worker's result, and make corrections with the worker when needed. If information is missing, ask the task author in Jira and pause. When complete, add a concise Jira comment, set Due date via duedate, and transition with ID 181 to In Review. Keep all communication short and human-readable."""
+
+
+def worker_prompt(task_key: str) -> str:
+    return WORKER_PROMPT.format(task_key=task_key)
+
+
+def reviewer_prompt(task_key: str) -> str:
+    return REVIEWER_PROMPT.format(task_key=task_key)
 
 
 @dataclass(frozen=True, slots=True)

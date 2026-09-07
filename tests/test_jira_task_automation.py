@@ -1,7 +1,7 @@
 import datetime as dt
 
 from sloperator.claude_usage import ClaudeUsage
-from sloperator.jira_task_automation import weekly_quota_allows_launch
+from sloperator.jira_task_automation import reviewer_prompt, weekly_quota_allows_launch, worker_prompt
 
 
 def usage(session: int, week: int, reset: str = "Sep 9, 1pm (UTC)") -> ClaudeUsage:
@@ -22,3 +22,14 @@ def test_quota_allows_large_weekly_reserve() -> None:
     assert weekly_quota_allows_launch(
         usage(10, 9), now=dt.datetime(2026, 9, 7, tzinfo=dt.UTC)
     )
+
+
+def test_worker_and_reviewer_prompts_are_task_scoped() -> None:
+    worker = worker_prompt("UMN-14000")
+    reviewer = reviewer_prompt("UMN-14000")
+    assert "AUTOMATED RESPONSE STYLE" in worker
+    assert "customfield_10312" in worker
+    assert "UMN-14000" in worker
+    assert "AUTOMATED RESPONSE STYLE" in reviewer
+    assert "duedate" in reviewer
+    assert "transition with ID 181" in reviewer

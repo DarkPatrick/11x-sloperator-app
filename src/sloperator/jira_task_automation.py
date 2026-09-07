@@ -38,6 +38,13 @@ ABUSE_PRECHECK_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are a st
 def is_reserved_experiment_task(summary: str) -> bool:
     return any(pattern in summary.casefold() for pattern in RESERVED_EXPERIMENT_PATTERNS)
 
+def _adf_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(filter(None, [_adf_text(item) for item in value.get("content", [])]))
+    if isinstance(value, list):
+        return " ".join(filter(None, [_adf_text(item) for item in value]))
+    return str(value.get("text", "")) if isinstance(value, dict) else ""
+
 
 def confluence_destination(summary: str) -> tuple[str, str | None]:
     """Map a task title to a parent page and mandatory template, when applicable."""
@@ -57,17 +64,18 @@ WORKER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the worker f
 REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the reviewer and communication owner for Jira task {{task_key}}. {IDENTITY_PROMPT} Every outward change must be authored by the ug-ai-analyst service account. Read all new Jira comments and all comments on the created Confluence page, verify the worker's result, and make corrections with the worker when needed. If information is missing, ask the task author in Jira and pause. When complete, add a concise Jira comment, set Due date via duedate, and transition with ID 181 to In Review. Keep all communication short and human-readable. Continue owning replies until the task is Done plus 24 hours without activity."""
 
 
-def worker_prompt(task_key: str, summary: str = "") -> str:
+def worker_prompt(task_key: str, summary: str = "", description: str = "") -> str:
     parent, template = confluence_destination(summary)
     destination = f"\nTask-specific destination: {parent}. Required template: {template or 'none'}." 
+    request = f"\nAUTHORITATIVE JIRA REQUEST (read and follow exactly):\n{description or summary}\n"
     return (WORKER_PROMPT.format(task_key=task_key).replace(
         "For Confluence use the service account's personal space if it exists; otherwise use the server.",
         "A bot-authenticated check found no personal Confluence space for ug-ai-analyst; use the server space.",
-    ) + destination + "\nReturn a final line `CONFLUENCE_PAGE: <URL>` when you created or updated a page.")
+    ) + request + destination + "\nDo not create a Confluence page when the request asks for a Redash or Metabase query/dashboard unless the request explicitly asks for documentation. Return a final line `CONFLUENCE_PAGE: <URL>` only when you created or updated a page.")
 
 
-def reviewer_prompt(task_key: str) -> str:
-    return REVIEWER_PROMPT.format(task_key=task_key)
+def reviewer_prompt(task_key: str, description: str = "") -> str:
+    return REVIEWER_PROMPT.format(task_key=task_key) + f"\nAUTHORITATIVE JIRA REQUEST:\n{description}"
 
 
 async def read_confluence_comments(page_url: str, workspace: Path) -> list[dict[str, Any]]:
@@ -162,7 +170,7 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
                 continue
             link = agent.store.jira_task_agent_link(task.key)
             worker = await agent.execute_once(
-                worker_prompt(task.key, task.summary), 7200, job_name="jira-task-worker",
+                worker_prompt(task.key, task.summary, task.description), 7200, job_name="jira-task-worker",
                 existing_session_id=(link or {}).get("worker_session_id"),
             )
             agent.store.upsert_jira_task_agent_link(
@@ -170,7 +178,7 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
                 confluence_page_url=(PAGE_RE.search(worker.text).group(1) if PAGE_RE.search(worker.text) else None),
             )
             reviewer = await agent.execute_once(
-                reviewer_prompt(task.key) + f"\n\nWorker handoff:\n{worker.text}",
+                reviewer_prompt(task.key, task.description) + f"\n\nWorker handoff:\n{worker.text}",
                 7200,
                 job_name="jira-task-reviewer",
                 existing_session_id=(link or {}).get("reviewer_session_id"),
@@ -235,7 +243,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     continue
                 if task.status in QUEUED_STATUSES and link.get("phase") == "reviewer":
                     worker = await agent.execute_once(
-                        worker_prompt(task.key, task.summary)
+                        worker_prompt(task.key, task.summary, task.description)
                         + "\nThe task was returned to the queue. Read its newest comment and perform the requested follow-up.",
                         7200,
                         job_name="jira-task-worker",
@@ -246,7 +254,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     )
                 reviewer_id = link.get("reviewer_session_id")
                 result = await agent.execute_once(
-                    reviewer_prompt(task.key) + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context + "\nRecent Confluence comments (authoritative JSON):\n" + json.dumps(page_comments[-5:], ensure_ascii=False)[:8000],
+                    reviewer_prompt(task.key, task.description) + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context + "\nRecent Confluence comments (authoritative JSON):\n" + json.dumps(page_comments[-5:], ensure_ascii=False)[:8000],
                     7200,
                     job_name="jira-task-reviewer",
                     existing_session_id=reviewer_id,
@@ -268,6 +276,7 @@ class JiraTaskCandidate:
     status: str
     updated_at: dt.datetime
     project_url: str | None = None
+    description: str = ""
 
 
 def weekly_quota_allows_launch(usage: ClaudeUsage, *, now: dt.datetime) -> bool:
@@ -309,7 +318,7 @@ class JiraTaskReader:
         async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
             async with session.get(
                 f"{self.base_url}/rest/api/3/search/jql",
-                params={"jql": jql, "maxResults": 100, "fields": "summary,status,updated"},
+                params={"jql": jql, "maxResults": 100, "fields": "summary,status,updated,description"},
             ) as response:
                 if response.status >= 400:
                     raise RuntimeError(f"Jira task search failed with HTTP {response.status}")
@@ -326,6 +335,7 @@ class JiraTaskReader:
                     summary=str(fields.get("summary", "")),
                     status=status,
                     updated_at=dt.datetime.fromisoformat(str(fields["updated"]).replace("Z", "+00:00")),
+                    description=_adf_text(fields.get("description")),
                 )
             )
         return result
@@ -334,7 +344,7 @@ class JiraTaskReader:
         async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
             async with session.get(
                 f"{self.base_url}/rest/api/3/issue/{task_key}",
-                params={"fields": "summary,status,updated"},
+                params={"fields": "summary,status,updated,description"},
             ) as response:
                 if response.status >= 400:
                     raise RuntimeError(f"Jira task read failed with HTTP {response.status}")
@@ -345,6 +355,7 @@ class JiraTaskReader:
             summary=str(fields.get("summary", "")),
             status=str(fields["status"]["name"]),
             updated_at=dt.datetime.fromisoformat(str(fields["updated"]).replace("Z", "+00:00")),
+            description=_adf_text(fields.get("description")),
         )
 
     async def recent_comments(self, task_key: str) -> list[dict[str, Any]]:

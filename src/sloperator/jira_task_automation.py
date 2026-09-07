@@ -51,6 +51,7 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
         if not settings.jira_username or not settings.jira_api_token:
             LOGGER.warning("Jira task automation skipped: Jira credentials are not configured")
             continue
+        LOGGER.info("Starting hourly Jira task automation check")
         try:
             from sloperator.claude_usage import read_usage
             usage = await read_usage(settings.claude_cli, model=settings.claude_model)
@@ -100,6 +101,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
         if not settings.jira_username or not settings.jira_api_token:
             LOGGER.warning("Jira task polling skipped: Jira credentials are not configured")
             continue
+        LOGGER.info("Starting ten-minute Jira task activity poll")
         reader = JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
         try:
             agent.store.cleanup_jira_task_agent_links()

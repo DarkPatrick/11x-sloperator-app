@@ -102,6 +102,17 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                 if task.status == "Done":
                     agent.store.upsert_jira_task_agent_link(task.key, phase="done", terminal_at=dt.datetime.now(dt.UTC).isoformat())
                     continue
+                if task.status in QUEUED_STATUSES and link.get("phase") == "reviewer":
+                    worker = await agent.execute_once(
+                        worker_prompt(task.key)
+                        + "\nThe task was returned to the queue. Read its newest comment and perform the requested follow-up.",
+                        7200,
+                        job_name="jira-task-worker",
+                        existing_session_id=link.get("worker_session_id"),
+                    )
+                    agent.store.upsert_jira_task_agent_link(
+                        task.key, worker_session_id=worker.session_id, phase="reviewer"
+                    )
                 reviewer_id = link.get("reviewer_session_id")
                 result = await agent.execute_once(
                     reviewer_prompt(task.key) + "\nRead all new Jira comments and all comments on the task's Confluence page; continue only if there is new activity or a pending review.",

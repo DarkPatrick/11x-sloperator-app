@@ -83,7 +83,7 @@ def build_experiment_config_prompt(payload: dict[str, Any], *, interactive: bool
         "the monetisation-team analysts for clarification. Do not invite a reply in Slack."
     )
     return f"""\
-This is an automated review of newly started UG monetisation experiments. Work from the
+This is an automated review of one newly started UG monetisation experiment. Work from the
 ug-ai-analyst repository and follow its CLAUDE.md, skills, hooks, freshness preflight, and
 source-quality rules.
 
@@ -298,17 +298,14 @@ class ExperimentConfigResponder:
         channel_id = event.get("channel")
         if payload is None or not isinstance(message_ts, str) or not isinstance(channel_id, str):
             return
-        recipient_id = str(payload["recipient_id"])
-        interactive = recipient_id in self.settings.conversation_user_ids
-        await self.agent.submit(
-            client,
-            channel_id=channel_id,
-            message_ts=f"{message_ts}:experiment-config-review",
-            thread_ts=message_ts,
-            text=build_experiment_config_prompt(payload, interactive=interactive),
-            show_status=False,
-            automated=True,
-        )
+        # Legacy metadata triggers may contain several experiments. Give each its
+        # own new message and provider session, just like the current cron path.
+        for experiment in payload["experiments"]:
+            await self.review_and_publish(
+                {**payload, "experiments": [experiment]},
+                client,
+                timeout_seconds=self.settings.experiment_config_timeout_seconds,
+            )
 
     async def review_and_publish(
         self,
@@ -328,6 +325,8 @@ class ExperimentConfigResponder:
         )
         if normalized is None:
             raise ValueError("invalid experiment config payload")
+        if len(normalized["experiments"]) != 1:
+            raise ValueError("submit one experiment per review for separate Slack sessions")
         recipient_id = str(normalized["recipient_id"])
         interactive = recipient_id in self.settings.conversation_user_ids
         run: HeadlessAgentRun = await self.agent.execute_once(

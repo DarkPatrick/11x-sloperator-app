@@ -176,24 +176,23 @@ def test_issue_for_one_of_multiple_experiments_does_not_require_unrelated_link()
 
 
 @pytest.mark.asyncio
-async def test_responder_launches_durable_thread_with_access_specific_closing() -> None:
-    settings = Settings(
-        slack_user_id="UOWNER",
-        bot_token="xoxb-test",
-        app_token="xapp-test",
-        slack_allowed_conversation_users=frozenset({"UOWNER", "USTARTER"}),
-    )
+async def test_legacy_trigger_splits_experiments_into_independent_reviews() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
     agent = AsyncMock()
-    agent.communication = None
     client = AsyncMock()
+    responder = ExperimentConfigResponder(settings, agent)
+    responder.review_and_publish = AsyncMock()  # type: ignore[method-assign]
+    event = _event()
+    payload = event["metadata"]["event_payload"]
+    payload["experiments"].append({"id": 7916, "name": "Second experiment"})
 
-    await ExperimentConfigResponder(settings, agent).handle(_event(), client)
+    await responder.handle(event, client)
 
-    kwargs = agent.submit.await_args.kwargs
-    assert kwargs["channel_id"] == "DSTARTER"
-    assert kwargs["thread_ts"] == "100.1"
-    assert kwargs["automated"] is True
-    assert "authorised for interactive" in kwargs["text"]
+    calls = responder.review_and_publish.await_args_list
+    assert [call.args[0]["experiments"] for call in calls] == [
+        [experiment] for experiment in payload["experiments"]
+    ]
+    agent.submit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -351,3 +350,55 @@ async def test_publication_failure_marks_persisted_run_failed() -> None:
         "experiment mentioned in the issue report",
     )
     client.chat_postMessage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_grouped_http_review_is_rejected_before_starting_agent() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    client = AsyncMock()
+    payload = experiment_config_payload(_event())
+    assert payload is not None
+    payload["experiments"].append({"id": 7916, "name": "Another experiment"})
+    with pytest.raises(ValueError, match="one experiment per review"):
+        await ExperimentConfigResponder(settings, agent).review_and_publish(
+            payload, client, timeout_seconds=300
+        )
+    agent.execute_once.assert_not_awaited()
+    client.chat_postMessage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_same_starter_gets_separate_messages_and_provider_sessions() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    agent.communication = None
+    client = AsyncMock()
+    client.conversations_open.return_value = {"channel": {"id": "DSTARTER"}}
+    client.chat_postMessage.side_effect = [{"ts": "200.1"}, {"ts": "200.2"}]
+    experiments = [{"id": 7943, "name": "Advertising"}, {"id": 7916, "name": "Flo paywall"}]
+    runs = [
+        SimpleNamespace(
+            text=f"Проект: https://alice.mu.se/pages/{experiment['id']}\n"
+            f"Нужно исправить\nFix {experiment['id']}.\nEXPERIMENT_CONFIG_VERDICT: ISSUES",
+            session_id=f"session-{experiment['id']}",
+        )
+        for experiment in experiments
+    ]
+    agent.execute_once.side_effect = runs
+    responder = ExperimentConfigResponder(settings, agent)
+    for experiment in experiments:
+        assert await responder.review_and_publish(
+            {"recipient_id": "USTARTER", "experiments": [experiment]},
+            client,
+            timeout_seconds=300,
+        )
+    for index, experiment in enumerate(experiments):
+        other = experiments[1 - index]
+        prompt = agent.execute_once.await_args_list[index].args[0]
+        sent = client.chat_postMessage.await_args_list[index].kwargs["text"]
+        assert experiment["name"] in prompt and other["name"] not in prompt
+        assert experiment["name"] in sent and other["name"] not in sent
+        assert str(experiment["id"]) in sent and str(other["id"]) not in sent
+        attached = agent.attach_session.await_args_list[index].args
+        assert attached == ("DSTARTER", f"200.{index + 1}", runs[index])

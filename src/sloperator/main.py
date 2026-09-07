@@ -260,6 +260,14 @@ async def serve(settings: Settings) -> None:
                     external_session_id=run.session_id,
                     result_text=run.text,
                 )
+        for task_job in ("jira-task-worker", "jira-task-reviewer"):
+            recovered_task_runs = await orchestrator.resume_interrupted_headless(
+                settings.agent_timeout_seconds,
+                job_name=task_job,
+                accept_result=lambda _text: True,
+            )
+            if recovered_task_runs:
+                LOGGER.info("Recovered %d interrupted %s run(s)", len(recovered_task_runs), task_job)
         recovered_design_reviews = await orchestrator.resume_interrupted_headless(
             settings.experiment_design_timeout_seconds,
             job_name="experiment-design-reviewer",

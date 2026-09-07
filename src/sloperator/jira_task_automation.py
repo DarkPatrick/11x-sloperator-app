@@ -7,6 +7,7 @@ import json
 import logging
 import asyncio
 import re
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,6 +61,18 @@ def worker_prompt(task_key: str, summary: str = "") -> str:
 
 def reviewer_prompt(task_key: str) -> str:
     return REVIEWER_PROMPT.format(task_key=task_key)
+
+
+async def read_confluence_comments(page_url: str, workspace: Path) -> list[dict[str, Any]]:
+    """Read page comments through the repository's bot-authenticated Confluence helper."""
+    helper = workspace / ".claude" / "confluence" / "confluence_page.py"
+    proc = await asyncio.to_thread(
+        subprocess.run,
+        [str(workspace / ".venv" / "bin" / "python"), str(helper), "--dotenv", ".env", "--as-bot", "comments", page_url, "--json"],
+        cwd=workspace, capture_output=True, text=True, timeout=60, check=True,
+    )
+    payload = json.loads(proc.stdout)
+    return [item for item in payload.get("comments", []) if isinstance(item, dict)]
 
 
 async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True) -> None:
@@ -139,6 +152,11 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                 comments = await reader.recent_comments(task.key)
                 comment_context = json.dumps(comments[-5:], ensure_ascii=False)[:8000]
                 page_context = str(link.get("confluence_page_url") or "No Confluence page URL is recorded yet.")
+                page_comments: list[dict[str, Any]] = []
+                if link.get("confluence_page_url"):
+                    page_comments = await read_confluence_comments(
+                        str(link["confluence_page_url"]), settings.agent_workspace
+                    )
                 if task.status in QUEUED_STATUSES and link.get("phase") == "reviewer":
                     worker = await agent.execute_once(
                         worker_prompt(task.key, task.summary)
@@ -152,7 +170,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     )
                 reviewer_id = link.get("reviewer_session_id")
                 result = await agent.execute_once(
-                    reviewer_prompt(task.key) + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context,
+                    reviewer_prompt(task.key) + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context + "\nRecent Confluence comments (authoritative JSON):\n" + json.dumps(page_comments[-5:], ensure_ascii=False)[:8000],
                     7200,
                     job_name="jira-task-reviewer",
                     existing_session_id=reviewer_id,

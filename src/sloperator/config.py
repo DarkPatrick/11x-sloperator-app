@@ -71,6 +71,7 @@ class Settings:
     experiment_analytics_hour: int = 16
     experiment_analytics_timeout_seconds: int = 7_200
     experiment_analytics_channel: str = "C07A9FDQ14P"
+    jira_task_automation_enabled: bool = True
     jira_url: str = "https://mu--se.atlassian.net"
     jira_username: str | None = None
     jira_api_token: str | None = None
@@ -172,6 +173,9 @@ class Settings:
         experiment_analytics_channel = os.environ.get(
             "EXPERIMENT_ANALYTICS_CHANNEL", "C07A9FDQ14P"
         ).strip()
+        jira_task_automation_enabled = os.environ.get(
+            "JIRA_TASK_AUTOMATION_ENABLED", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         jira_url = os.environ.get("JIRA_URL", "https://mu--se.atlassian.net").strip()
         jira_username = os.environ.get("JIRA_USERNAME", "").strip() or None
         jira_api_token = os.environ.get("JIRA_API_TOKEN", "").strip() or None
@@ -392,6 +396,7 @@ class Settings:
             experiment_analytics_hour=experiment_analytics_hour,
             experiment_analytics_timeout_seconds=experiment_analytics_timeout_seconds,
             experiment_analytics_channel=experiment_analytics_channel,
+            jira_task_automation_enabled=jira_task_automation_enabled,
             jira_url=jira_url,
             jira_username=jira_username,
             jira_api_token=jira_api_token,

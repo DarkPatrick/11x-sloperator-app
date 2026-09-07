@@ -457,21 +457,22 @@ async def serve(settings: Settings) -> None:
                 ),
                 name="daily-experiment-analytics-planner",
             )
-        jira_task_automation_task = asyncio.create_task(
-            run_jira_task_automation(
-                settings,
-                orchestrator,
-                lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
-            ),
-            name="hourly-jira-task-automation",
-        )
-        jira_task_poll_task = asyncio.create_task(
-            poll_jira_task_automation(
-                settings, orchestrator,
-                lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
-            ),
-            name="ten-minute-jira-task-poll",
-        )
+        if settings.jira_task_automation_enabled:
+            jira_task_automation_task = asyncio.create_task(
+                run_jira_task_automation(
+                    settings,
+                    orchestrator,
+                    lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
+                ),
+                name="hourly-jira-task-automation",
+            )
+            jira_task_poll_task = asyncio.create_task(
+                poll_jira_task_automation(
+                    settings, orchestrator,
+                    lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
+                ),
+                name="ten-minute-jira-task-poll",
+            )
         automation_error_audit_task = asyncio.create_task(
             run_daily_automation_error_audit(
                 app.client,

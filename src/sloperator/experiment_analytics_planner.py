@@ -79,11 +79,9 @@ substitute another candidate. The exact selected keys are appended at runtime.
 Execution:
 1. At the moment you start work, use the repository Jira helper with `--as-bot` and operate on the
    selected Analytics task. Resolve the service account's own Jira `accountId` from the
-   authoritative
-   `/myself` response, assign the task to that account, and transition it to the status dynamically
-   mapped to the board's In Progress column. Resolve the issue's editable fields dynamically (use
-   the issue metadata/edit metadata, never guess a customfield id): set the field whose Jira name is
-   exactly `Start date` to today's date in `YYYY-MM-DD` format. Re-fetch the issue and verify the
+   authoritative `/myself` response (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`), assign the task to that account,
+   and transition it using transition ID `281` (target status `In Progress`). The verified Jira field ID for
+   `Start date` is `customfield_10312`; set it to today's date in `YYYY-MM-DD` format. Re-fetch the issue and verify the
    assignee, status, and date before continuing. If any write or verification fails, stop and return
    `{FAILURE_PREFIX} Jira start update failed`.
 2. For the selected Analytics task, resolve the correct project page and matching iteration. Build
@@ -149,9 +147,8 @@ After the page is correct and verified:
    analytics specification was prepared, published, and independently reviewed, with the page link.
    Re-fetch and verify the comment.
 2. Only after the comment is successfully added and verified, transition `{task_key}` to the status
-   dynamically mapped to the board's In Review column and verify the result; do not hardcode a
-   transition id. Resolve the issue's editable fields dynamically and set the field whose Jira name
-   is exactly `Due date` to today's date in `YYYY-MM-DD` format. Use the repository Jira helper with
+   using transition ID `181` (target status `In Review`) and verify the result. The verified Jira field ID for
+   `Due date` is `duedate`; set it to today's date in `YYYY-MM-DD` format. Use the repository Jira helper with
    `--as-bot` for these writes and re-fetch the issue to verify the final status, due date, and the
    comment. If any write or verification fails, return `{FAILURE_PREFIX} Jira review update failed`.
 3. Resolve Slack identities for the epic assignee and Analytics-task assignee. Deduplicate mentions,

@@ -80,17 +80,20 @@ def test_review_notification_rejects_wrong_task() -> None:
 
 def test_preparer_prompt_owns_jira_start_metadata() -> None:
     assert "assign the task to that account" in PREPARATION_PROMPT
-    assert "In Progress column" in PREPARATION_PROMPT
+    assert "target status `In Progress`" in PREPARATION_PROMPT
+    assert "transition ID `281`" in PREPARATION_PROMPT
     assert "Start date" in PREPARATION_PROMPT
-    assert "never guess a customfield id" in PREPARATION_PROMPT
+    assert "customfield_10312" in PREPARATION_PROMPT
     assert "Jira start update failed" in PREPARATION_PROMPT
 
 
 def test_reviewer_prompt_owns_jira_review_metadata_after_comment() -> None:
     prompt = review_prompt("UMN-13024", "UMN-12345")
     assert "Only after the comment is successfully added and verified" in prompt
-    assert "In Review column" in prompt
+    assert "target status `In Review`" in prompt
+    assert "transition ID `181`" in prompt
     assert "Due date" in prompt
+    assert "`duedate`" in prompt
     assert "Jira review update failed" in prompt
 
 

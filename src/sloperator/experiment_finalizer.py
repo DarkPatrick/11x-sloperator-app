@@ -72,12 +72,18 @@ Selection rules:
 5. Locate each experiment's project page and exclude it if the final Results/Итоги section for
    this experiment/iteration is already populated. Do not mistake a template, empty placeholder,
    design table, or results for another iteration for completed итогов.
-6. The experiments remaining after rules 1-5 form the preliminary candidate pool. Order the whole
+6. Locate the exact Jira Results/Итоги task for the matching experiment and iteration before any
+   calculator invocation or calculation-row inspection. Exclude the experiment when that task is
+   already In Progress, In Review, Done, or any other non-queued status; only a task in Backlog or
+   To Do may enter the candidate pool. If the exact task or its status cannot be established, exclude
+   the candidate and continue to the next experiment. Re-check this status immediately before any
+   write as well.
+7. The experiments remaining after rules 1-6 form the preliminary candidate pool. Order the whole
    pool by actual end timestamp, then by experiment id as a deterministic tie-breaker. If the pool
    is empty, stop immediately: do not invoke the calculator, do not inspect fallback experiments
    outside these rules, make no Confluence or Jira writes, and return exactly
    `{NO_OP_NOTIFICATION}` and nothing else.
-7. Walk the ordered preliminary candidate pool from oldest to newest. For each candidate, obtain
+8. Walk the ordered preliminary candidate pool from oldest to newest. For each candidate, obtain
    freshly calculated maturity data. Use results produced by this run; if its calculator rows are
    not demonstrably fresh, recalculate it first using the direct-library procedure below and verify
    the fresh rows. Never determine eligibility from stale cached results. Apply a
@@ -93,7 +99,7 @@ Selection rules:
    do not exclude an otherwise eligible experiment for it. Only if every candidate in the pool has
    been checked and excluded may you return exactly `{NO_OP_NOTIFICATION}` and nothing else. Do not
    treat this expected no-op as an error.
-8. Immediately before any write, re-fetch the UGM allowlist and experiment title and re-check both
+9. Immediately before any write, re-fetch the UGM allowlist and experiment title and re-check both
    monetisation gates from rule 1, the actual end timestamp/client classification and age gate, the
    admin/page conditions, and the strict pending-trials gate against the same fresh
    calculation. If the experiment is no longer eligible, make no Confluence or Jira writes and

@@ -201,6 +201,10 @@ def normalize_review_notification(text: str, task_key: str) -> str:
     if not candidates:
         raise InvalidAnalyticsResult("Review agent returned no valid notification")
     result = next(iter(candidates))
+    # A one-line notification must never be wrapped in a pair of backticks:
+    # Slack renders the entire notification as inline code in that form.
+    if result.startswith("`") and result.endswith("`"):
+        result = result[1:-1].strip()
     links = set(TASK_LINK_RE.findall(result))
     if links != {task_key} or "analytics" not in result.lower() or "\n" in result:
         raise InvalidAnalyticsResult("Review notification has an invalid task or format")

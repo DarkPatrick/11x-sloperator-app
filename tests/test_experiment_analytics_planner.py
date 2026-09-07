@@ -76,3 +76,13 @@ def test_review_notification_rejects_wrong_task() -> None:
             "Analytics is ready, please check https://mu--se.atlassian.net/browse/UMN-99999",
             CANDIDATE.task_key,
         )
+
+
+def test_review_notification_removes_accidental_outer_code_ticks() -> None:
+    notification = (
+        f"`<@U123> analytics specification is ready in "
+        f"<https://mu--se.atlassian.net/browse/{CANDIDATE.task_key}|{CANDIDATE.task_key}> "
+        "— please check it.`"
+    )
+
+    assert normalize_review_notification(notification, CANDIDATE.task_key) == notification[1:-1]

@@ -62,6 +62,8 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
     assert "Realistic and Pessimistic" in PREPARATION_PROMPT
     assert "Reach & Impact" in PREPARATION_PROMPT
     assert "Experiment design" in PREPARATION_PROMPT
+    assert "transition ID `281`" in PREPARATION_PROMPT
+    assert "customfield_10312" in PREPARATION_PROMPT
     assert "stops before launching an agent" in PREPARATION_PROMPT
     assert NO_OP_RESULT not in PREPARATION_PROMPT
 
@@ -84,7 +86,8 @@ def test_review_prompt_requires_independent_correction_and_final_actions() -> No
     assert "still be the oldest eligible" in prompt
     assert "UMN-12312" in prompt
     assert "add one short English comment" in prompt
-    assert "board's In Review column" in prompt
+    assert "transition ID `181`" in prompt
+    assert "`duedate`" in prompt
     assert "epic assignee" in prompt
     assert "calculation-task assignee" in prompt
     assert "Do not send Slack messages yourself" in prompt

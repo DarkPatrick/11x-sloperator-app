@@ -95,15 +95,22 @@ used for an empty selection.
 {SELECTION_RULES}
 
 Execution:
-1. For the selected calculation task, resolve the correct project page and the matching iteration.
+1. At the moment you start work, use the repository Jira helper with `--as-bot` and operate on the
+   selected calculation task. Resolve the service account's own Jira `accountId` from the authoritative
+   `/myself` response (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`), assign the task to that account,
+   and transition it using transition ID `281` (target status `In Progress`). The verified Jira field ID for
+   `Start date` is `customfield_10312`; set it to today's date in `YYYY-MM-DD` format. Re-fetch the issue
+   and verify the assignee, status, and date before continuing. If any write or verification fails, return
+   `{FAILURE_PREFIX} Jira start update failed`.
+2. For the selected calculation task, resolve the correct project page and the matching iteration.
    Use the skill's strict formats to fully calculate, build, and populate both `Reach & Impact` and
    `Experiment design`. Follow the skill's monetisation-first defaults, mature-cohort rules, exact
    metric naming, saved-Redash-query requirements, table builders, and rendered-structure checks.
-2. You are the preparation pass only. Do not comment on Jira, transition any Jira issue, or send a
+3. You are the preparation pass only. Do not comment on Jira or send a
    Slack message. Leave those actions to an independent reviewer.
-3. Re-fetch the page and verify both blocks are non-empty, belong to the selected iteration, contain
+4. Re-fetch the page and verify both blocks are non-empty, belong to the selected iteration, contain
    the required links and strict table structure, and did not remove unrelated content.
-4. On success return exactly `DESIGN_PREPARED: <calculation task key> | <epic key>` on one line.
+5. On success return exactly `DESIGN_PREPARED: <calculation task key> | <epic key>` on one line.
    On failure return one concise line beginning exactly `{FAILURE_PREFIX}`. Do not return progress,
    an audit, calculations, or any other text.
 """
@@ -171,8 +178,10 @@ After the page is correct and verified:
 1. Use the repository Jira helper to add one short English comment to `{task_key}` saying that
    Reach & Impact and Experiment design were calculated, published, and independently reviewed,
    with the project-page link. Re-fetch the issue and verify the comment.
-2. Transition `{task_key}` to the status mapped to the board's In Review column. Resolve the actual
-   available transition dynamically and verify the resulting status; do not hardcode a status id.
+2. Transition `{task_key}` using transition ID `181` (target status `In Review`) and verify the resulting
+   status. The verified Jira field ID for `Due date` is `duedate`; set it to today's date in `YYYY-MM-DD`
+   format. Re-fetch the issue and verify the final status and due date. If any write or verification fails,
+   return `{FAILURE_PREFIX} Jira review update failed`.
 3. Resolve Slack user ids from authoritative Slack profiles for the epic assignee and, when set,
    the calculation-task assignee. Deduplicate the mentions. Never guess Slack ids. If a Jira
    assignee cannot be resolved, use their plain display name and keep the notification concise.

@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS jira_task_agent_links (
     last_confluence_activity_at TEXT,
     last_activity_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     terminal_at TEXT,
+    confluence_page_url TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
 
@@ -261,6 +262,11 @@ class EventStore:
                 row[1]
                 for row in connection.execute("PRAGMA table_info(scheduled_agent_runs)")
             }
+            task_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(jira_task_agent_links)")
+            }
+            if "confluence_page_url" not in task_columns:
+                connection.execute("ALTER TABLE jira_task_agent_links ADD COLUMN confluence_page_url TEXT")
             if "job_name" not in scheduled_columns:
                 connection.execute(
                     "ALTER TABLE scheduled_agent_runs ADD COLUMN job_name TEXT "
@@ -626,6 +632,7 @@ class EventStore:
         last_jira_updated_at: str | None = None,
         last_confluence_activity_at: str | None = None,
         terminal_at: str | None = None,
+        confluence_page_url: str | None = None,
     ) -> None:
         """Persist the durable worker/reviewer ownership for a Jira task."""
         with self._connect() as connection:
@@ -633,8 +640,8 @@ class EventStore:
                 """
                 INSERT INTO jira_task_agent_links(
                     task_key, worker_session_id, reviewer_session_id, phase,
-                    last_jira_updated_at, last_confluence_activity_at, terminal_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    last_jira_updated_at, last_confluence_activity_at, terminal_at, confluence_page_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_key) DO UPDATE SET
                     worker_session_id = COALESCE(excluded.worker_session_id, worker_session_id),
                     reviewer_session_id = COALESCE(excluded.reviewer_session_id, reviewer_session_id),
@@ -642,11 +649,12 @@ class EventStore:
                     last_jira_updated_at = COALESCE(excluded.last_jira_updated_at, last_jira_updated_at),
                     last_confluence_activity_at = COALESCE(excluded.last_confluence_activity_at, last_confluence_activity_at),
                     terminal_at = excluded.terminal_at,
+                    confluence_page_url = COALESCE(excluded.confluence_page_url, confluence_page_url),
                     last_activity_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (task_key, worker_session_id, reviewer_session_id, phase,
-                 last_jira_updated_at, last_confluence_activity_at, terminal_at),
+                 last_jira_updated_at, last_confluence_activity_at, terminal_at, confluence_page_url),
             )
 
     def jira_task_agent_link(self, task_key: str) -> dict[str, Any] | None:

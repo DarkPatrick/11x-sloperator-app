@@ -77,13 +77,23 @@ substitute another candidate. The exact selected keys are appended at runtime.
 {SELECTION_RULES}
 
 Execution:
-1. For the selected Analytics task, resolve the correct project page and matching iteration. Build
+1. At the moment you start work, use the repository Jira helper with `--as-bot` and operate on the
+   selected Analytics task. Resolve the service account's own Jira `accountId` from the
+   authoritative
+   `/myself` response, assign the task to that account, and transition it to the status dynamically
+   mapped to the board's In Progress column. Resolve the issue's editable fields dynamically (use
+   the issue metadata/edit metadata, never guess a customfield id): set the field whose Jira name is
+   exactly `Start date` to today's date in `YYYY-MM-DD` format. Re-fetch the issue and verify the
+   assignee, status, and date before continuing. If any write or verification fails, stop and return
+   `{FAILURE_PREFIX} Jira start update failed`.
+2. For the selected Analytics task, resolve the correct project page and matching iteration. Build
    and populate the complete analytics specification through `ug-analytics-spec-writer`, using its
    required structure, naming, source validation, implementation details, and verification gates.
-2. You are the preparation pass only. Do not comment on Jira, transition an issue, or send Slack.
-3. Re-fetch the page and verify the analytics specification is complete, belongs to the selected
+3. You are the preparation pass only. Do not comment on Jira, send Slack, or move the task beyond
+   In Progress. The final reviewer owns the Jira comment and In Review transition.
+4. Re-fetch the page and verify the analytics specification is complete, belongs to the selected
    iteration, and did not remove unrelated content.
-4. On success return exactly `ANALYTICS_PREPARED: <Analytics task key> | <epic key>` on one line.
+5. On success return exactly `ANALYTICS_PREPARED: <Analytics task key> | <epic key>` on one line.
    On failure return one concise line beginning exactly `{FAILURE_PREFIX}`.
 """
 
@@ -138,8 +148,12 @@ After the page is correct and verified:
 1. Add one short English Jira comment to `{task_key}` through the repository helper saying the
    analytics specification was prepared, published, and independently reviewed, with the page link.
    Re-fetch and verify the comment.
-2. Transition `{task_key}` to the status dynamically mapped to the board's In Review column and
-   verify the result; do not hardcode a transition id.
+2. Only after the comment is successfully added and verified, transition `{task_key}` to the status
+   dynamically mapped to the board's In Review column and verify the result; do not hardcode a
+   transition id. Resolve the issue's editable fields dynamically and set the field whose Jira name
+   is exactly `Due date` to today's date in `YYYY-MM-DD` format. Use the repository Jira helper with
+   `--as-bot` for these writes and re-fetch the issue to verify the final status, due date, and the
+   comment. If any write or verification fails, return `{FAILURE_PREFIX} Jira review update failed`.
 3. Resolve Slack identities for the epic assignee and Analytics-task assignee. Deduplicate mentions,
    never guess ids, and fall back to plain display names when necessary.
 4. Do not send Slack yourself. Return exactly one compact Slack-ready line with the mentions/names,

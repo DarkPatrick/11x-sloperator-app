@@ -1,7 +1,12 @@
 import datetime as dt
 
 from sloperator.claude_usage import ClaudeUsage
-from sloperator.jira_task_automation import reviewer_prompt, weekly_quota_allows_launch, worker_prompt
+from sloperator.jira_task_automation import (
+    confluence_destination,
+    reviewer_prompt,
+    weekly_quota_allows_launch,
+    worker_prompt,
+)
 
 
 def usage(session: int, week: int, reset: str = "Sep 9, 1pm (UTC)") -> ClaudeUsage:
@@ -37,3 +42,12 @@ def test_worker_and_reviewer_prompts_are_task_scoped() -> None:
     assert "duedate" in reviewer
     assert "transition with ID 181" in reviewer
     assert "Confluence page" in reviewer
+
+
+def test_confluence_destination_selects_parent_and_required_templates() -> None:
+    release_parent, release_template = confluence_destination("Prepare product release notes")
+    hypothesis_parent, hypothesis_template = confluence_destination("Проверить гипотезу оплаты")
+    assert release_parent.endswith("3.+Product+Releases+um")
+    assert release_template == "Product release"
+    assert hypothesis_parent.endswith("2.+Hypothesis+um")
+    assert hypothesis_template == "Hypotheses"

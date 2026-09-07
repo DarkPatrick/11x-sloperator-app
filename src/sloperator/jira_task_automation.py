@@ -23,6 +23,27 @@ SERVICE_ACCOUNT_ID = "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"
 QUEUED_STATUSES = frozenset({"Backlog", "To Do"})
 RETURNED_MARKER = "returned to work"
 PAGE_RE = re.compile(r"^CONFLUENCE_PAGE:\s*(https://\S+)\s*$", re.MULTILINE)
+CONFLUENCE_PARENTS = {
+    "analysis": "https://alice.mu.se/spaces/CRO/pages/103614364/4.+Research+Sandbox+um",
+    "documentation": "https://alice.mu.se/spaces/CRO/pages/768842224/5.+Documentation+um",
+    "release": "https://alice.mu.se/spaces/CRO/pages/103614361/3.+Product+Releases+um",
+    "hypothesis": "https://alice.mu.se/spaces/CRO/pages/103614359/2.+Hypothesis+um",
+    "generation": "https://alice.mu.se/spaces/CRO/pages/206146291/1.+Generation+um",
+}
+
+
+def confluence_destination(summary: str) -> tuple[str, str | None]:
+    """Map a task title to a parent page and mandatory template, when applicable."""
+    title = summary.casefold()
+    if any(word in title for word in ("release", "релиз")):
+        return CONFLUENCE_PARENTS["release"], "Product release"
+    if any(word in title for word in ("hypothesis", "гипотез")):
+        return CONFLUENCE_PARENTS["hypothesis"], "Hypotheses"
+    if any(word in title for word in ("documentation", "документац")):
+        return CONFLUENCE_PARENTS["documentation"], None
+    if any(word in title for word in ("generation", "генерац")):
+        return CONFLUENCE_PARENTS["generation"], None
+    return CONFLUENCE_PARENTS["analysis"], None
 
 WORKER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the worker for Jira task {{task_key}}. Work only on that task. Move it to In Progress, set Start date via customfield_10312, and perform the requested work. For Confluence use the service account's personal space if it exists; otherwise use the server. For analysis use parent https://alice.mu.se/spaces/CRO/pages/103614364/4.+Research+Sandbox+um, documentation https://alice.mu.se/spaces/CRO/pages/768842224/5.+Documentation+um, releases https://alice.mu.se/spaces/CRO/pages/103614361/3.+Product+Releases+um with the Product release template, hypotheses https://alice.mu.se/spaces/CRO/pages/103614359/2.+Hypothesis+um with the Hypotheses template, and generation https://alice.mu.se/spaces/CRO/pages/206146291/1.+Generation+um. If the result is small, keep it in Jira; Redash/Metabase is acceptable for queries or dashboards. Keep the task updated with concise factual notes. When done, return control to the reviewer with a short handoff; do not post Slack yourself."""
 REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the reviewer and communication owner for Jira task {{task_key}}. Read all new Jira comments and all comments on the created Confluence page, verify the worker's result, and make corrections with the worker when needed. If information is missing, ask the task author in Jira and pause. When complete, add a concise Jira comment, set Due date via duedate, and transition with ID 181 to In Review. Keep all communication short and human-readable. Continue owning replies until the task is Done plus 24 hours without activity."""

@@ -100,9 +100,15 @@ Selection rules:
    return exactly `{NO_OP_NOTIFICATION}` and nothing else. Keep filter/audit details internal.
 
 Execution for the selected experiment:
-1. State the selected title, id, end timestamp, clients, segments, target project page, iteration,
+1. At the moment you start work, use the repository Jira helper with `--as-bot` and operate on the
+   exact Results task for the selected experiment/iteration. Resolve the service account from `/myself`
+   (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`), assign that task to it, set `Start date`
+   (`customfield_10312`) to today's `YYYY-MM-DD` date, and transition using ID `281` to `In Progress`.
+   Re-fetch and verify the assignee, date, and status before continuing; on failure return
+   `Experiment finalisation failed: Jira start update failed`.
+2. State the selected title, id, end timestamp, clients, segments, target project page, iteration,
    configured table prefix, and affected package-managed tables.
-2. Use the `ug-experiment-calculator` skill and the installed repository `.venv` library directly;
+3. Use the `ug-experiment-calculator` skill and the installed repository `.venv` library directly;
    do not use the calculator HTTP API in this job. First run the repository freshness preflight and
    perform the skill's mandatory installed-commit versus git `main` check. If the installed
    `ug-experiment-calculator` is stale, update it through the repository's supported

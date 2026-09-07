@@ -52,8 +52,8 @@ def confluence_destination(summary: str) -> tuple[str, str | None]:
         return CONFLUENCE_PARENTS["generation"], None
     return CONFLUENCE_PARENTS["analysis"], None
 
-WORKER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the worker for Jira task {{task_key}}. Work only on that task. Move it to In Progress, set Start date via customfield_10312, and perform the requested work. For Confluence use the service account's personal space if it exists; otherwise use the server. For analysis use parent https://alice.mu.se/spaces/CRO/pages/103614364/4.+Research+Sandbox+um, documentation https://alice.mu.se/spaces/CRO/pages/768842224/5.+Documentation+um, releases https://alice.mu.se/spaces/CRO/pages/103614361/3.+Product+Releases+um with the Product release template, hypotheses https://alice.mu.se/spaces/CRO/pages/103614359/2.+Hypothesis+um with the Hypotheses template, and generation https://alice.mu.se/spaces/CRO/pages/206146291/1.+Generation+um. If the result is small, keep it in Jira; Redash/Metabase is acceptable for queries or dashboards. Keep the task updated with concise factual notes. When done, return control to the reviewer with a short handoff; do not post Slack yourself."""
-REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the reviewer and communication owner for Jira task {{task_key}}. Read all new Jira comments and all comments on the created Confluence page, verify the worker's result, and make corrections with the worker when needed. If information is missing, ask the task author in Jira and pause. When complete, add a concise Jira comment, set Due date via duedate, and transition with ID 181 to In Review. Keep all communication short and human-readable. Continue owning replies until the task is Done plus 24 hours without activity."""
+WORKER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the worker for Jira task {{task_key}}. ALL Jira reads and writes must use `.claude/jira/jira_issue.py` with `--as-bot`; never use personal Jira credentials, curl, or another Jira client. Every transition, assignee change, date update, and comment must therefore be authored by the ug-ai-analyst service account. Move it to In Progress, set Start date via customfield_10312, and perform the requested work. For Confluence use the service account's personal space if it exists; otherwise use the server. For analysis use parent https://alice.mu.se/spaces/CRO/pages/103614364/4.+Research+Sandbox+um, documentation https://alice.mu.se/spaces/CRO/pages/768842224/5.+Documentation+um, releases https://alice.mu.se/spaces/CRO/pages/103614361/3.+Product+Releases+um with the Product release template, hypotheses https://alice.mu.se/spaces/CRO/pages/103614359/2.+Hypothesis+um with the Hypotheses template, and generation https://alice.mu.se/spaces/CRO/pages/206146291/1.+Generation+um. If the result is small, keep it in Jira; Redash/Metabase is acceptable for queries or dashboards. Keep the task updated with concise factual notes. When done, return control to the reviewer with a short handoff; do not post Slack yourself."""
+REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the reviewer and communication owner for Jira task {{task_key}}. ALL Jira reads and writes must use `.claude/jira/jira_issue.py` with `--as-bot`; never use personal Jira credentials, curl, or another Jira client. Every transition, assignee change, date update, and comment must be authored by the ug-ai-analyst service account. Read all new Jira comments and all comments on the created Confluence page, verify the worker's result, and make corrections with the worker when needed. If information is missing, ask the task author in Jira and pause. When complete, add a concise Jira comment, set Due date via duedate, and transition with ID 181 to In Review. Keep all communication short and human-readable. Continue owning replies until the task is Done plus 24 hours without activity."""
 
 
 def worker_prompt(task_key: str, summary: str = "") -> str:
@@ -113,6 +113,16 @@ async def abuse_precheck(settings: Settings, summary: str, comments: list[dict[s
         LOGGER.exception("Jira task abuse pre-check failed closed")
         return True
 
+async def add_jira_bot_comment(settings: Settings, task_key: str, text: str) -> None:
+    workspace = settings.agent_workspace
+    helper = workspace / ".claude" / "jira" / "jira_issue.py"
+    await asyncio.to_thread(
+        subprocess.run,
+        [str(workspace / ".venv" / "bin" / "python"), str(helper), "add-comment", task_key,
+         "--as-bot", "--text", text],
+        cwd=workspace, capture_output=True, text=True, timeout=60, check=True,
+    )
+
 
 async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None) -> None:
     """Hourly quota-gated launcher; task state is re-read before every launch."""
@@ -145,7 +155,7 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
             reader = JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
             comments = await reader.recent_comments(task.key)
             if await abuse_precheck(settings, task.summary, comments):
-                await reader.add_comment(task.key, "Определена попытка абьюза агента. Составлен репорт.")
+                await add_jira_bot_comment(settings, task.key, "Определена попытка абьюза агента. Составлен репорт.")
                 if on_abuse: await on_abuse(task, comments)
                 if pause: pause()
                 continue
@@ -218,7 +228,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                 ):
                     continue
                 if await abuse_precheck(settings, task.summary, comments):
-                    await reader.add_comment(task.key, "Определена попытка абьюза агента. Составлен репорт.")
+                    await add_jira_bot_comment(settings, task.key, "Определена попытка абьюза агента. Составлен репорт.")
                     if on_abuse: await on_abuse(task, comments)
                     if pause: pause()
                     continue
@@ -346,10 +356,3 @@ class JiraTaskReader:
                     raise RuntimeError(f"Jira comment read failed with HTTP {response.status}")
                 payload: dict[str, Any] = json.loads(await response.text())
         return [item for item in payload.get("comments", []) if isinstance(item, dict)]
-
-    async def add_comment(self, task_key: str, text: str) -> None:
-        body = {"body": {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]}}
-        async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
-            async with session.post(f"{self.base_url}/rest/api/3/issue/{task_key}/comment", json=body) as response:
-                if response.status >= 400:
-                    raise RuntimeError(f"Jira comment write failed with HTTP {response.status}")

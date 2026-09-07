@@ -50,6 +50,11 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
                 LOGGER.info("Jira task agents held: Claude quota gate is closed")
                 continue
             candidates = await JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token).queued_tasks()
+            candidates = [
+                candidate for candidate in candidates
+                if agent.store.jira_task_agent_link(candidate.key) is None
+                or agent.store.jira_task_agent_link(candidate.key).get("terminal_at") is not None
+            ]
             if not candidates:
                 continue
             task = candidates[0]

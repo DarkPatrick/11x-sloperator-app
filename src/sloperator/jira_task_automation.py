@@ -11,7 +11,7 @@ from typing import Any
 
 from aiohttp import BasicAuth, ClientSession, ClientTimeout
 
-from sloperator.claude_usage import ClaudeUsage
+from sloperator.claude_usage import ClaudeUsage, read_usage
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.config import Settings
 
@@ -69,6 +69,40 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
             )
         except Exception:
             LOGGER.exception("Jira task automation hourly run failed")
+
+
+async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambda: True) -> None:
+    """Ten-minute Jira poll that resumes the durable reviewer after task activity."""
+    while True:
+        await asyncio.sleep(600)
+        if not enabled() or not settings.jira_username or not settings.jira_api_token:
+            continue
+        reader = JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
+        try:
+            usage = await read_usage(settings.claude_cli, model=settings.claude_model)
+            if not weekly_quota_allows_launch(usage, now=dt.datetime.now(dt.UTC)):
+                continue
+            for link in agent.store.active_jira_task_agent_links():
+                task = await reader.task_snapshot(str(link["task_key"]))
+                if task.status == "Done":
+                    agent.store.upsert_jira_task_agent_link(task.key, phase="done", terminal_at=dt.datetime.now(dt.UTC).isoformat())
+                    continue
+                previous = link.get("last_jira_updated_at")
+                if previous and task.updated_at <= dt.datetime.fromisoformat(str(previous)):
+                    continue
+                reviewer_id = link.get("reviewer_session_id")
+                result = await agent.execute_once(
+                    reviewer_prompt(task.key) + "\nRead all new Jira comments and continue the task.",
+                    7200,
+                    job_name="jira-task-reviewer",
+                    existing_session_id=reviewer_id,
+                )
+                agent.store.upsert_jira_task_agent_link(
+                    task.key, reviewer_session_id=result.session_id, phase="reviewer",
+                    last_jira_updated_at=task.updated_at.isoformat(),
+                )
+        except Exception:
+            LOGGER.exception("Jira task automation polling failed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,3 +173,20 @@ class JiraTaskReader:
                 )
             )
         return result
+
+    async def task_snapshot(self, task_key: str) -> JiraTaskCandidate:
+        async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
+            async with session.get(
+                f"{self.base_url}/rest/api/3/issue/{task_key}",
+                params={"fields": "summary,status,updated"},
+            ) as response:
+                if response.status >= 400:
+                    raise RuntimeError(f"Jira task read failed with HTTP {response.status}")
+                issue: dict[str, Any] = json.loads(await response.text())
+        fields = issue["fields"]
+        return JiraTaskCandidate(
+            key=task_key,
+            summary=str(fields.get("summary", "")),
+            status=str(fields["status"]["name"]),
+            updated_at=dt.datetime.fromisoformat(str(fields["updated"]).replace("Z", "+00:00")),
+        )

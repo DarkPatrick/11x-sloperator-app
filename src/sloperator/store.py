@@ -657,6 +657,14 @@ class EventStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def active_jira_task_agent_links(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM jira_task_agent_links WHERE terminal_at IS NULL"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def finish_scheduled_agent_run(
         self,
         run_id: str,

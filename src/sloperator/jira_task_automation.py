@@ -90,6 +90,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
             continue
         reader = JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
         try:
+            agent.store.cleanup_jira_task_agent_links()
             usage = await read_usage(settings.claude_cli, model=settings.claude_model)
             if not weekly_quota_allows_launch(usage, now=dt.datetime.now(dt.UTC)):
                 continue

@@ -665,6 +665,15 @@ class EventStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def cleanup_jira_task_agent_links(self) -> int:
+        """Drop terminal Jira task links after one quiet day."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM jira_task_agent_links WHERE terminal_at IS NOT NULL "
+                "AND datetime(terminal_at) <= datetime('now', '-1 day')"
+            )
+            return cursor.rowcount
+
     def finish_scheduled_agent_run(
         self,
         run_id: str,

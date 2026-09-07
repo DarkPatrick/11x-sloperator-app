@@ -173,6 +173,14 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     page_comments = await read_confluence_comments(
                         str(link["confluence_page_url"]), settings.agent_workspace
                     )
+                previous_jira = link.get("last_jira_updated_at")
+                previous_page = link.get("confluence_page_version")
+                if (
+                    previous_jira
+                    and task.updated_at <= dt.datetime.fromisoformat(str(previous_jira))
+                    and (page_version is None or page_version == previous_page)
+                ):
+                    continue
                 if task.status in QUEUED_STATUSES and link.get("phase") == "reviewer":
                     worker = await agent.execute_once(
                         worker_prompt(task.key, task.summary)

@@ -27,7 +27,10 @@ REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the review
 
 
 def worker_prompt(task_key: str) -> str:
-    return WORKER_PROMPT.format(task_key=task_key)
+    return WORKER_PROMPT.format(task_key=task_key).replace(
+        "For Confluence use the service account's personal space if it exists; otherwise use the server.",
+        "A bot-authenticated check found no personal Confluence space for ug-ai-analyst; use the server space.",
+    )
 
 
 def reviewer_prompt(task_key: str) -> str:

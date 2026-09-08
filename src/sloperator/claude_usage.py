@@ -12,7 +12,8 @@ from pathlib import Path
 LOGGER = logging.getLogger(__name__)
 
 SESSION_USAGE_RE = re.compile(
-    r"^Current session:\s*(?P<session>\d+)%\s+used\b[^\n]*?\bresets\s+(?P<reset>[^\n]+)",
+    r"^Current session:[ \t]*(?P<session>\d+)%[ \t]+used\b"
+    r"(?:[^\n]*?\bresets[ \t]+(?P<reset>[^\n]+))?",
     re.IGNORECASE | re.MULTILINE,
 )
 WEEK_USAGE_RE = re.compile(
@@ -67,7 +68,8 @@ def parse_usage(text: str) -> ClaudeUsage:
     return ClaudeUsage(
         session,
         week,
-        session_match.group("reset").strip(),
+        # An unused session may have no reset time; admission only needs its percentage.
+        (session_match.group("reset") or "").strip(),
         week_match.group("reset").strip(),
     )
 

@@ -32,6 +32,33 @@ def test_parse_usage_fails_closed_on_missing_limits() -> None:
         parse_usage("Current session: unavailable")
 
 
+def test_parse_usage_accepts_unused_session_without_reset_time() -> None:
+    usage = parse_usage(
+        "Current session: 0% used\n"
+        "Current week (all models): 23% used · resets Sep 9, 12:59pm (UTC)\n"
+    )
+    assert usage.session_remaining_percent == 100
+    assert usage.week_remaining_percent == 77
+    assert usage.session_reset_text == ""
+    assert usage.week_reset_text == "Sep 9, 12:59pm (UTC)"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Current session: 0% used\n",
+        "Current session: 0% used\nCurrent week (all models): 23% used\n",
+        "Current session: unavailable\n"
+        "Current week (all models): 23% used · resets Sep 9, 12:59pm (UTC)\n",
+        "Current session: 101% used\n"
+        "Current week (all models): 23% used · resets Sep 9, 12:59pm (UTC)\n",
+    ],
+)
+def test_parse_usage_still_requires_valid_limits_and_weekly_reset(text: str) -> None:
+    with pytest.raises(ClaudeUsageError):
+        parse_usage(text)
+
+
 def test_usage_diagnostic_keeps_only_quota_lines() -> None:
     diagnostic = usage_diagnostic(
         "private text\nCurrent session: 100% used · resets today\n"

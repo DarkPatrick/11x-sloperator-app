@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from sloperator.agents import HeadlessAgentRun
+from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.config import Settings
 from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
@@ -26,6 +27,23 @@ VALID_NOTIFICATION = (
     "Iteration 3. Results calculated and published.\n\n"
     "• Conclusion\n"
 )
+
+
+def test_preparer_authorizes_start_without_forbidding_all_jira_writes() -> None:
+    assert "transition using ID `281` to `In Progress`" in FINALIZATION_PROMPT
+    assert "required and authorised in this preparation pass" in FINALIZATION_PROMPT
+    assert "Do not write to Jira" not in FINALIZATION_PROMPT
+    assert "Do not perform completion writes here" in FINALIZATION_PROMPT
+
+
+def test_reviewer_can_recover_missing_start_without_duplicate_publication() -> None:
+    assert AUTOMATED_RESPONSE_STYLE in REVIEW_PROMPT
+    assert "From `Backlog` or `To Do`" in REVIEW_PROMPT
+    assert "`281` to `In Progress` is explicitly" in REVIEW_PROMPT
+    assert "before attempting `181`" in REVIEW_PROMPT
+    assert "If already `In Review` or `Done`" in REVIEW_PROMPT
+    assert "Reuse an existing matching English publication comment" in REVIEW_PROMPT
+    assert "Do not infer a permissions problem from HTTP 400" in REVIEW_PROMPT
 
 
 def test_next_run_uses_cyprus_wall_clock_and_dst() -> None:

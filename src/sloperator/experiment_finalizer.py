@@ -147,8 +147,10 @@ Execution for the selected experiment:
    Never put local/server paths or links to logs, SQL, scripts, CSVs, ZIPs, or other run artifacts
    into the project-page body. Package useful reader-safe analysis artifacts into one bundle and
    upload it as an attachment to the existing project page instead. Verify the attachment upload.
-5. Do not write to Jira, send Slack, or transition issues in this preparation pass. Leave the Jira
-   comment, assignee/date update, transition, and final notification to the independent reviewer.
+5. The initial Jira assignment, Start date, and transition `281` to `In Progress` in step 1 are
+   required and authorised in this preparation pass. Do not perform completion writes here:
+   leave the publication comment, Due date, transition `181` to `In Review`, and final Slack
+   notification to the independent reviewer. Do not send Slack yourself.
 
 Preparation result:
 - Return exactly `FINALIZATION_PREPARED: <experiment id> | <project page URL> | Iteration <n>` after
@@ -193,13 +195,27 @@ Never finalise more than one experiment in this run.
 REVIEW_PROMPT = f"""\
 [claude]
 This is the authorised independent review pass for one prepared UG experiment finalisation.
+{AUTOMATED_RESPONSE_STYLE}
+
 Review only the exact experiment, project page, and iteration supplied below. Re-fetch the page and
 verify Results, Insights, Decision, and Next steps are complete, valid, and belong to that iteration.
 Use the repository Jira helper with `--as-bot` for every Jira command. Resolve the service account from
-`/myself` (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`), assign the exact Results task to it, set
-`Start date` (`customfield_10312`) and `Due date` (`duedate`) to today's `YYYY-MM-DD` date, add the
-short English publication comment, re-fetch and verify it, then transition with ID `181` to `In Review`
-and verify. Return the final Slack notification in the exact production format from the preparation
+`/myself` (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`). Re-fetch the exact Results task's current
+status and available transitions before any status change:
+- From `Backlog` or `To Do`, the intermediate transition ID `281` to `In Progress` is explicitly
+  authorised for recovery of a missing preparation start. Execute it and re-fetch to verify
+  `In Progress` before attempting `181`. Do not ask a human to make this authorised transition.
+- From `In Progress`, use transition ID `181` to `In Review` after the completion writes below.
+- If already `In Review` or `Done`, do not move it backwards or repeat a transition. Verify the
+  existing publication and avoid duplicate comments; preserve a completed task's fields.
+- For another status or an unavailable required transition, stop with a concise failure stating
+  the observed status and missing transition. Do not infer a permissions problem from HTTP 400.
+For a task still awaiting completion, assign it to the service account, preserve an existing
+`Start date` (`customfield_10312`) or fill it with today's `YYYY-MM-DD` date if missing, and set
+`Due date` (`duedate`) to today. Reuse an existing matching English publication comment instead
+of adding a duplicate; otherwise add the short publication comment. Re-fetch and verify the
+fields and comment, perform `181` only from verified `In Progress`, and re-fetch to verify
+`In Review`. Return the final Slack notification in the exact production format from the preparation
 prompt. Do not send Slack yourself. On any failure return exactly `Experiment finalisation failed: <reason>`.
 
 Preparation result:

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+LOGGER = logging.getLogger(__name__)
 
 SESSION_USAGE_RE = re.compile(
     r"^Current session:\s*(?P<session>\d+)%\s+used\b[^\n]*?\bresets\s+(?P<reset>[^\n]+)",
@@ -37,6 +40,20 @@ class ClaudeUsage:
 class ClaudeUsageError(RuntimeError):
     """Raised when Claude does not provide a trustworthy usage report."""
 
+    def __init__(self, message: str, *, diagnostic: str = "") -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+def usage_diagnostic(text: str) -> str:
+    """Return only quota-related lines, safe to put in an operational alert."""
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if re.match(r"^Current (?:session|week \(all models\)):", line.strip(), re.IGNORECASE)
+    ]
+    return " | ".join(lines)[:700] or "no Current session/week quota lines"
+
 
 def parse_usage(text: str) -> ClaudeUsage:
     session_match = SESSION_USAGE_RE.search(text)
@@ -62,10 +79,25 @@ async def read_usage(cli: Path, *, model: str = "opus", cwd: Path = Path("/tmp")
     )
     stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
     if process.returncode != 0:
-        raise ClaudeUsageError(f"Claude /usage failed: {stderr.decode(errors='replace')[-500:]}")
+        diagnostic = usage_diagnostic(stderr.decode(errors="replace"))
+        error = ClaudeUsageError(
+            f"Claude /usage failed: {stderr.decode(errors='replace')[-500:]}",
+            diagnostic=diagnostic,
+        )
+        LOGGER.error("Claude /usage command failed; diagnostic=%s", diagnostic)
+        raise error
     try:
         payload = json.loads(stdout)
         text = payload["result"]
     except (json.JSONDecodeError, KeyError, TypeError) as error:
-        raise ClaudeUsageError("Claude /usage returned malformed JSON") from error
-    return parse_usage(text)
+        diagnostic = usage_diagnostic(stdout.decode(errors="replace"))
+        LOGGER.error("Claude /usage returned malformed JSON; diagnostic=%s", diagnostic)
+        raise ClaudeUsageError(
+            "Claude /usage returned malformed JSON", diagnostic=diagnostic
+        ) from error
+    try:
+        return parse_usage(text)
+    except ClaudeUsageError as error:
+        diagnostic = usage_diagnostic(text)
+        LOGGER.error("Claude /usage format was not recognized; diagnostic=%s", diagnostic)
+        raise ClaudeUsageError(str(error), diagnostic=diagnostic) from error

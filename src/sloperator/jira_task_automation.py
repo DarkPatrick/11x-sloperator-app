@@ -2,23 +2,74 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
-import asyncio
 import re
 import subprocess
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from aiohttp import BasicAuth, ClientSession, ClientTimeout
 
-from sloperator.claude_usage import ClaudeUsage, read_usage
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
+from sloperator.claude_usage import ClaudeUsage, ClaudeUsageError, read_usage
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
+USAGE_ALERT_COOLDOWN_SECONDS = 3600
+
+
+class ClaudeUsageAlert:
+    """Temporary owner DM for quota-reader failures, rate-limited to once per hour."""
+
+    def __init__(self, client: Any, settings: Settings) -> None:
+        self.client = client
+        self.settings = settings
+        self._last_alert_at = 0.0
+        self._lock = asyncio.Lock()
+
+    async def __call__(self, error: ClaudeUsageError) -> None:
+        now = dt.datetime.now(dt.UTC).timestamp()
+        async with self._lock:
+            if now - self._last_alert_at < USAGE_ALERT_COOLDOWN_SECONDS:
+                LOGGER.info("Suppressing duplicate Claude /usage Slack alert")
+                return
+            self._last_alert_at = now
+        try:
+            conversation = await self.client.conversations_open(users=self.settings.slack_user_id)
+            channel_id = conversation["channel"]["id"]
+            reason = (
+                "Claude /usage command failed"
+                if str(error).startswith("Claude /usage failed:")
+                else str(error)
+            )
+            await self.client.chat_postMessage(
+                channel=channel_id,
+                markdown_text=(
+                    f"<@{self.settings.slack_user_id}> ⚠️ Claude `/usage` could not be parsed; "
+                    "Jira automation is skipping this cycle. "
+                    f"Reason: {reason}.\nDiagnostic: `{error.diagnostic or 'none'}`\n"
+                    "Temporary alert; duplicate failures are suppressed for 1 hour."
+                ),
+            )
+            LOGGER.warning("Sent temporary Claude /usage failure alert to Slack")
+        except Exception:
+            LOGGER.exception("Could not send Claude /usage failure alert to Slack")
+
+
+async def read_usage_or_alert(
+    settings: Settings, on_usage_error: Any = None
+) -> ClaudeUsage | None:
+    try:
+        return await read_usage(settings.claude_cli, model=settings.claude_model)
+    except ClaudeUsageError as error:
+        LOGGER.error("Claude usage gate unavailable; Jira automation will skip this cycle")
+        if on_usage_error is not None:
+            await on_usage_error(error)
+        return None
 
 BOARD_ID = 175
 SERVICE_ACCOUNT_ID = "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"
@@ -133,7 +184,7 @@ async def add_jira_bot_comment(settings: Settings, task_key: str, text: str) -> 
     )
 
 
-async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None) -> None:
+async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None, on_usage_error: Any = None) -> None:
     """Hourly quota-gated launcher; task state is re-read before every launch."""
     first_run = True
     while True:
@@ -147,8 +198,9 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
             continue
         LOGGER.info("Starting hourly Jira task automation check")
         try:
-            from sloperator.claude_usage import read_usage
-            usage = await read_usage(settings.claude_cli, model=settings.claude_model)
+            usage = await read_usage_or_alert(settings, on_usage_error)
+            if usage is None:
+                continue
             if not weekly_quota_allows_launch(usage, now=dt.datetime.now(dt.UTC)):
                 LOGGER.info("Jira task agents held: Claude quota gate is closed")
                 continue
@@ -190,7 +242,7 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
             LOGGER.exception("Jira task automation hourly run failed")
 
 
-async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None) -> None:
+async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None, on_usage_error: Any = None) -> None:
     """Ten-minute Jira poll that resumes the durable reviewer after task activity."""
     first_run = True
     while True:
@@ -206,7 +258,9 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
         reader = JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
         try:
             agent.store.cleanup_jira_task_agent_links()
-            usage = await read_usage(settings.claude_cli, model=settings.claude_model)
+            usage = await read_usage_or_alert(settings, on_usage_error)
+            if usage is None:
+                continue
             if not weekly_quota_allows_launch(usage, now=dt.datetime.now(dt.UTC)):
                 continue
             for link in agent.store.active_jira_task_agent_links():

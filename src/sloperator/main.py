@@ -93,7 +93,12 @@ from sloperator.experiment_finalizer import (
 )
 from sloperator.health import create_health_app
 from sloperator.jira_task_automation import (
+    ClaudeUsageAlert,
+)
+from sloperator.jira_task_automation import (
     poll_active_tasks as poll_jira_task_automation,
+)
+from sloperator.jira_task_automation import (
     run_hourly as run_jira_task_automation,
 )
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
@@ -468,6 +473,7 @@ async def serve(settings: Settings) -> None:
                 name="daily-experiment-analytics-planner",
             )
         if settings.jira_task_automation_enabled:
+            claude_usage_alert = ClaudeUsageAlert(app.client, settings)
             jira_task_automation_task = asyncio.create_task(
                 run_jira_task_automation(
                     settings,
@@ -475,6 +481,7 @@ async def serve(settings: Settings) -> None:
                     lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
                     handle_jira_abuse,
                     pause_jira_automation,
+                    claude_usage_alert,
                 ),
                 name="hourly-jira-task-automation",
             )
@@ -484,6 +491,7 @@ async def serve(settings: Settings) -> None:
                     lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
                     handle_jira_abuse,
                     pause_jira_automation,
+                    claude_usage_alert,
                 ),
                 name="ten-minute-jira-task-poll",
             )

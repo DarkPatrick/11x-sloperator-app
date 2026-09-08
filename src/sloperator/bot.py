@@ -140,6 +140,7 @@ def create_app(
     experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
     vpn_threads: set[tuple[str, str]] = set()
 
+    @app.event("app_mention")
     @app.event("message")
     async def handle_message(
         event: Mapping[str, Any],
@@ -166,7 +167,7 @@ def create_app(
         if enabled("experiment-config") and is_experiment_config_trigger(dict(event)):
             await experiment_config_responder.handle(dict(event), client)
             return
-        if event.get("subtype") is not None or event.get("bot_id") is not None:
+        if event.get("subtype") not in {None, "file_share"} or event.get("bot_id") is not None:
             return
 
         user = event.get("user")
@@ -223,6 +224,7 @@ def create_app(
                 ),
                 optional_reply=True,
                 automated=channel == settings.mobile_health_alert_channel,
+                files=event.get("files", []),
             )
             if result is SubmitResult.EXPIRED:
                 LOGGER.debug(
@@ -306,7 +308,7 @@ def create_app(
                 thread_ts=current_thread_ts,
                 text=response,
             )
-        elif command in SUPPORTED_COMMANDS:
+        elif command in SUPPORTED_COMMANDS and not event.get("files"):
             response = response_for(command)
             await client.chat_postMessage(
                 channel=channel,
@@ -320,6 +322,7 @@ def create_app(
                 message_ts=message_ts,
                 thread_ts=thread_key(message_ts, reply_thread_ts(event)),
                 text=text,
+                files=event.get("files", []),
             )
             if result is SubmitResult.STEERED:
                 await client.chat_postMessage(

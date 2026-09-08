@@ -176,6 +176,18 @@ guidance, because its print-mode protocol does not guarantee same-turn steering.
 Sloperator acknowledges accepted guidance in the thread. Prefix a message with
 `next:` when it should wait and run as a distinct follow-up turn.
 
+Authorized messages can include images and files, including file-only messages. Sloperator
+downloads originals (up to 50 MiB per file) into the agent workspace under
+`output/slack_inputs/` and passes local paths to Claude or Codex. An unavailable attachment
+is explicitly identified in the worker prompt. Slack's `message` and `app_mention` deliveries
+share the same request deduplication; file IDs are persisted before downloading so an
+interrupted download can recover after restart.
+
+Follow-up answers can be text-only. Agents should attach an analysis ZIP only when the current
+request needs new or materially updated evidence. Unchanged archives from earlier turns are
+suppressed, and delivered archive content is tracked per thread in SQLite. Repackaging the same
+files with different ZIP timestamps, compression, or archive names does not upload them again.
+
 ## Isolated corporate VPN
 
 When LDAP credentials and a VPN profile are configured, Sloperator starts a

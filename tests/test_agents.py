@@ -816,6 +816,9 @@ async def test_agent_reply_uploads_artifact_to_same_thread(tmp_path) -> None:
         agent_workspace=tmp_path,
     )
 
+    orchestrator.store = EventStore(tmp_path / "events.sqlite3")
+    orchestrator.store.initialize()
+
     await orchestrator._reply(
         client,
         channel_id="C123",

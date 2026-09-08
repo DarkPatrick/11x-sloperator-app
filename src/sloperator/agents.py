@@ -10,7 +10,7 @@ import re
 import signal
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -21,13 +21,27 @@ from typing import Any
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.artifacts import artifact_fingerprint
 from sloperator.automated_session_policy import slack_worker_prompt
 from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
 from sloperator.config import Settings
+from sloperator.slack_files import attachment_prompt
 from sloperator.store import AgentSession, EventStore
 from sloperator.vpn import VpnManager, VpnState
 
 LOGGER = logging.getLogger(__name__)
+TURN_ARTIFACT_POLICY = """\
+CURRENT TURN ATTACHMENT POLICY (overrides earlier routine packaging instructions):
+- A follow-up or clarification does not inherit an earlier turn's requirement to attach a ZIP.
+- Answer text-only when it is sufficient. Do not attach an archive just because you ran SQL,
+  wrote an internal script, or attached a report earlier in this conversation.
+- Use SLOPERATOR_ARTIFACT only for new or materially updated work products that help answer
+  this request, or when this request explicitly requires a report. Include only relevant files.
+- Never repeat an earlier artifact marker, re-send unchanged evidence, or merely refresh
+  timestamps, formatting, filenames or ZIP packaging to make an old report look new.
+- If findings changed and a report is needed, update its conclusions and evidence before
+  packaging it; do not attach the previous report to an answer that contradicts it.
+"""
 AGENT_RETRY_DELAYS = (60, 300, 900, 1_800, 3_600)
 DIRECTIVE_RE = re.compile(
     r"^\[(?P<provider>claude|codex)(?::(?P<model>[A-Za-z0-9._:-]{1,100}))?\]\s*",
@@ -97,10 +111,11 @@ Slack does not render Markdown tables, so use short lists in the message. Tables
 charts are encouraged in attached reports. For a large investigation, use the repository's
 dataviz helper to build a readable self-contained HTML report when useful.
 
-If you create SQL, scripts, charts, data extracts, or an HTML report, package the useful
-artifacts into one ZIP archive inside the repository. Do not merely list server paths.
-End the response with exactly `SLOPERATOR_ARTIFACT: relative/path/to/archive.zip` on its
-own line; the bot removes this line and attaches the archive to the Slack thread.
+Attach a ZIP only when new or materially updated evidence is useful for this request, or when
+the current request explicitly requires a report. Routine clarifications can be text-only.
+Do not reattach an earlier archive or repackage unchanged evidence. Internal SQL/scripts alone
+do not require an attachment. When attaching, package only relevant current work products and
+end with `SLOPERATOR_ARTIFACT: relative/path/to/archive.zip` on its own line.
 Do not include secrets, credentials, raw personal data, or unrelated files in the archive.
 
 If you need clarification, ask one concise question in the final response instead of
@@ -929,6 +944,7 @@ class AgentOrchestrator:
         automated: bool = False,
         reuse_key: str | None = None,
         reuse_mention_line: str | None = None,
+        files: Sequence[Mapping[str, Any]] = (),
     ) -> SubmitResult:
         """Deduplicate and steer an active turn or enqueue a new one."""
         claim = await asyncio.to_thread(
@@ -975,6 +991,32 @@ class AgentOrchestrator:
                         message_ts,
                     )
                     return SubmitResult.QUEUED
+        options: dict[str, object] = {
+            "show_status": show_status,
+            "timeout_seconds": timeout_seconds,
+            "disable_link_previews": disable_link_previews,
+            "optional_reply": optional_reply,
+            "require_artifact": require_artifact,
+            "automated": automated,
+            "reuse_key": reuse_key,
+            "reuse_mention_line": reuse_mention_line,
+        }
+        if files:
+            # Persist file IDs before network I/O so an interrupted download is recoverable.
+            await asyncio.to_thread(
+                self.store.save_durable_agent_run,
+                channel_id,
+                message_ts,
+                thread_ts,
+                text,
+                {**options, "files": list(files)},
+            )
+            text += await attachment_prompt(
+                client, self.settings.agent_workspace, channel_id, message_ts, files
+            )
+            await asyncio.to_thread(
+                self.store.save_durable_agent_run, channel_id, message_ts, thread_ts, text, options
+            )
         key = (channel_id, thread_ts)
         next_match = NEXT_RE.match(text)
         if (
@@ -988,6 +1030,13 @@ class AgentOrchestrator:
                 message_ts,
                 SubmitResult.STEERED.value,
             )
+            if files:
+                await asyncio.to_thread(
+                    self.store.set_durable_agent_run_status,
+                    channel_id,
+                    message_ts,
+                    SubmitResult.STEERED.value,
+                )
             return SubmitResult.STEERED
         if next_match is not None:
             text = text[next_match.end() :].strip()
@@ -997,16 +1046,7 @@ class AgentOrchestrator:
             message_ts,
             thread_ts,
             text,
-            {
-                "show_status": show_status,
-                "timeout_seconds": timeout_seconds,
-                "disable_link_previews": disable_link_previews,
-                "optional_reply": optional_reply,
-                "require_artifact": require_artifact,
-                "automated": automated,
-                "reuse_key": reuse_key,
-                "reuse_mention_line": reuse_mention_line,
-            },
+            options,
         )
         task = asyncio.create_task(
             self._process(
@@ -1054,6 +1094,7 @@ class AgentOrchestrator:
                     optional_reply=bool(options.get("optional_reply", False)),
                     require_artifact=bool(options.get("require_artifact", False)),
                     automated=bool(options.get("automated", False)),
+                    files=options.get("files", []),
                 ),
                 name=f"recovered-agent-turn-{channel_id}-{message_ts}",
             )
@@ -1660,12 +1701,21 @@ class AgentOrchestrator:
                     markdown_text=chunk,
                 )
         if artifact is not None:
+            fingerprint = await asyncio.to_thread(artifact_fingerprint, artifact)
+            if await asyncio.to_thread(
+                self.store.artifact_was_delivered, channel_id, thread_ts, fingerprint
+            ):
+                LOGGER.info("Skipping previously delivered artifact in thread %s", thread_ts)
+                return
             await client.files_upload_v2(
                 channel=channel_id,
                 thread_ts=thread_ts,
                 file=artifact,
                 filename=artifact.name,
                 title="Артефакты анализа",
+            )
+            await asyncio.to_thread(
+                self.store.record_delivered_artifact, channel_id, thread_ts, fingerprint
             )
 
     async def _status_heartbeat(
@@ -1693,6 +1743,7 @@ class AgentOrchestrator:
         optional_reply: bool,
         require_artifact: bool,
         automated: bool,
+        files: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -1705,6 +1756,11 @@ class AgentOrchestrator:
         )
         try:
             async with lock:
+                turn_started_ns = time.time_ns()
+                if files:
+                    text += await attachment_prompt(
+                        client, self.settings.agent_workspace, channel_id, message_ts, files
+                    )
                 session = await asyncio.to_thread(
                     self.store.get_agent_session,
                     channel_id,
@@ -1753,7 +1809,8 @@ class AgentOrchestrator:
                 parsed = replace(
                     parsed,
                     prompt=slack_identity_instruction(
-                        slack_worker_prompt(parsed.prompt), identity_directory
+                        slack_worker_prompt(parsed.prompt + "\n\n" + TURN_ARTIFACT_POLICY),
+                        identity_directory,
                     ),
                 )
                 if session is None:
@@ -2003,6 +2060,15 @@ class AgentOrchestrator:
                     response, artifact = extract_artifact(
                         result.text, self.settings.agent_workspace
                     )
+                    if (
+                        artifact is not None
+                        and session.turn_count > 0
+                        and artifact.stat().st_mtime_ns < turn_started_ns
+                    ):
+                        LOGGER.info(
+                            "Skipping unchanged prior-turn artifact in thread %s", thread_ts
+                        )
+                        artifact = None
                     if self.communication is not None:
                         try:
                             response = await self.communication.render(response, thread_context)

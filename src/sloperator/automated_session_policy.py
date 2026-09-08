@@ -76,4 +76,4 @@ SLACK WORKER HANDOFF (STRICT):
 
 def slack_worker_prompt(body: str) -> str:
     """Build the common skeleton for any new Slack-facing worker prompt."""
-    return f"{SLACK_WORKER_HANDOFF}\n\n{body.strip()}"
+    return f"{SLACK_WORKER_HANDOFF}\n\n{AUTOMATED_RESPONSE_STYLE}\n\n{body.strip()}"

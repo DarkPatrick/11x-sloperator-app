@@ -194,6 +194,14 @@ CREATE TABLE IF NOT EXISTS anomaly_analysis_cooldowns (
     last_launched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (metric, platform, metric_type)
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS delivered_agent_artifacts (
+    channel_id TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (channel_id, thread_ts, fingerprint)
+) STRICT;
 """
 OTP_MESSAGE_RE = re.compile(r"^\s*(?:vpn\s+otp\s+)?\d{6,8}\s*$", re.IGNORECASE)
 REDACTED_OTP = "[redacted one-time code]"
@@ -238,6 +246,22 @@ class EventStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()
+
+    def artifact_was_delivered(self, channel_id: str, thread_ts: str, fingerprint: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM delivered_agent_artifacts "
+                "WHERE channel_id = ? AND thread_ts = ? AND fingerprint = ?",
+                (channel_id, thread_ts, fingerprint),
+            ).fetchone() is not None
+
+    def record_delivered_artifact(self, channel_id: str, thread_ts: str, fingerprint: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO delivered_agent_artifacts "
+                "(channel_id, thread_ts, fingerprint) VALUES (?, ?, ?)",
+                (channel_id, thread_ts, fingerprint),
+            )
 
     def initialize(self) -> None:
         """Create a private database and apply idempotent schema migrations."""

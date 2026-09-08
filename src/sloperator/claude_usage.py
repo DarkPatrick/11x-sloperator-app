@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-
-USAGE_RE = re.compile(
-    r"Current session:\s*(?P<session>\d+)% used.*?resets (?P<session_reset>[^\n]+)\n"
-    r"Current week \(all models\):\s*(?P<week>\d+)% used.*?resets (?P<week_reset>[^\n]+)",
-    re.IGNORECASE | re.DOTALL,
+SESSION_USAGE_RE = re.compile(
+    r"^Current session:\s*(?P<session>\d+)%\s+used\b[^\n]*?\bresets\s+(?P<reset>[^\n]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+WEEK_USAGE_RE = re.compile(
+    r"^Current week \(all models\):\s*(?P<week>\d+)%\s+used\b[^\n]*?\bresets\s+(?P<reset>[^\n]+)",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -38,14 +39,20 @@ class ClaudeUsageError(RuntimeError):
 
 
 def parse_usage(text: str) -> ClaudeUsage:
-    match = USAGE_RE.search(text)
-    if match is None:
+    session_match = SESSION_USAGE_RE.search(text)
+    week_match = WEEK_USAGE_RE.search(text)
+    if session_match is None or week_match is None:
         raise ClaudeUsageError("Claude /usage output has no session and weekly limits")
-    session = int(match.group("session"))
-    week = int(match.group("week"))
+    session = int(session_match.group("session"))
+    week = int(week_match.group("week"))
     if not 0 <= session <= 100 or not 0 <= week <= 100:
         raise ClaudeUsageError("Claude /usage returned an invalid percentage")
-    return ClaudeUsage(session, week, match.group("session_reset").strip(), match.group("week_reset").strip())
+    return ClaudeUsage(
+        session,
+        week,
+        session_match.group("reset").strip(),
+        week_match.group("reset").strip(),
+    )
 
 
 async def read_usage(cli: Path, *, model: str = "opus", cwd: Path = Path("/tmp")) -> ClaudeUsage:

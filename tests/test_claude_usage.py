@@ -13,6 +13,15 @@ def test_parse_usage_reports_remaining_percentages() -> None:
     assert usage.session_reset_text == "Sep 7, 5:40pm (UTC)"
 
 
+def test_parse_usage_allows_blank_lines_between_limits_and_100_percent() -> None:
+    usage = parse_usage(
+        "Current session: 100% used · resets Sep 8, 1:19pm (UTC)\n\n"
+        "Current week (all models): 100% used · resets Sep 9, 12:59pm (UTC)\n"
+    )
+    assert usage.session_remaining_percent == 0
+    assert usage.week_remaining_percent == 0
+
+
 def test_parse_usage_fails_closed_on_missing_limits() -> None:
     with pytest.raises(ClaudeUsageError):
         parse_usage("Current session: unavailable")

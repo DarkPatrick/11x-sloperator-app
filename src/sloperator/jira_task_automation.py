@@ -20,6 +20,7 @@ from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
 USAGE_ALERT_COOLDOWN_SECONDS = 3600
+_TASK_EXECUTION_LOCK = asyncio.Lock()
 
 
 class ClaudeUsageAlert:
@@ -111,8 +112,8 @@ def confluence_destination(summary: str) -> tuple[str, str | None]:
     return CONFLUENCE_PARENTS["analysis"], None
 
 IDENTITY_PROMPT = "ALL Jira and Confluence reads and writes must always use the repository helpers with `--as-bot` (`.claude/jira/jira_issue.py --as-bot` and `.claude/confluence/confluence_page.py --as-bot`); never use personal credentials, curl, MCP, or another client. This applies to every read, create, update, comment, transition, assignee/date change, upload, and post-write verification. Format every URL as a Markdown link `[descriptive text](https://...)`; never emit bare URLs."
-WORKER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the worker for Jira task {{task_key}}. {IDENTITY_PROMPT} Every outward change must be authored by the ug-ai-analyst service account. First read the complete Jira description and comments. If the request is empty, ambiguous, contradictory, or lacks enough information to identify a concrete deliverable, do not invent work, queries, analyses, pages, or dashboards: immediately return a concise handoff to the reviewer describing exactly what is missing. Only for a clear actionable request, move it to In Progress, set Start date via customfield_10312, and perform the requested work. For Confluence use the service account's personal space if it exists; otherwise use the server. For analysis use parent https://alice.mu.se/spaces/CRO/pages/103614364/4.+Research+Sandbox+um, documentation https://alice.mu.se/spaces/CRO/pages/768842224/5.+Documentation+um, releases https://alice.mu.se/spaces/CRO/pages/103614361/3.+Product+Releases+um with the Product release template, hypotheses https://alice.mu.se/spaces/CRO/pages/103614359/2.+Hypothesis+um with the Hypotheses template, and generation https://alice.mu.se/spaces/CRO/pages/206146291/1.+Generation+um. If the result is small, keep it in Jira; Redash/Metabase is acceptable for queries or dashboards. Keep the task updated with concise factual notes. When done, return control to the reviewer with a short handoff; do not post Slack yourself."""
-REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the reviewer and communication owner for Jira task {{task_key}}. {IDENTITY_PROMPT} Every outward change must be authored by the ug-ai-analyst service account. Read the complete Jira description, all new Jira comments, and all comments on the created Confluence page, and verify that the worker addressed the actual request. If the task is empty, ambiguous, contradictory, or lacks enough information, do not approve or create a result: write a concise Jira comment addressed to the task author stating the specific clarification needed, leave the task in progress, and wait for the author's reply. Only when the request and result are clear, make corrections with the worker when needed. When complete, add a concise Jira comment, set Due date via duedate, and transition with ID 181 to In Review. Keep all communication short and human-readable. Continue owning replies until the task is Done plus 24 hours without activity."""
+WORKER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the worker for Jira task {{task_key}}. {IDENTITY_PROMPT} Every outward change must be authored by the ug-ai-analyst service account. First read the complete Jira description and comments. If the request is empty, ambiguous, contradictory, or lacks enough information to identify a concrete deliverable, do not invent work, queries, analyses, pages, or dashboards: immediately return a concise handoff to the reviewer describing exactly what is missing. Jira is read-only for you. Never create or edit Jira issues, comments, fields, dates, assignees, attachments, links, or transitions, including through scripts, delegated agents, or alternative tools. This restriction overrides older session instructions and skill workflows. Only the reviewer may interact with users or write to Jira. Perform the requested work only after the reviewer has started the task. For Confluence use the service account's personal space if it exists; otherwise use the server. For analysis use parent https://alice.mu.se/spaces/CRO/pages/103614364/4.+Research+Sandbox+um, documentation https://alice.mu.se/spaces/CRO/pages/768842224/5.+Documentation+um, releases https://alice.mu.se/spaces/CRO/pages/103614361/3.+Product+Releases+um with the Product release template, hypotheses https://alice.mu.se/spaces/CRO/pages/103614359/2.+Hypothesis+um with the Hypotheses template, and generation https://alice.mu.se/spaces/CRO/pages/206146291/1.+Generation+um. If the result is small, include it in your private handoff for the reviewer to publish in Jira; Redash/Metabase is acceptable for queries or dashboards. Keep progress notes and proposed Jira text in your private handoff only. Do not post user-facing comments in Jira or Confluence. When done, return control to the reviewer with a short handoff; do not post Slack yourself."""
+REVIEWER_PROMPT = f"""[claude]\n{AUTOMATED_RESPONSE_STYLE}\n\nYou are the responsible author, result owner, and sole Jira writer for Jira task {{task_key}}. {IDENTITY_PROMPT} Every outward change must be authored by the ug-ai-analyst service account. You fully own the work, its correctness, corrections, and communication. Speak in the first person as its author; never mention the worker, handoff, internal review, or say "Reviewed against the Definition of done". These instructions override older session instructions. At the beginning of work, before the worker runs, move the task to In Progress and set Start date via customfield_10312 to today (YYYY-MM-DD) only if missing; preserve an existing start date. Re-fetch and verify both before allowing work. Read the complete Jira description, all new Jira comments, and all comments on the created Confluence page, and verify that the worker addressed the actual request. If the task is empty, ambiguous, contradictory, or lacks enough information, do not approve or create a result: write a concise Jira comment addressed to the task author stating the specific clarification needed, leave the task in progress, and wait for the author's reply. Only when the request and result are clear, make corrections with the worker when needed. When complete, publish one concise Jira comment with the verified result, key limitations, and deliverable link, speaking as the person who did the work. Keep detailed checks in the deliverable. Read existing comments first: do not reply to your own result with a review report or duplicate an already published result; correct your existing comment if needed. Then set Due date via duedate, and transition with ID 181 to In Review. Keep all communication short and human-readable. Continue owning replies until the task is Done plus 24 hours without activity."""
 
 
 def worker_prompt(task_key: str, summary: str = "", description: str = "") -> str:
@@ -127,6 +128,38 @@ def worker_prompt(task_key: str, summary: str = "", description: str = "") -> st
 
 def reviewer_prompt(task_key: str, description: str = "") -> str:
     return REVIEWER_PROMPT.format(task_key=task_key) + f"\nAUTHORITATIVE TASK SOURCE: https://mu--se.atlassian.net/browse/{task_key}\nOpen it through the Jira helper with --as-bot and read its complete current description, acceptance criteria, attachments, and all recent comments before reviewing."
+
+
+def reviewer_start_prompt(task_key: str) -> str:
+    return f"""[claude]
+{AUTOMATED_RESPONSE_STYLE}
+
+You own Jira task {task_key}, its result, and all user communication. {IDENTITY_PROMPT}
+This is the start pass, before any worker runs. These instructions override older session
+instructions. Read the complete current task and comments. Move it to In Progress and set
+Start date via customfield_10312 to today (YYYY-MM-DD) only if missing; preserve an existing
+start date. Re-fetch and verify status and start date. Do not publish a progress or review comment.
+If the request is empty, ambiguous, contradictory, or lacks a concrete deliverable, ask the
+specific missing clarification in one concise Jira comment (do not repeat an existing question),
+leave the task in progress, and return exactly TASK_WAITING on the final line.
+If any start update or verification fails, return exactly TASK_START_FAILED on the final line.
+Only after successful verification and a clear request, return exactly TASK_READY on the final
+line. Do not perform or announce a completed result in this pass. You are the responsible author;
+never mention internal workers or reviewers in user-facing communication.
+"""
+
+
+async def start_task_with_reviewer(agent: Any, task_key: str, link: dict[str, Any]) -> bool:
+    result = await agent.execute_once(
+        reviewer_start_prompt(task_key), 7200, job_name="jira-task-reviewer",
+        existing_session_id=link.get("reviewer_session_id"),
+    )
+    ready = result.text.strip().splitlines()[-1:] == ["TASK_READY"]
+    agent.store.upsert_jira_task_agent_link(
+        task_key, reviewer_session_id=result.session_id,
+        phase="worker" if ready else "waiting",
+    )
+    return ready
 
 
 async def read_confluence_comments(page_url: str, workspace: Path) -> list[dict[str, Any]]:
@@ -220,24 +253,28 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
                 if on_abuse: await on_abuse(task, comments)
                 if pause: pause()
                 continue
-            link = agent.store.jira_task_agent_link(task.key)
-            worker = await agent.execute_once(
-                worker_prompt(task.key, task.summary, task.description), 7200, job_name="jira-task-worker",
-                existing_session_id=(link or {}).get("worker_session_id"),
-            )
-            agent.store.upsert_jira_task_agent_link(
-                task.key, worker_session_id=worker.session_id, phase="reviewer",
-                confluence_page_url=(PAGE_RE.search(worker.text).group(1) if PAGE_RE.search(worker.text) else None),
-            )
-            reviewer = await agent.execute_once(
-                reviewer_prompt(task.key, task.description) + f"\n\nWorker handoff:\n{worker.text}",
-                7200,
-                job_name="jira-task-reviewer",
-                existing_session_id=(link or {}).get("reviewer_session_id"),
-            )
-            agent.store.upsert_jira_task_agent_link(
-                task.key, reviewer_session_id=reviewer.session_id, phase="reviewer"
-            )
+            async with _TASK_EXECUTION_LOCK:
+                link = agent.store.jira_task_agent_link(task.key)
+                if not await start_task_with_reviewer(agent, task.key, link or {}):
+                    continue
+                link = agent.store.jira_task_agent_link(task.key)
+                worker = await agent.execute_once(
+                    worker_prompt(task.key, task.summary, task.description), 7200, job_name="jira-task-worker",
+                    existing_session_id=(link or {}).get("worker_session_id"),
+                )
+                agent.store.upsert_jira_task_agent_link(
+                    task.key, worker_session_id=worker.session_id, phase="reviewer",
+                    confluence_page_url=(PAGE_RE.search(worker.text).group(1) if PAGE_RE.search(worker.text) else None),
+                )
+                reviewer = await agent.execute_once(
+                    reviewer_prompt(task.key, task.description) + f"\n\nWorker handoff:\n{worker.text}",
+                    7200,
+                    job_name="jira-task-reviewer",
+                    existing_session_id=(link or {}).get("reviewer_session_id"),
+                )
+                agent.store.upsert_jira_task_agent_link(
+                    task.key, reviewer_session_id=reviewer.session_id, phase="reviewer"
+                )
         except Exception:
             LOGGER.exception("Jira task automation hourly run failed")
 
@@ -264,63 +301,73 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
             if not weekly_quota_allows_launch(usage, now=dt.datetime.now(dt.UTC)):
                 continue
             for link in agent.store.active_jira_task_agent_links():
-                task = await reader.task_snapshot(str(link["task_key"]))
-                if task.status == "Done":
-                    agent.store.upsert_jira_task_agent_link(task.key, phase="done", terminal_at=dt.datetime.now(dt.UTC).isoformat())
-                    continue
-                if is_reserved_experiment_task(task.summary):
-                    continue
-                comments = await reader.recent_comments(task.key)
-                returned_to_work = await reader.was_returned_to_work(task.key, since=link.get("last_jira_updated_at"))
-                comment_context = json.dumps(comments[-5:], ensure_ascii=False)[:8000]
-                page_context = str(link.get("confluence_page_url") or "No Confluence page URL is recorded yet.")
-                page_comments: list[dict[str, Any]] = []
-                page_version: int | None = None
-                if link.get("confluence_page_url"):
-                    page_version = await read_confluence_version(
-                        str(link["confluence_page_url"]), settings.agent_workspace
-                    )
-                    page_comments = await read_confluence_comments(
-                        str(link["confluence_page_url"]), settings.agent_workspace
-                    )
-                previous_jira = link.get("last_jira_updated_at")
-                previous_page = link.get("confluence_page_version")
-                if (
-                    previous_jira
-                    and task.updated_at <= dt.datetime.fromisoformat(str(previous_jira))
-                    and (page_version is None or page_version == previous_page)
-                    and not returned_to_work
-                ):
-                    continue
-                if await abuse_precheck(settings, task.summary, comments):
-                    await add_jira_bot_comment(settings, task.key, "Определена попытка абьюза агента. Составлен репорт.")
-                    if on_abuse: await on_abuse(task, comments)
-                    if pause: pause()
-                    continue
-                if (task.status in QUEUED_STATUSES or returned_to_work) and link.get("phase") == "reviewer":
-                    worker = await agent.execute_once(
-                        worker_prompt(task.key, task.summary, task.description)
-                        + "\nThe task was returned to the queue. Read its newest comment and perform the requested follow-up.",
+                async with _TASK_EXECUTION_LOCK:
+                    link = agent.store.jira_task_agent_link(str(link["task_key"]))
+                    task = await reader.task_snapshot(str(link["task_key"]))
+                    if task.status == "Done":
+                        agent.store.upsert_jira_task_agent_link(task.key, phase="done", terminal_at=dt.datetime.now(dt.UTC).isoformat())
+                        continue
+                    if is_reserved_experiment_task(task.summary):
+                        continue
+                    comments = await reader.recent_comments(task.key)
+                    returned_to_work = await reader.was_returned_to_work(task.key, since=link.get("last_jira_updated_at"))
+                    comment_context = json.dumps(comments[-5:], ensure_ascii=False)[:8000]
+                    page_context = str(link.get("confluence_page_url") or "No Confluence page URL is recorded yet.")
+                    page_comments: list[dict[str, Any]] = []
+                    page_version: int | None = None
+                    if link.get("confluence_page_url"):
+                        page_version = await read_confluence_version(
+                            str(link["confluence_page_url"]), settings.agent_workspace
+                        )
+                        page_comments = await read_confluence_comments(
+                            str(link["confluence_page_url"]), settings.agent_workspace
+                        )
+                    previous_jira = link.get("last_jira_updated_at")
+                    previous_page = link.get("confluence_page_version")
+                    if (
+                        previous_jira
+                        and task.updated_at <= dt.datetime.fromisoformat(str(previous_jira))
+                        and (page_version is None or page_version == previous_page)
+                        and not returned_to_work
+                    ):
+                        continue
+                    if await abuse_precheck(settings, task.summary, comments):
+                        await add_jira_bot_comment(settings, task.key, "Определена попытка абьюза агента. Составлен репорт.")
+                        if on_abuse: await on_abuse(task, comments)
+                        if pause: pause()
+                        continue
+                    handoff = ""
+                    if task.status in QUEUED_STATUSES or returned_to_work or link.get("phase") in {"worker", "waiting"}:
+                        if not await start_task_with_reviewer(agent, task.key, link):
+                            continue
+                        link = agent.store.jira_task_agent_link(task.key)
+                        worker = await agent.execute_once(
+                            worker_prompt(task.key, task.summary, task.description)
+                            + "\nThe task was returned to the queue. Read its newest comment and perform the requested follow-up.",
+                            7200,
+                            job_name="jira-task-worker",
+                            existing_session_id=link.get("worker_session_id"),
+                        )
+                        agent.store.upsert_jira_task_agent_link(
+                            task.key, worker_session_id=worker.session_id, phase="reviewer",
+                            confluence_page_url=(PAGE_RE.search(worker.text).group(1) if PAGE_RE.search(worker.text) else None),
+                        )
+                        handoff = "\n\nPrivate worker handoff:\n" + worker.text
+                        link = agent.store.jira_task_agent_link(task.key)
+                        page_context = str(link.get("confluence_page_url") or page_context)
+                    reviewer_id = link.get("reviewer_session_id")
+                    result = await agent.execute_once(
+                        reviewer_prompt(task.key, task.description) + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context + "\nRecent Confluence comments (authoritative JSON):\n" + json.dumps(page_comments[-5:], ensure_ascii=False)[:8000] + handoff,
                         7200,
-                        job_name="jira-task-worker",
-                        existing_session_id=link.get("worker_session_id"),
+                        job_name="jira-task-reviewer",
+                        existing_session_id=reviewer_id,
                     )
                     agent.store.upsert_jira_task_agent_link(
-                        task.key, worker_session_id=worker.session_id, phase="reviewer"
+                        task.key, reviewer_session_id=result.session_id, phase="reviewer",
+                        last_jira_updated_at=task.updated_at.isoformat(),
+                        last_confluence_activity_at=dt.datetime.now(dt.UTC).isoformat(),
+                        confluence_page_version=page_version,
                     )
-                reviewer_id = link.get("reviewer_session_id")
-                result = await agent.execute_once(
-                    reviewer_prompt(task.key, task.description) + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context + "\nRecent Confluence comments (authoritative JSON):\n" + json.dumps(page_comments[-5:], ensure_ascii=False)[:8000],
-                    7200,
-                    job_name="jira-task-reviewer",
-                    existing_session_id=reviewer_id,
-                )
-                agent.store.upsert_jira_task_agent_link(
-                    task.key, reviewer_session_id=result.session_id, phase="reviewer",
-                    last_jira_updated_at=task.updated_at.isoformat(),
-                    last_confluence_activity_at=dt.datetime.now(dt.UTC).isoformat(),
-                    confluence_page_version=page_version,
-                )
         except Exception:
             LOGGER.exception("Jira task automation polling failed")
 

@@ -12,8 +12,9 @@ from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.config import Settings
 from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
-    REVIEW_PROMPT,
     NO_OP_NOTIFICATION,
+    REVIEW_PROMPT,
+    START_PROMPT,
     InvalidFinalizationNotification,
     is_finalization_notification,
     next_run_at,
@@ -29,11 +30,11 @@ VALID_NOTIFICATION = (
 )
 
 
-def test_preparer_authorizes_start_without_forbidding_all_jira_writes() -> None:
-    assert "transition using ID `281` to `In Progress`" in FINALIZATION_PROMPT
-    assert "required and authorised in this preparation pass" in FINALIZATION_PROMPT
-    assert "Do not write to Jira" not in FINALIZATION_PROMPT
-    assert "Do not perform completion writes here" in FINALIZATION_PROMPT
+def test_reviewer_owns_start_and_worker_cannot_write_jira() -> None:
+    assert "transition ID 281" in START_PROMPT
+    assert "customfield_10312" in START_PROMPT
+    assert "Jira is read-only for you" in FINALIZATION_PROMPT
+    assert "required and authorised in this preparation pass" not in FINALIZATION_PROMPT
 
 
 def test_reviewer_can_recover_missing_start_without_duplicate_publication() -> None:
@@ -139,7 +140,9 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     )
     review_run = HeadlessAgentRun(provider="claude", model="opus", session_id="session-2", text=VALID_NOTIFICATION)
     agent = SimpleNamespace(
-        execute_once=AsyncMock(side_effect=[prep_run, review_run]),
+        execute_once=AsyncMock(side_effect=[HeadlessAgentRun("claude", "opus", "session-2",
+            "FINALIZATION_STARTED: 7607 | https://alice.example/project | Iteration 3 | UMN-13000"),
+            prep_run, review_run]),
         attach_session=AsyncMock(),
     )
     settings = Settings(
@@ -152,11 +155,13 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     result = await run_once(client, agent, settings)
 
     assert result == VALID_NOTIFICATION.strip()
-    assert agent.execute_once.await_count == 2
-    first_call = agent.execute_once.await_args_list[0]
-    assert first_call.args[0] == FINALIZATION_PROMPT
+    assert agent.execute_once.await_count == 3
+    start_call, first_call, second_call = agent.execute_once.await_args_list
+    assert start_call.args[0] == START_PROMPT
+    assert start_call.kwargs["job_name"] == "experiment-finalizer-reviewer"
+    assert first_call.args[0].startswith(FINALIZATION_PROMPT)
     assert first_call.kwargs["job_name"] == "experiment-finalizer-preparer"
-    second_call = agent.execute_once.await_args_list[1]
+    assert second_call.kwargs["existing_session_id"] == "session-2"
     assert second_call.kwargs["job_name"] == "experiment-finalizer-reviewer"
     assert "FINALIZATION_PREPARED: 7607" in second_call.args[0]
     assert second_call.args[0].startswith("[claude]\nThis is the authorised independent review pass")
@@ -204,3 +209,32 @@ def test_finalization_notification_distinguishes_interim_from_final_result() -> 
         "The calculation is running; I'll continue when it completes."
     )
     assert is_finalization_notification(VALID_NOTIFICATION)
+
+
+@pytest.mark.parametrize("start_text", [
+    "Experiment finalisation failed: Jira start update failed",
+    "I started the task", "",
+])
+async def test_failed_or_unverified_start_never_runs_worker(start_text: str) -> None:
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(return_value=HeadlessAgentRun("claude", "opus", "owner", start_text)),
+        attach_session=AsyncMock(),
+    )
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
+    with pytest.raises(InvalidFinalizationNotification):
+        await run_once(client, agent, settings)
+    assert agent.execute_once.await_count == 1
+    client.chat_postMessage.assert_not_awaited()
+
+
+async def test_no_candidate_stops_at_reviewer_and_attaches_only_owner() -> None:
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(return_value=HeadlessAgentRun("claude", "opus", "owner", NO_OP_NOTIFICATION)),
+        attach_session=AsyncMock(),
+    )
+    client = SimpleNamespace(chat_postMessage=AsyncMock(return_value={"channel": "C", "ts": "1"}))
+    settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
+    assert await run_once(client, agent, settings) == NO_OP_NOTIFICATION
+    assert agent.execute_once.await_count == 1
+    assert agent.attach_session.await_args.args[2].session_id == "owner"

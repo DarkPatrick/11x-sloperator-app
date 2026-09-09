@@ -941,3 +941,36 @@ async def test_slack_turn_recovers_from_reply_path_guard_correction(
         thread_ts="100.1",
         markdown_text="Полный исправленный ответ",
     )
+
+
+@pytest.mark.parametrize("job_name", [
+    "jira-task-worker", "experiment-design-preparer", "experiment-analytics-preparer",
+    "experiment-finalizer-preparer", "jira-task-reviewer", "experiment-design-reviewer",
+    "experiment-analytics-reviewer", "experiment-finalizer-reviewer",
+])
+@pytest.mark.parametrize("recover", [False, True])
+async def test_jira_role_policy_reaches_provider_even_for_old_requests(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    job_name: str, recover: bool,
+) -> None:
+    run_claude = AsyncMock(return_value=AgentRunResult(session_id="owner", text="Finished"))
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    orchestrator = AgentOrchestrator(settings, store)
+    old_request = "[claude] Old instruction: post a Jira progress comment before review."
+    if recover:
+        store.create_scheduled_agent_run("old-run", job_name, "claude", "opus", "owner", old_request)
+        store.finish_scheduled_agent_run("old-run", status="interrupted")
+        await orchestrator.resume_interrupted_headless(5400, job_name=job_name)
+    else:
+        await orchestrator.execute_once(old_request, 5400, job_name=job_name)
+    prompt = run_claude.await_args.args[2]
+    if job_name.endswith(("worker", "preparer")):
+        assert "Jira is read-only for you" in prompt
+        assert prompt.index("JIRA WORKER BOUNDARY") > prompt.index("Old instruction")
+        assert "private handoff" in prompt
+    else:
+        assert "sole Jira writer" in prompt
+        assert "Speak as the person who did the work" in prompt
+        assert prompt.index("JIRA RESULT OWNERSHIP") > prompt.index("Old instruction")

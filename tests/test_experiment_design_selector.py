@@ -152,6 +152,15 @@ async def test_selects_oldest_eligible_pair_deterministically() -> None:
     )
     assert jira.requested_changelogs == ["UMN-101", "UMN-103"]
 
+    # Once claimed, the task must be validated directly, not replaced by the next queued task.
+    jira.children[1]["fields"]["status"]["id"] = "3"
+    next_queued = await select_candidate(jira, now=NOW)
+    assert next_queued is not None and next_queued.task_key == "UMN-104"
+    assert await select_candidate(jira, now=NOW, claimed_task_key="UMN-102") == candidate
+    # Claiming does not bypass the pitch's review-age eligibility gate.
+    jira.changelogs["UMN-101"] = [transition("2026-07-01T12:00:00Z", "5")]
+    assert await select_candidate(jira, now=NOW, claimed_task_key="UMN-102") is None
+
 
 async def test_can_select_analytics_task_with_the_same_pairing_rules() -> None:
     jira = FakeJira(

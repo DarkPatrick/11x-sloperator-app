@@ -272,6 +272,7 @@ async def select_candidate(
     now: dt.datetime | None = None,
     board_id: int = BOARD_ID,
     task_title: str = CALCULATION_TITLE,
+    claimed_task_key: str | None = None,
 ) -> DesignCandidate | None:
     """Select the oldest eligible calculation task from one authoritative snapshot."""
     moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
@@ -300,12 +301,16 @@ async def select_candidate(
     lower_bound = _previous_calendar_month(moment.astimezone(ZoneInfo(BOARD_TIMEZONE))).astimezone(
         dt.UTC
     )
+    claimed_statuses = _statuses_for(columns, {"In Progress", "In Review", "Done"})
     normalized_task_title = _normalize(task_title)
     for pitch, calculation in _pair_children(children, normalized_task_title):
         if calculation.parent_key not in epic_keys:
             continue
+        if claimed_task_key is not None and calculation.key != claimed_task_key:
+            continue
+        task_statuses = claimed_statuses if claimed_task_key is not None else calculation_statuses
         if (
-            calculation.status_id not in calculation_statuses
+            calculation.status_id not in task_statuses
             or pitch.status_id not in reviewed_statuses
         ):
             continue

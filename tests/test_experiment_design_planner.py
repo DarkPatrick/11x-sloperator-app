@@ -62,8 +62,7 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
     assert "Realistic and Pessimistic" in PREPARATION_PROMPT
     assert "Reach & Impact" in PREPARATION_PROMPT
     assert "Experiment design" in PREPARATION_PROMPT
-    assert "transition ID `281`" in PREPARATION_PROMPT
-    assert "customfield_10312" in PREPARATION_PROMPT
+    assert "Jira is read-only for you" in PREPARATION_PROMPT
     assert "stops before launching an agent" in PREPARATION_PROMPT
     assert NO_OP_RESULT not in PREPARATION_PROMPT
 
@@ -83,7 +82,7 @@ def test_review_prompt_requires_independent_correction_and_final_actions() -> No
     assert "ug-experiment-design-power" in prompt
     assert "review/validation mode" in prompt
     assert "open and run the linked sources" in prompt
-    assert "still be the oldest eligible" in prompt
+    assert "reselected from the remaining queue" in prompt
     assert "UMN-12312" in prompt
     assert "add one short English comment" in prompt
     assert "transition ID `181`" in prompt
@@ -139,13 +138,17 @@ async def test_no_candidate_finishes_without_slack_or_second_agent() -> None:
     agent.attach_session.assert_not_awaited()
 
 
-async def test_preparation_then_independent_review_publishes_once() -> None:
+async def test_preparation_then_independent_review_publishes_once(monkeypatch) -> None:
+    validator = AsyncMock(return_value=SELECTED)
+    monkeypatch.setattr("sloperator.experiment_design_planner.select_from_jira", validator)
     notification = (
         "<@UONE> <@UTWO> "
         "[UMN-12312](https://mu--se.atlassian.net/browse/UMN-12312) — "
         "Reach & Impact and Experiment design are ready. Please check."
     )
     runs = [
+        HeadlessAgentRun("claude", "opus", "review-session",
+                           "EXPERIMENT_TASK_STARTED: UMN-12312 | UMN-12310 | UMN-12311"),
         HeadlessAgentRun(
             provider="claude",
             model="opus",
@@ -176,13 +179,16 @@ async def test_preparation_then_independent_review_publishes_once() -> None:
     selector = AsyncMock(return_value=SELECTED)
 
     assert await run_once(client, agent, settings, selector) == notification
-    assert agent.execute_once.await_count == 2
-    first, second = agent.execute_once.await_args_list
+    assert agent.execute_once.await_count == 3
+    start, first, second = agent.execute_once.await_args_list
+    assert start.kwargs["job_name"] == "experiment-design-reviewer"
+    assert second.kwargs["existing_session_id"] == "review-session"
     assert first.kwargs["job_name"] == "experiment-design-preparer"
     assert second.kwargs["job_name"] == "experiment-design-reviewer"
     assert "UMN-12312" in second.args[0]
     assert "UMN-12311" in first.args[0]
-    assert selector.await_count == 2
+    assert selector.await_count == 1
+    validator.assert_awaited_once_with(settings, claimed_task_key=SELECTED.task_key)
     client.chat_postMessage.assert_awaited_once_with(
         channel="CDESIGN",
         markdown_text=notification,
@@ -208,12 +214,12 @@ def test_review_notification_rejects_wrong_task_or_verbose_output() -> None:
     )
 
 
-async def test_changed_selection_stops_before_review() -> None:
+async def test_changed_start_selection_stops_before_worker() -> None:
     prepared = HeadlessAgentRun(
         provider="claude",
         model="opus",
         session_id="prepare-session",
-        text="DESIGN_PREPARED: UMN-12312 | UMN-12310",
+        text="EXPERIMENT_TASK_STARTED: UMN-99999 | UMN-12310 | UMN-12311",
     )
     client = SimpleNamespace(chat_postMessage=AsyncMock())
     agent = SimpleNamespace(
@@ -227,7 +233,7 @@ async def test_changed_selection_stops_before_review() -> None:
     )
     selector = AsyncMock(side_effect=[SELECTED, None])
 
-    with pytest.raises(InvalidDesignResult, match="changed before review"):
+    with pytest.raises(InvalidDesignResult, match="does not match deterministic selection"):
         await run_once(client, agent, settings, selector)
 
     assert agent.execute_once.await_count == 1

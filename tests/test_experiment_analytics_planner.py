@@ -35,12 +35,16 @@ def test_prompts_use_analytics_skill_service_accounts_and_owner_session() -> Non
     assert "Never describe yourself as merely a reviewer" in prompt
 
 
-async def test_two_pass_pipeline_uses_analytics_jobs_and_attaches_reviewer() -> None:
+async def test_two_pass_pipeline_uses_analytics_jobs_and_attaches_reviewer(monkeypatch) -> None:
+    validator = AsyncMock(return_value=CANDIDATE)
+    monkeypatch.setattr("sloperator.experiment_analytics_planner.select_from_jira", validator)
     notification = (
         "<@UONE> [UMN-13002](https://mu--se.atlassian.net/browse/UMN-13002) — "
         "analytics specification is ready. Please check."
     )
     runs = [
+        HeadlessAgentRun("claude", "opus", "review-session",
+                           "EXPERIMENT_TASK_STARTED: UMN-13002 | UMN-13000 | UMN-13001"),
         HeadlessAgentRun(
             "claude",
             "opus",
@@ -63,10 +67,13 @@ async def test_two_pass_pipeline_uses_analytics_jobs_and_attaches_reviewer() -> 
 
     assert await run_once(client, agent, settings, selector) == notification
     assert [call.kwargs["job_name"] for call in agent.execute_once.await_args_list] == [
+        "experiment-analytics-reviewer",
         "experiment-analytics-preparer",
         "experiment-analytics-reviewer",
     ]
-    assert selector.await_count == 2
+    assert selector.await_count == 1
+    validator.assert_awaited_once_with(settings, claimed_task_key=CANDIDATE.task_key)
+    assert agent.execute_once.await_args_list[2].kwargs["existing_session_id"] == "review-session"
     assert agent.attach_session.await_args.args[2].session_id == "review-session"
 
 
@@ -78,13 +85,15 @@ def test_review_notification_rejects_wrong_task() -> None:
         )
 
 
-def test_preparer_prompt_owns_jira_start_metadata() -> None:
-    assert "assign the task to that account" in PREPARATION_PROMPT
-    assert "target status `In Progress`" in PREPARATION_PROMPT
-    assert "transition ID `281`" in PREPARATION_PROMPT
-    assert "Start date" in PREPARATION_PROMPT
-    assert "customfield_10312" in PREPARATION_PROMPT
-    assert "Jira start update failed" in PREPARATION_PROMPT
+def test_reviewer_starts_and_worker_has_read_only_jira() -> None:
+    from sloperator.experiment_analytics_planner import start_prompt
+
+    prompt = start_prompt(CANDIDATE)
+    assert "assign the task to that account" in prompt
+    assert "transition ID 281" in prompt
+    assert "customfield_10312" in prompt
+    assert "Jira is read-only for you" in PREPARATION_PROMPT
+    assert "transition ID 281" not in PREPARATION_PROMPT
 
 
 def test_reviewer_prompt_owns_jira_review_metadata_after_comment() -> None:

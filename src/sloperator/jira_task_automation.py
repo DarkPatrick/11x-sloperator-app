@@ -17,6 +17,7 @@ from aiohttp import BasicAuth, ClientSession, ClientTimeout
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.claude_usage import ClaudeUsage, ClaudeUsageError, read_usage
 from sloperator.config import Settings
+from sloperator.jira_agent_policy import REVIEWER_OWNERSHIP_POLICY, WORKER_JIRA_POLICY
 
 LOGGER = logging.getLogger(__name__)
 USAGE_ALERT_COOLDOWN_SECONDS = 3600
@@ -123,11 +124,11 @@ def worker_prompt(task_key: str, summary: str = "", description: str = "") -> st
     return (WORKER_PROMPT.format(task_key=task_key).replace(
         "For Confluence use the service account's personal space if it exists; otherwise use the server.",
         "A bot-authenticated check found no personal Confluence space for ug-ai-analyst; use the server space.",
-    ) + request + destination + "\nDo not create a Confluence page when the request asks for a Redash or Metabase query/dashboard unless the request explicitly asks for documentation. Return a final line `CONFLUENCE_PAGE: <URL>` only when you created or updated a page.")
+    ) + "\n" + WORKER_JIRA_POLICY + request + destination + "\nDo not create a Confluence page when the request asks for a Redash or Metabase query/dashboard unless the request explicitly asks for documentation. Return a final line `CONFLUENCE_PAGE: <URL>` only when you created or updated a page.")
 
 
 def reviewer_prompt(task_key: str, description: str = "") -> str:
-    return REVIEWER_PROMPT.format(task_key=task_key) + f"\nAUTHORITATIVE TASK SOURCE: https://mu--se.atlassian.net/browse/{task_key}\nOpen it through the Jira helper with --as-bot and read its complete current description, acceptance criteria, attachments, and all recent comments before reviewing."
+    return REVIEWER_PROMPT.format(task_key=task_key) + "\n" + REVIEWER_OWNERSHIP_POLICY + f"\nAUTHORITATIVE TASK SOURCE: https://mu--se.atlassian.net/browse/{task_key}\nOpen it through the Jira helper with --as-bot and read its complete current description, acceptance criteria, attachments, and all recent comments before reviewing."
 
 
 def reviewer_start_prompt(task_key: str) -> str:

@@ -21,6 +21,11 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
 from sloperator.config import Settings
+from sloperator.jira_agent_policy import (
+    REVIEWER_OWNERSHIP_POLICY,
+    REVIEWER_START_POLICY,
+    WORKER_JIRA_POLICY,
+)
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_PREFIX = "No eligible experiment"
@@ -30,22 +35,7 @@ FAILURE_PREFIXES = (
     "Experiment finalization failed:",
 )
 
-FINALIZATION_PROMPT = f"""\
-This is the authorised daily autonomous experiment-finalisation preparation pass. Complete the
-calculation and Confluence publication in this turn. The user explicitly pre-approves progression through all three
-publication stages (Results, then Insights, then Decision / Next steps), including the required
-Confluence update and Jira comment. Do not pause to request approval between stages. This
-instruction intentionally overrides only the interactive approval pauses in the skills; keep
-all their data-quality, maturity, verification, language, and publication safeguards.
-
-{AUTOMATED_SESSION_REPOSITORY_POLICY}
-
-{AUTOMATED_ATLASSIAN_IDENTITY}
-
-{AUTOMATED_RESPONSE_STYLE}
-
-Goal: finalise exactly one eligible UG monetisation experiment.
-
+SELECTION_RULES = f"""\
 Selection rules:
 1. Start exclusively from `ug_experiment_calculator.get_ugm_exps_list(config=cfg)`. Treat the
    returned ids as the authoritative allowlist: never inspect, calculate, select, or publish an
@@ -105,13 +95,38 @@ Selection rules:
    calculation. If the experiment is no longer eligible, make no Confluence or Jira writes and
    return exactly `{NO_OP_NOTIFICATION}` and nothing else. Keep filter/audit details internal.
 
+"""
+
+FINALIZATION_PROMPT = f"""\
+[claude]
+This is the authorised daily autonomous experiment-finalisation preparation pass. Complete the
+calculation and Confluence publication in this turn. The user explicitly pre-approves progression through all three
+publication stages (Results, then Insights, then Decision / Next steps), including the required
+Confluence update. All Jira writes belong exclusively to the reviewer. Do not pause to request approval between stages. This
+instruction intentionally overrides only the interactive approval pauses in the skills; keep
+all their data-quality, maturity, verification, language, and publication safeguards.
+
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_ATLASSIAN_IDENTITY}
+
+{AUTOMATED_RESPONSE_STYLE}
+
+Goal: finalise exactly one eligible UG monetisation experiment.
+
+{SELECTION_RULES}
+These rules describe selection BEFORE the reviewer claims a task. This preparation pass receives
+an already selected and started task: In Progress on that exact task is expected and does not make
+it ineligible. Do not walk the pool or select another experiment. Revalidate its monetisation,
+age, segment, iteration, and fresh maturity evidence; fail if any gate changed. Reuse this run's
+verified fresh calculation; recalculate only if freshness cannot be established.
+
 Execution for the selected experiment:
-1. At the moment you start work, use the repository Jira helper with `--as-bot` and operate on the
-   exact Results task for the selected experiment/iteration. Resolve the service account from `/myself`
-   (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`), assign that task to it, set `Start date`
-   (`customfield_10312`) to today's `YYYY-MM-DD` date, and transition using ID `281` to `In Progress`.
-   Re-fetch and verify the assignee, date, and status before continuing; on failure return
-   `Experiment finalisation failed: Jira start update failed`.
+1. Work only on the exact experiment, page, iteration, and Results task supplied by the reviewer.
+   The reviewer has already verified eligibility and started that task. Re-fetch and verify its
+   In Progress status, bot assignee, and Start date. If the start cannot be verified, fail without
+   Jira writes. Never substitute another candidate.
+{WORKER_JIRA_POLICY}
 2. State the selected title, id, end timestamp, clients, segments, target project page, iteration,
    configured table prefix, and affected package-managed tables.
 3. Use the `ug-experiment-calculator` skill and the installed repository `.venv` library directly;
@@ -147,10 +162,8 @@ Execution for the selected experiment:
    Never put local/server paths or links to logs, SQL, scripts, CSVs, ZIPs, or other run artifacts
    into the project-page body. Package useful reader-safe analysis artifacts into one bundle and
    upload it as an attachment to the existing project page instead. Verify the attachment upload.
-5. The initial Jira assignment, Start date, and transition `281` to `In Progress` in step 1 are
-   required and authorised in this preparation pass. Do not perform completion writes here:
-   leave the publication comment, Due date, transition `181` to `In Review`, and final Slack
-   notification to the independent reviewer. Do not send Slack yourself.
+5. Leave every Jira write and every user-facing comment to the reviewer. Return a private handoff
+   only; do not send Slack yourself.
 
 Preparation result:
 - Return exactly `FINALIZATION_PREPARED: <experiment id> | <project page URL> | Iteration <n>` after
@@ -192,10 +205,52 @@ Use the current date/time in Asia/Nicosia for all relative-date and completion d
 Never finalise more than one experiment in this run.
 """
 
+FINAL_NOTIFICATION_POLICY = FINALIZATION_PROMPT.split("Final notification (reviewer only):", 1)[1]
+
+START_PROMPT = f"""[claude]
+This is the authorised reviewer start pass for one UG experiment finalisation.
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
+{AUTOMATED_ATLASSIAN_IDENTITY}
+{AUTOMATED_RESPONSE_STYLE}
+{REVIEWER_OWNERSHIP_POLICY}
+
+Select exactly one experiment using all of these gates before any Jira or Confluence write:
+{SELECTION_RULES}
+
+Fresh calculation procedure used to establish candidate maturity:
+3. Use the `ug-experiment-calculator` skill and the installed repository `.venv` library directly;
+   do not use the calculator HTTP API in this job. First run the repository freshness preflight and
+   perform the skill's mandatory installed-commit versus git `main` check. If the installed
+   `ug-experiment-calculator` is stale, update it through the repository's supported
+   internal-library update flow before calculating. Then run the synchronous in-process
+   `calculate_exp_info(exp_id, config=cfg, update_rollout=True)` with the standard
+   `ExperimentCalculatorConfig.from_env()` configuration and the
+   `ug_monetization_sloperator_` table prefix. This direct calculation is explicitly authorised for
+   this scheduled job, including its documented writes and subscription-source refresh. During
+   selection, run this procedure once for each preliminary candidate in rule 7 until one passes the
+   maturity gate; do not calculate the selected experiment a second time when its verified
+   calculation is still fresh. Wait for each call to finish and verify fresh successful rows in
+   every expected result/stat/funnel and raw users table before continuing. Do not silently use
+   stale results. If a direct calculation fails or times out, stop without publishing partial
+   итогов and report the exact failure.
+
+Only after a candidate passes every gate, start its exact Results task:
+{REVIEWER_START_POLICY}
+Do not generate or publish Results, Insights, Decision, or Next steps in this pass.
+Return exactly one line after the verified start:
+FINALIZATION_STARTED: <experiment id> | <project page URL> | Iteration <n> | <Results task key>
+Return exactly {NO_OP_NOTIFICATION} if none qualify. On failure return exactly
+Experiment finalisation failed: <reason>.
+"""
+
+
 REVIEW_PROMPT = f"""\
 [claude]
 This is the authorised independent review pass for one prepared UG experiment finalisation.
 {AUTOMATED_RESPONSE_STYLE}
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
+{AUTOMATED_ATLASSIAN_IDENTITY}
+{REVIEWER_OWNERSHIP_POLICY}
 
 Review only the exact experiment, project page, and iteration supplied below. Re-fetch the page and
 verify Results, Insights, Decision, and Next steps are complete, valid, and belong to that iteration.
@@ -215,8 +270,8 @@ For a task still awaiting completion, assign it to the service account, preserve
 `Due date` (`duedate`) to today. Reuse an existing matching English publication comment instead
 of adding a duplicate; otherwise add the short publication comment. Re-fetch and verify the
 fields and comment, perform `181` only from verified `In Progress`, and re-fetch to verify
-`In Review`. Return the final Slack notification in the exact production format from the preparation
-prompt. Do not send Slack yourself. On any failure return exactly `Experiment finalisation failed: <reason>`.
+`In Review`. Return the final Slack notification in the exact production format below.
+{FINAL_NOTIFICATION_POLICY} Do not send Slack yourself. On any failure return exactly `Experiment finalisation failed: <reason>`.
 
 Preparation result:
 {{prepared_result}}
@@ -232,6 +287,7 @@ class AgentSubmitter(Protocol):
         job_name: str = "scheduled-agent",
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
+        existing_session_id: str | None = None,
     ) -> HeadlessAgentRun: ...
 
     async def attach_session(
@@ -247,6 +303,21 @@ class InvalidFinalizationNotification(ValueError):
 
 
 PREPARED_RE = re.compile(r"FINALIZATION_PREPARED:\s*(\d+)\s*\|\s*(\S+)\s*\|\s*Iteration\s+(\d+)")
+
+
+STARTED_RE = re.compile(
+    r"FINALIZATION_STARTED: (\d+) \| (https://[^\s|]+) \| Iteration (\d+) \| (UMN-\d+)"
+)
+
+
+def is_start_result(text: str) -> bool:
+    return bool(STARTED_RE.fullmatch(text.strip())) or text.strip().startswith(
+        (NO_OP_PREFIX, *FAILURE_PREFIXES)
+    )
+
+
+def is_reviewer_result(text: str) -> bool:
+    return is_start_result(text) or is_finalization_notification(text)
 
 
 def is_preparation_result(text: str) -> bool:
@@ -307,24 +378,62 @@ async def run_once(
     settings: Settings,
 ) -> str:
     """Run headlessly, publish once, and attach the resumable session."""
+    start_run = await agent.execute_once(
+        START_PROMPT,
+        settings.experiment_finalizer_timeout_seconds,
+        job_name="experiment-finalizer-reviewer",
+        accept_result=is_start_result,
+    )
+    if start_run.text.strip().startswith(NO_OP_PREFIX):
+        return await publish_run(client, agent, settings, replace(start_run, text=NO_OP_NOTIFICATION))
+    if STARTED_RE.fullmatch(start_run.text.strip()) is None:
+        raise InvalidFinalizationNotification(start_run.text)
+    return await run_preparation(client, agent, settings, start_run)
+
+
+async def run_preparation(
+    client: AsyncWebClient,
+    agent: AgentSubmitter,
+    settings: Settings,
+    started_run: HeadlessAgentRun,
+) -> str:
     prepared_run = await agent.execute_once(
-        FINALIZATION_PROMPT,
+        FINALIZATION_PROMPT + "\n\nReviewer verified start:\n" + started_run.text,
         settings.experiment_finalizer_timeout_seconds,
         job_name="experiment-finalizer-preparer",
         accept_result=is_preparation_result,
     )
     prepared_text = prepared_run.text.strip()
     if prepared_text.startswith(NO_OP_PREFIX) or prepared_text.startswith(FAILURE_PREFIXES):
-        if prepared_text.startswith(NO_OP_PREFIX):
-            return await publish_run(client, agent, settings, replace(prepared_run, text=NO_OP_NOTIFICATION))
         raise InvalidFinalizationNotification(prepared_text)
     if PREPARED_RE.search(prepared_text) is None:
         raise InvalidFinalizationNotification("Preparation agent returned no FINALIZATION_PREPARED marker")
+    prepared = PREPARED_RE.fullmatch(prepared_text)
+    started = STARTED_RE.fullmatch(started_run.text.strip())
+    if prepared is None or started is None or prepared.groups() != started.groups()[:3]:
+        raise InvalidFinalizationNotification("Preparation does not match reviewer selection")
+    return await run_review(
+        client, agent, settings, prepared_text,
+        reviewer_session_id=started_run.session_id, start_context=started_run.text,
+    )
+
+
+async def run_review(
+    client: AsyncWebClient,
+    agent: AgentSubmitter,
+    settings: Settings,
+    prepared_text: str,
+    reviewer_session_id: str | None = None,
+    start_context: str = "",
+) -> str:
+    if PREPARED_RE.fullmatch(prepared_text.strip()) is None:
+        raise InvalidFinalizationNotification("Invalid preparation result")
     review_run = await agent.execute_once(
-        REVIEW_PROMPT.format(prepared_result=prepared_text),
+        REVIEW_PROMPT.format(prepared_result=prepared_text + "\n" + start_context),
         settings.experiment_finalizer_timeout_seconds,
         job_name="experiment-finalizer-reviewer",
         accept_result=is_finalization_notification,
+        existing_session_id=reviewer_session_id,
     )
     return await publish_run(client, agent, settings, review_run)
 

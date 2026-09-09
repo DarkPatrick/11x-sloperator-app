@@ -27,6 +27,11 @@ from sloperator.experiment_design_selector import (
     SelectionError,
     select_candidate,
 )
+from sloperator.jira_agent_policy import (
+    REVIEWER_OWNERSHIP_POLICY,
+    REVIEWER_START_POLICY,
+    WORKER_JIRA_POLICY,
+)
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_RESULT = "No eligible experiment-analytics task was found."
@@ -75,20 +80,20 @@ Sloperator selects the Jira candidate deterministically before launching you. Do
 substitute another candidate. The exact selected keys are appended at runtime.
 
 {SELECTION_RULES}
+These are pre-start selection rules. The reviewer has claimed the selected task: its expected
+current status is now In Progress. Do not reselect from the remaining queue or reject this expected
+status change. Re-check the exact epic, pair, and iteration; all other eligibility gates still apply.
 
 Execution:
-1. At the moment you start work, use the repository Jira helper with `--as-bot` and operate on the
-   selected Analytics task. Resolve the service account's own Jira `accountId` from the
-   authoritative `/myself` response (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`), assign the task to that account,
-   and transition it using transition ID `281` (target status `In Progress`). The verified Jira field ID for
-   `Start date` is `customfield_10312`; set it to today's date in `YYYY-MM-DD` format. Re-fetch the issue and verify the
-   assignee, status, and date before continuing. If any write or verification fails, stop and return
-   `{FAILURE_PREFIX} Jira start update failed`.
+1. The reviewer has already started this exact task. Read and verify its In Progress status,
+   bot assignee, and Start date; do not change Jira. If the verified start is missing, stop with
+   `{FAILURE_PREFIX} Jira start verification failed`.
+{WORKER_JIRA_POLICY}
 2. For the selected Analytics task, resolve the correct project page and matching iteration. Build
    and populate the complete analytics specification through `ug-analytics-spec-writer`, using its
    required structure, naming, source validation, implementation details, and verification gates.
 3. You are the preparation pass only. Do not comment on Jira, send Slack, or move the task beyond
-   In Progress. The final reviewer owns the Jira comment and In Review transition.
+   In Progress. The final reviewer owns all Jira writes and communication.
 4. Re-fetch the page and verify the analytics specification is complete, belongs to the selected
    iteration, and did not remove unrelated content.
 5. On success return exactly `ANALYTICS_PREPARED: <Analytics task key> | <epic key>` on one line.
@@ -110,6 +115,31 @@ Your success marker must contain `{candidate.task_key} | {candidate.epic_key}`.
 """
 
 
+def start_prompt(candidate: DesignCandidate) -> str:
+    return f"""[claude]
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
+{AUTOMATED_ATLASSIAN_IDENTITY}
+{AUTOMATED_RESPONSE_STYLE}
+{REVIEWER_OWNERSHIP_POLICY}
+
+Start only task {candidate.task_key}, paired Pitch {candidate.pitch_key}, epic {candidate.epic_key}.
+{SELECTION_RULES}
+{REVIEWER_START_POLICY}
+Do not prepare the deliverable in this pass. After verifying the start, return exactly:
+EXPERIMENT_TASK_STARTED: {candidate.task_key} | {candidate.epic_key} | {candidate.pitch_key}
+On failure return one line starting with {FAILURE_PREFIX}.
+"""
+
+
+def started_candidate(text: str) -> DesignCandidate | None:
+    match = re.fullmatch(
+        r"EXPERIMENT_TASK_STARTED: (UMN-\d+) \| (UMN-\d+) \| (UMN-\d+)", text.strip()
+    )
+    if match is None:
+        return None
+    return DesignCandidate(match[1], match[2], match[3], "", "")
+
+
 def review_prompt(task_key: str, epic_key: str) -> str:
     return f"""\
 [claude]
@@ -123,6 +153,8 @@ review that exact task and iteration, correct every issue, and complete the work
 {AUTOMATED_ATLASSIAN_IDENTITY}
 
 {AUTOMATED_RESPONSE_STYLE}
+
+{REVIEWER_OWNERSHIP_POLICY}
 
 Use `ug-analytics-spec-writer` in review/validation mode, including all required sources, naming and
 coverage checks, page-builder rules, and rendered-page verification. The job authorises necessary
@@ -138,13 +170,16 @@ Session ownership after publication:
 - Never describe yourself as merely a reviewer or hand responsibility to the preparation agent.
   Re-check sources when challenged and make requested in-scope corrections under the same gates.
 
-Before any write, independently verify that `{task_key}` is still the oldest eligible task under:
+Before any write, re-fetch the exact task, epic, pair, and iteration. The pre-start selection
+rules below remain applicable except that the claimed task is now In Progress, so it must not be
+reselected from the remaining queue or compared to a new oldest queued task. On recovery, if it
+is already In Review or Done, verify the existing result and avoid duplicate comments or backward
+transitions; preserve completed fields. Fail if the task, pair, or scope changed unexpectedly.
 {SELECTION_RULES}
-If eligibility changed, make no further writes and fail; never substitute another task.
 
 After the page is correct and verified:
-1. Add one short English Jira comment to `{task_key}` through the repository helper saying the
-   analytics specification was prepared, published, and independently reviewed, with the page link.
+1. Add one short English Jira comment to `{task_key}` through the repository helper: state that you prepared
+   and published the analytics specification and include the page link.
    Re-fetch and verify the comment.
 2. Only after the comment is successfully added and verified, transition `{task_key}` to the status
    using transition ID `181` (target status `In Review`) and verify the result. The verified Jira field ID for
@@ -245,6 +280,8 @@ def task_key_from_review_result(text: str) -> str:
 
 
 def is_review_result(text: str) -> bool:
+    if started_candidate(text) is not None:
+        return True
     try:
         task_key_from_review_result(text)
     except InvalidAnalyticsResult as error:
@@ -289,12 +326,14 @@ async def run_review(
     settings: Settings,
     task_key: str,
     epic_key: str,
+    reviewer_session_id: str | None = None,
 ) -> str:
     run = await agent.execute_once(
         review_prompt(task_key, epic_key),
         settings.experiment_analytics_timeout_seconds,
         job_name="experiment-analytics-reviewer",
         accept_result=review_result_validator(task_key),
+        existing_session_id=reviewer_session_id,
     )
     return await publish_notification(client, agent, settings, run, task_key)
 
@@ -310,6 +349,26 @@ async def run_once(
     if selected is None:
         LOGGER.info("No eligible experiment-analytics task; finishing silently")
         return None
+    start_run = await agent.execute_once(
+        start_prompt(selected), settings.experiment_analytics_timeout_seconds,
+        job_name="experiment-analytics-reviewer",
+        accept_result=lambda text: started_candidate(text) is not None or text.strip().startswith(FAILURE_PREFIX),
+    )
+    started = started_candidate(start_run.text)
+    if started is None:
+        raise InvalidAnalyticsResult(start_run.text)
+    if (started.task_key, started.epic_key, started.pitch_key) != (selected.task_key, selected.epic_key, selected.pitch_key):
+        raise InvalidAnalyticsResult("Reviewer start does not match deterministic selection")
+    return await run_preparation(client, agent, settings, selected, start_run.session_id)
+
+
+async def run_preparation(
+    client: AsyncWebClient,
+    agent: AgentSubmitter,
+    settings: Settings,
+    selected: DesignCandidate,
+    reviewer_session_id: str,
+) -> str:
     prepared_run = await agent.execute_once(
         preparation_prompt(selected),
         settings.experiment_analytics_timeout_seconds,
@@ -326,18 +385,23 @@ async def run_once(
         raise InvalidAnalyticsResult("Preparation agent contradicted deterministic selection")
     if prepared != (selected.task_key, selected.epic_key):
         raise InvalidAnalyticsResult("Preparation result does not match deterministic selection")
-    confirmed = await choose(settings)
-    if confirmed != selected:
-        raise InvalidAnalyticsResult("Deterministic Jira selection changed before review")
-    return await run_review(client, agent, settings, *prepared)
+    confirmed = await select_from_jira(settings, claimed_task_key=selected.task_key)
+    if confirmed is None or (confirmed.task_key, confirmed.epic_key, confirmed.pitch_key) != (
+        selected.task_key, selected.epic_key, selected.pitch_key
+    ):
+        raise InvalidAnalyticsResult("Claimed Jira task or pairing changed before review")
+    return await run_review(client, agent, settings, *prepared, reviewer_session_id=reviewer_session_id)
 
 
-async def select_from_jira(settings: Settings) -> DesignCandidate | None:
+async def select_from_jira(
+    settings: Settings, *, claimed_task_key: str | None = None,
+) -> DesignCandidate | None:
     if not settings.jira_username or not settings.jira_api_token:
         raise SelectionError("Jira credentials are unavailable to experiment-analytics selector")
     return await select_candidate(
         JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token),
         task_title=ANALYTICS_TITLE,
+        claimed_task_key=claimed_task_key,
     )
 
 

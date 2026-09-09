@@ -25,6 +25,7 @@ from sloperator.artifacts import artifact_fingerprint
 from sloperator.automated_session_policy import slack_worker_prompt
 from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
 from sloperator.config import Settings
+from sloperator.jira_agent_policy import policy_for_job
 from sloperator.slack_files import attachment_prompt
 from sloperator.store import AgentSession, EventStore
 from sloperator.vpn import VpnManager, VpnState
@@ -1126,6 +1127,8 @@ class AgentOrchestrator:
         max_interim_results: int = 2,
     ) -> HeadlessAgentRun:
         """Run one isolated agent turn without creating a Slack thread."""
+        if role_policy := policy_for_job(job_name):
+            text += "\n\n" + role_policy
         parsed = parse_agent_request(text, self.settings)
         run_id = str(uuid.uuid4())
         session = AgentSession(
@@ -1426,6 +1429,8 @@ class AgentOrchestrator:
 
                 current_task.add_done_callback(clear_finished_recovery)
             recovery_prompt = f"{RESTART_RECOVERY_PROMPT}\n\nOriginal request:\n{row['prompt']}"
+            if role_policy := policy_for_job(str(row["job_name"])):
+                recovery_prompt += "\n\nCurrent mandatory role policy:\n" + role_policy
             run_settings = replace(
                 self.settings,
                 agent_timeout_seconds=timeout_seconds,

@@ -9,7 +9,7 @@ from sloperator.automation_error_audit import AUDIT_PROMPT, HOUR, TIMEZONE
 from sloperator.config import Settings
 from sloperator.experiment_analytics_planner import PREPARATION_PROMPT as ANALYTICS_PROMPT
 from sloperator.experiment_design_planner import PREPARATION_PROMPT
-from sloperator.experiment_finalizer import FINALIZATION_PROMPT
+from sloperator.experiment_finalizer import START_PROMPT as FINALIZATION_PROMPT
 from sloperator.jira_task_automation import WORKER_PROMPT
 
 
@@ -59,7 +59,7 @@ EMBEDDED_SCHEDULED_JOBS = (
         started_message="Starting scheduled experiment finalizer run",
         completed_message="Experiment finalizer run completed",
         failed_message="Could not start the daily experiment finalizer",
-        prompt_source="sloperator.experiment_finalizer.FINALIZATION_PROMPT",
+        prompt_source="sloperator.experiment_finalizer.START_PROMPT",
         condition="One autonomous experiment-finalisation agent run per weekday",
         prompt=FINALIZATION_PROMPT,
     ),

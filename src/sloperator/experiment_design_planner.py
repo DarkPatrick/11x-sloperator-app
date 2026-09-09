@@ -27,6 +27,11 @@ from sloperator.experiment_design_selector import (
     SelectionError,
     select_candidate,
 )
+from sloperator.jira_agent_policy import (
+    REVIEWER_OWNERSHIP_POLICY,
+    REVIEWER_START_POLICY,
+    WORKER_JIRA_POLICY,
+)
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_RESULT = "No eligible experiment-design task was found."
@@ -93,15 +98,15 @@ When no candidate is eligible, Sloperator stops before launching an agent, so th
 used for an empty selection.
 
 {SELECTION_RULES}
+These are pre-start selection rules. The reviewer has claimed the selected task: its expected
+current status is now In Progress. Do not reselect from the remaining queue or reject this expected
+status change. Re-check the exact epic, pair, and iteration; all other eligibility gates still apply.
 
 Execution:
-1. At the moment you start work, use the repository Jira helper with `--as-bot` and operate on the
-   selected calculation task. Resolve the service account's own Jira `accountId` from the authoritative
-   `/myself` response (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`), assign the task to that account,
-   and transition it using transition ID `281` (target status `In Progress`). The verified Jira field ID for
-   `Start date` is `customfield_10312`; set it to today's date in `YYYY-MM-DD` format. Re-fetch the issue
-   and verify the assignee, status, and date before continuing. If any write or verification fails, return
-   `{FAILURE_PREFIX} Jira start update failed`.
+1. The reviewer has already started this exact task. Read and verify its In Progress status,
+   bot assignee, and Start date; do not change Jira. If the verified start is missing, stop with
+   `{FAILURE_PREFIX} Jira start verification failed`.
+{WORKER_JIRA_POLICY}
 2. For the selected calculation task, resolve the correct project page and the matching iteration.
    Use the skill's strict formats to fully calculate, build, and populate both `Reach & Impact` and
    `Experiment design`. Follow the skill's monetisation-first defaults, mature-cohort rules, exact
@@ -129,6 +134,31 @@ Work only on this exact task, pair, epic, and matching project-page iteration. I
 fact contradicts this selection, make no writes and return `{FAILURE_PREFIX} selection changed`.
 Your success marker must contain `{candidate.task_key} | {candidate.epic_key}`.
 """
+
+
+def start_prompt(candidate: DesignCandidate) -> str:
+    return f"""[claude]
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
+{AUTOMATED_ATLASSIAN_IDENTITY}
+{AUTOMATED_RESPONSE_STYLE}
+{REVIEWER_OWNERSHIP_POLICY}
+
+Start only task {candidate.task_key}, paired Pitch {candidate.pitch_key}, epic {candidate.epic_key}.
+{SELECTION_RULES}
+{REVIEWER_START_POLICY}
+Do not prepare the deliverable in this pass. After verifying the start, return exactly:
+EXPERIMENT_TASK_STARTED: {candidate.task_key} | {candidate.epic_key} | {candidate.pitch_key}
+On failure return one line starting with {FAILURE_PREFIX}.
+"""
+
+
+def started_candidate(text: str) -> DesignCandidate | None:
+    match = re.fullmatch(
+        r"EXPERIMENT_TASK_STARTED: (UMN-\d+) \| (UMN-\d+) \| (UMN-\d+)", text.strip()
+    )
+    if match is None:
+        return None
+    return DesignCandidate(match[1], match[2], match[3], "", "")
 
 
 def review_prompt(task_key: str, epic_key: str) -> str:
@@ -169,14 +199,16 @@ Session ownership after publication:
   this way, re-check its sources when challenged, and make requested in-scope corrections to the
   project-page design under the same data-quality and publication safeguards.
 
-Before any write, independently verify that `{task_key}` still satisfies all of these rules:
+Before any write, re-fetch the exact task, epic, pair, and iteration. The pre-start selection
+rules below remain applicable except that the claimed task is now In Progress, so it must not be
+reselected from the remaining queue or compared to a new oldest queued task. On recovery, if it
+is already In Review or Done, verify the existing result and avoid duplicate comments or backward
+transitions; preserve completed fields. Fail if the task, pair, or scope changed unexpectedly.
 {SELECTION_RULES}
-It must still be the oldest eligible calculation task. If it is no longer eligible or no longer the
-oldest, make no further writes and fail concisely; never substitute a different task in this pass.
 
 After the page is correct and verified:
 1. Use the repository Jira helper to add one short English comment to `{task_key}` saying that
-   Reach & Impact and Experiment design were calculated, published, and independently reviewed,
+   I calculated and published Reach & Impact and Experiment design,
    with the project-page link. Re-fetch the issue and verify the comment.
 2. Transition `{task_key}` using transition ID `181` (target status `In Review`) and verify the resulting
    status. The verified Jira field ID for `Due date` is `duedate`; set it to today's date in `YYYY-MM-DD`
@@ -204,6 +236,7 @@ class AgentSubmitter(Protocol):
         job_name: str = "scheduled-agent",
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
+        existing_session_id: str | None = None,
     ) -> HeadlessAgentRun: ...
 
     async def attach_session(
@@ -296,6 +329,8 @@ def task_key_from_review_result(text: str) -> str:
 
 
 def is_review_result(text: str) -> bool:
+    if started_candidate(text) is not None:
+        return True
     """Return whether a reviewer response can be recovered without prior task state."""
     try:
         task_key_from_review_result(text)
@@ -361,6 +396,7 @@ async def run_review(
     settings: Settings,
     task_key: str,
     epic_key: str,
+    reviewer_session_id: str | None = None,
 ) -> str:
     """Run and publish the independent review pass."""
     run = await agent.execute_once(
@@ -368,6 +404,7 @@ async def run_review(
         settings.experiment_design_timeout_seconds,
         job_name="experiment-design-reviewer",
         accept_result=review_result_validator(task_key),
+        existing_session_id=reviewer_session_id,
     )
     return await publish_notification(client, agent, settings, run, task_key)
 
@@ -384,6 +421,26 @@ async def run_once(
     if selected is None:
         LOGGER.info("No eligible experiment-design task; finishing silently")
         return None
+    start_run = await agent.execute_once(
+        start_prompt(selected), settings.experiment_design_timeout_seconds,
+        job_name="experiment-design-reviewer",
+        accept_result=lambda text: started_candidate(text) is not None or text.strip().startswith(FAILURE_PREFIX),
+    )
+    started = started_candidate(start_run.text)
+    if started is None:
+        raise InvalidDesignResult(start_run.text)
+    if (started.task_key, started.epic_key, started.pitch_key) != (selected.task_key, selected.epic_key, selected.pitch_key):
+        raise InvalidDesignResult("Reviewer start does not match deterministic selection")
+    return await run_preparation(client, agent, settings, selected, start_run.session_id)
+
+
+async def run_preparation(
+    client: AsyncWebClient,
+    agent: AgentSubmitter,
+    settings: Settings,
+    selected: DesignCandidate,
+    reviewer_session_id: str,
+) -> str:
     prepared_run = await agent.execute_once(
         preparation_prompt(selected),
         settings.experiment_design_timeout_seconds,
@@ -400,18 +457,23 @@ async def run_once(
         raise InvalidDesignResult("Preparation agent contradicted deterministic selection")
     if prepared != (selected.task_key, selected.epic_key):
         raise InvalidDesignResult("Preparation agent returned keys outside deterministic selection")
-    confirmed = await choose(settings)
-    if confirmed != selected:
-        raise InvalidDesignResult("Deterministic Jira selection changed before review")
-    return await run_review(client, agent, settings, *prepared)
+    confirmed = await select_from_jira(settings, claimed_task_key=selected.task_key)
+    if confirmed is None or (confirmed.task_key, confirmed.epic_key, confirmed.pitch_key) != (
+        selected.task_key, selected.epic_key, selected.pitch_key
+    ):
+        raise InvalidDesignResult("Claimed Jira task or pairing changed before review")
+    return await run_review(client, agent, settings, *prepared, reviewer_session_id=reviewer_session_id)
 
 
-async def select_from_jira(settings: Settings) -> DesignCandidate | None:
+async def select_from_jira(
+    settings: Settings, *, claimed_task_key: str | None = None,
+) -> DesignCandidate | None:
     """Build the read-only Jira client and select one candidate."""
     if not settings.jira_username or not settings.jira_api_token:
         raise SelectionError("Jira credentials are unavailable to experiment-design selector")
     return await select_candidate(
-        JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
+        JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token),
+        claimed_task_key=claimed_task_key,
     )
 
 

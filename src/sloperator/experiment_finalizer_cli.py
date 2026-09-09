@@ -10,7 +10,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import AgentOrchestrator, validate_agent_runtime
 from sloperator.config import ConfigurationError, Settings
-from sloperator.experiment_finalizer import FINALIZATION_PROMPT, run_once
+from sloperator.experiment_finalizer import START_PROMPT, run_once
 from sloperator.main import configure_logging
 from sloperator.store import EventStore
 from sloperator.vpn import VpnManager
@@ -42,7 +42,7 @@ def run() -> None:
     )
     args = parser.parse_args()
     if args.show_prompt:
-        print(FINALIZATION_PROMPT)
+        print(START_PROMPT)
         return
     try:
         settings = Settings.from_environment()

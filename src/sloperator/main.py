@@ -51,12 +51,12 @@ from sloperator.experiment_analytics_planner import (
     publish_notification as publish_experiment_analytics,
 )
 from sloperator.experiment_analytics_planner import run_daily as run_daily_experiment_analytics
+from sloperator.experiment_analytics_planner import run_preparation as run_analytics_preparation
 from sloperator.experiment_analytics_planner import (
     run_review as run_analytics_review,
 )
-from sloperator.experiment_analytics_planner import (
-    select_from_jira as select_analytics_from_jira,
-)
+from sloperator.experiment_analytics_planner import select_from_jira as select_analytics_from_jira
+from sloperator.experiment_analytics_planner import started_candidate as analytics_started_candidate
 from sloperator.experiment_analytics_planner import (
     task_key_from_review_result as analytics_task_key_from_review_result,
 )
@@ -83,13 +83,33 @@ from sloperator.experiment_design_planner import (
 from sloperator.experiment_design_planner import (
     run_daily as run_daily_experiment_design,
 )
+from sloperator.experiment_design_planner import (
+    run_preparation as run_design_preparation,
+)
+from sloperator.experiment_design_planner import (
+    started_candidate as design_started_candidate,
+)
 from sloperator.experiment_design_selector import SelectionError
+from sloperator.experiment_finalizer import (
+    STARTED_RE as FINALIZATION_STARTED_RE,
+)
 from sloperator.experiment_finalizer import (
     InvalidFinalizationNotification,
     cancel_task,
-    is_finalization_notification,
     publish_run,
     run_daily,
+)
+from sloperator.experiment_finalizer import (
+    is_preparation_result as is_finalization_preparation_result,
+)
+from sloperator.experiment_finalizer import (
+    is_reviewer_result as is_finalization_reviewer_result,
+)
+from sloperator.experiment_finalizer import (
+    run_preparation as run_finalization_preparation,
+)
+from sloperator.experiment_finalizer import (
+    run_review as run_finalization_review,
 )
 from sloperator.health import create_health_app
 from sloperator.jira_task_automation import (
@@ -241,11 +261,14 @@ async def serve(settings: Settings) -> None:
         recovered_headless = await orchestrator.resume_interrupted_headless(
             settings.experiment_finalizer_timeout_seconds,
             job_name="experiment-finalizer-reviewer",
-            accept_result=is_finalization_notification,
+            accept_result=is_finalization_reviewer_result,
         )
         for run in recovered_headless:
             try:
-                await publish_run(app.client, orchestrator, settings, run)
+                if FINALIZATION_STARTED_RE.fullmatch(run.text.strip()):
+                    await run_finalization_preparation(app.client, orchestrator, settings, run)
+                else:
+                    await publish_run(app.client, orchestrator, settings, run)
             except InvalidFinalizationNotification as error:
                 LOGGER.error("Recovered experiment finalizer returned an invalid interim response")
                 if run.run_id is not None:
@@ -275,6 +298,26 @@ async def serve(settings: Settings) -> None:
                     external_session_id=run.session_id,
                     result_text=run.text,
                 )
+        recovered_finalization_preparations = await orchestrator.resume_interrupted_headless(
+            settings.experiment_finalizer_timeout_seconds,
+            job_name="experiment-finalizer-preparer",
+            accept_result=is_finalization_preparation_result,
+        )
+        for run in recovered_finalization_preparations:
+            try:
+                await run_finalization_review(app.client, orchestrator, settings, run.text)
+            except InvalidFinalizationNotification as error:
+                status = "failed"
+                last_error: str | None = repr(error)
+            else:
+                status = "completed"
+                last_error = None
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run, run.run_id, status=status,
+                    external_session_id=run.session_id, result_text=run.text,
+                    last_error=last_error,
+                )
         for task_job in ("jira-task-worker", "jira-task-reviewer"):
             recovered_task_runs = await orchestrator.resume_interrupted_headless(
                 settings.agent_timeout_seconds,
@@ -290,13 +333,17 @@ async def serve(settings: Settings) -> None:
         )
         for run in recovered_design_reviews:
             try:
-                task_key = task_key_from_review_result(run.text)
-                await publish_experiment_design(app.client, orchestrator, settings, run, task_key)
+                started = design_started_candidate(run.text)
+                if started is not None:
+                    await run_design_preparation(app.client, orchestrator, settings, started, run.session_id)
+                else:
+                    task_key = task_key_from_review_result(run.text)
+                    await publish_experiment_design(app.client, orchestrator, settings, run, task_key)
             except InvalidDesignResult as error:
                 if str(error).startswith("Experiment design automation failed:"):
                     await publish_failure(app.client, settings, str(error))
                 status = "failed"
-                last_error: str | None = repr(error)
+                last_error = repr(error)
             else:
                 status = "completed"
                 last_error = None
@@ -318,14 +365,9 @@ async def serve(settings: Settings) -> None:
             try:
                 prepared = parse_preparation_result(run.text)
                 if prepared is not None:
-                    selected = await select_from_jira(settings)
-                    if selected is None or prepared != (
-                        selected.task_key,
-                        selected.epic_key,
-                    ):
-                        raise InvalidDesignResult(
-                            "Recovered preparation no longer matches deterministic selection"
-                        )
+                    selected = await select_from_jira(settings, claimed_task_key=prepared[0])
+                    if selected is None or prepared != (selected.task_key, selected.epic_key):
+                        raise InvalidDesignResult("Recovered claimed task is no longer eligible")
                     await run_review(app.client, orchestrator, settings, *prepared)
             except (InvalidDesignResult, SelectionError) as error:
                 if str(error).startswith("Experiment design automation failed:"):
@@ -351,10 +393,14 @@ async def serve(settings: Settings) -> None:
         )
         for run in recovered_analytics_reviews:
             try:
-                task_key = analytics_task_key_from_review_result(run.text)
-                await publish_experiment_analytics(
-                    app.client, orchestrator, settings, run, task_key
-                )
+                started = analytics_started_candidate(run.text)
+                if started is not None:
+                    await run_analytics_preparation(app.client, orchestrator, settings, started, run.session_id)
+                else:
+                    task_key = analytics_task_key_from_review_result(run.text)
+                    await publish_experiment_analytics(
+                        app.client, orchestrator, settings, run, task_key
+                    )
             except InvalidAnalyticsResult as error:
                 if str(error).startswith("Experiment analytics automation failed:"):
                     await publish_analytics_failure(app.client, settings, str(error))
@@ -381,11 +427,9 @@ async def serve(settings: Settings) -> None:
             try:
                 prepared = parse_analytics_preparation_result(run.text)
                 if prepared is not None:
-                    selected = await select_analytics_from_jira(settings)
+                    selected = await select_analytics_from_jira(settings, claimed_task_key=prepared[0])
                     if selected is None or prepared != (selected.task_key, selected.epic_key):
-                        raise InvalidAnalyticsResult(
-                            "Recovered preparation no longer matches deterministic selection"
-                        )
+                        raise InvalidAnalyticsResult("Recovered claimed task is no longer eligible")
                     await run_analytics_review(app.client, orchestrator, settings, *prepared)
             except (InvalidAnalyticsResult, SelectionError) as error:
                 if str(error).startswith("Experiment analytics automation failed:"):

@@ -28,6 +28,7 @@ from sloperator.experiment_design_selector import (
     select_candidate,
 )
 from sloperator.jira_agent_policy import (
+    ISSUE_SELECTION_POLICY,
     REVIEWER_OWNERSHIP_POLICY,
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
@@ -39,25 +40,7 @@ PREPARED_RE = re.compile(r"ANALYTICS_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN
 FAILURE_PREFIX = "Experiment analytics automation failed:"
 TASK_LINK_RE = re.compile(r"mu--se\.atlassian\.net/browse/(?P<task>UMN-\d+)")
 
-SELECTION_RULES = """\
-Selection and pairing rules (strict and fail-closed):
-1. Work only on Jira board 175 (`UMN Week Plan`). Read its current board configuration and filter;
-   do not assume that status names or ids are permanent.
-2. Candidate parents are issues visible on that board whose issue type is Epic, current board column
-   is In Progress, and current component is `Project - Hypothesis`.
-3. Under every candidate epic, find ordinary tasks whose normalized summary contains either
-   `Проектирование и Питч` or `Аналитика`. Matching is case-insensitive, normalizes Russian
-   yo/ye spelling, collapses whitespace, and is a substring match. There may be several iterations.
-4. Pair iterations inside the same epic by the automation creation batch: pair each Analytics task
-   with the closest earlier Pitch task created in the same epic within 60 seconds. Enforce
-   one-to-one pairing and exclude ambiguous pairs instead of guessing.
-5. Derive eligibility from board columns. The Analytics task must be in Backlog or To Do; its paired
-   Pitch task must be in In Review or Done, including every status currently mapped to Done.
-6. The Pitch task's most recent transition into In Review/Done must be in the closed interval
-   [now minus one calendar month, now] in Asia/Nicosia. Do not substitute issue `updated`.
-7. Order eligible Analytics tasks by Jira `created`, then numeric issue key, and select the oldest.
-   Re-fetch the epic, pair, board configuration, and Pitch changelog before the first outward write.
-"""
+SELECTION_RULES = ISSUE_SELECTION_POLICY + "\nSelected task kind: `Аналитика`; paired task: `Проектирование и Питч`.\n"
 
 PREPARATION_PROMPT = f"""\
 [claude]
@@ -80,9 +63,8 @@ Sloperator selects the Jira candidate deterministically before launching you. Do
 substitute another candidate. The exact selected keys are appended at runtime.
 
 {SELECTION_RULES}
-These are pre-start selection rules. The reviewer has claimed the selected task: its expected
-current status is now In Progress. Do not reselect from the remaining queue or reject this expected
-status change. Re-check the exact epic, pair, and iteration; all other eligibility gates still apply.
+The reviewer has claimed this exact task; its expected current status is In Progress. Re-check
+its issue-level facts and scope without selecting another candidate.
 
 Execution:
 1. The reviewer has already started this exact task. Read and verify its In Progress status,
@@ -104,7 +86,8 @@ Execution:
 def preparation_prompt(candidate: DesignCandidate) -> str:
     return f"""{PREPARATION_PROMPT}
 
-Authoritative deterministic selection:
+Authoritative scheduler selection context:
+{candidate.to_json()}
 - Analytics task: `{candidate.task_key}`
 - paired Pitch task: `{candidate.pitch_key}`
 - epic: `{candidate.epic_key}`
@@ -121,6 +104,9 @@ def start_prompt(candidate: DesignCandidate) -> str:
 {AUTOMATED_ATLASSIAN_IDENTITY}
 {AUTOMATED_RESPONSE_STYLE}
 {REVIEWER_OWNERSHIP_POLICY}
+
+Authoritative scheduler selection context:
+{candidate.to_json()}
 
 Start only task {candidate.task_key}, paired Pitch {candidate.pitch_key}, epic {candidate.epic_key}.
 {SELECTION_RULES}
@@ -170,11 +156,10 @@ Session ownership after publication:
 - Never describe yourself as merely a reviewer or hand responsibility to the preparation agent.
   Re-check sources when challenged and make requested in-scope corrections under the same gates.
 
-Before any write, re-fetch the exact task, epic, pair, and iteration. The pre-start selection
-rules below remain applicable except that the claimed task is now In Progress, so it must not be
-reselected from the remaining queue or compared to a new oldest queued task. On recovery, if it
-is already In Review or Done, verify the existing result and avoid duplicate comments or backward
-transitions; preserve completed fields. Fail if the task, pair, or scope changed unexpectedly.
+Before any write, re-fetch the exact task, epic, pair, and iteration. The claimed task is now
+In Progress and must not be reselected from the remaining queue. On recovery, if already In Review
+or Done, verify the existing result and avoid duplicate comments or backward transitions;
+preserve completed fields. Fail if the task, pair, or scope changed unexpectedly.
 {SELECTION_RULES}
 
 After the page is correct and verified:

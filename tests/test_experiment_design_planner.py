@@ -55,8 +55,8 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
     assert "closest earlier Pitch task" in PREPARATION_PROMPT
     assert "within 60 seconds" in PREPARATION_PROMPT
     assert "one-to-one pairing" in PREPARATION_PROMPT
-    assert "Backlog or To Do column" in PREPARATION_PROMPT
-    assert "including\n   `No need`" in PREPARATION_PROMPT
+    assert "Do not call Jira board" in PREPARATION_PROMPT
+    assert "No need" in PREPARATION_PROMPT
     assert "now minus one calendar month" in PREPARATION_PROMPT
     assert "Do not use issue `updated`" in PREPARATION_PROMPT
     assert "Realistic and Pessimistic" in PREPARATION_PROMPT

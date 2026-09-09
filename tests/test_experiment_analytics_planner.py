@@ -114,3 +114,25 @@ def test_review_notification_removes_accidental_outer_code_ticks() -> None:
     )
 
     assert normalize_review_notification(notification, CANDIDATE.task_key) == notification[1:-1]
+
+
+@pytest.mark.parametrize("kind", ["design", "analytics"])
+def test_all_agent_phases_use_issue_checks_and_scheduler_context(kind: str) -> None:
+    from importlib import import_module
+
+    from sloperator.jira_agent_policy import ISSUE_SELECTION_POLICY
+
+    planner = import_module(f"sloperator.experiment_{kind}_planner")
+    prompts = [
+        planner.start_prompt(CANDIDATE),
+        planner.preparation_prompt(CANDIDATE),
+        planner.review_prompt(CANDIDATE.task_key, CANDIDATE.epic_key),
+    ]
+    for prompt in prompts:
+        assert ISSUE_SELECTION_POLICY in prompt
+        assert "Read its current board configuration and filter" not in prompt
+        assert "Derive eligibility from board columns" not in prompt
+        assert "Derive status eligibility from the board columns" not in prompt
+        assert "AUTOMATED RESPONSE STYLE" in prompt
+    for prompt in prompts[:2]:
+        assert CANDIDATE.to_json() in prompt

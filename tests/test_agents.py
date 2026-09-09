@@ -966,6 +966,10 @@ async def test_jira_role_policy_reaches_provider_even_for_old_requests(
     else:
         await orchestrator.execute_once(old_request, 5400, job_name=job_name)
     prompt = run_claude.await_args.args[2]
+    if job_name.startswith(("experiment-design-", "experiment-analytics-")):
+        assert "Do not call Jira board" in prompt
+        assert "An earlier board API 401 is not a" in prompt
+        assert prompt.index("ISSUE-LEVEL SELECTION BOUNDARY") > prompt.index("Old instruction")
     if job_name.endswith(("worker", "preparer")):
         assert "Jira is read-only for you" in prompt
         assert prompt.index("JIRA WORKER BOUNDARY") > prompt.index("Old instruction")

@@ -28,6 +28,7 @@ from sloperator.experiment_design_selector import (
     select_candidate,
 )
 from sloperator.jira_agent_policy import (
+    ISSUE_SELECTION_POLICY,
     REVIEWER_OWNERSHIP_POLICY,
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
@@ -39,38 +40,7 @@ PREPARED_RE = re.compile(r"DESIGN_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN-\d
 FAILURE_PREFIX = "Experiment design automation failed:"
 TASK_LINK_RE = re.compile(r"mu--se\.atlassian\.net/browse/(?P<task>UMN-\d+)")
 
-SELECTION_RULES = """\
-Selection and pairing rules (strict and fail-closed):
-1. Work only on Jira board 175 (`UMN Week Plan`). Read its current board configuration and filter;
-   do not assume that status names or ids are permanent.
-2. Candidate parents are issues visible on that board whose issue type is Epic, current board column
-   is In Progress, and current component is `Project - Hypothesis`. This component is the marker
-   added by the Hypothesis automation.
-3. Under every candidate epic, find ordinary tasks whose normalized summary contains either
-   `Проектирование и Питч` or `Расчет сверху и план тестирования`. Matching is case-insensitive,
-   normalizes the Russian yo/ye spelling, collapses whitespace, and is a substring match rather
-   than an exact-title match. There may be several iterations and several tasks of each kind.
-4. Pair iterations inside the same epic by the automation creation batch, not by the current title
-   suffix: the Pitch task is created immediately before its calculation task. Pair a calculation
-   task with the closest earlier Pitch task created in the same epic within 60 seconds. Prefer the
-   immediately preceding Jira key as corroboration, but do not require adjacent keys because the
-   template may create another issue between them. Enforce one-to-one pairing. If timestamps make a
-   pair ambiguous, exclude it rather than guessing. This survives later independent renames; for
-   example UMN-12843 and UMN-12844 are one pair despite different iteration suffixes.
-5. Derive status eligibility from the board columns, not status categories. The calculation task
-   must currently be in the Backlog or To Do column. Its paired Pitch task must currently be in the
-   In Review or Done column. The Done column includes every status currently mapped to it, including
-   `No need`, as well as statuses such as Done/Готово, Success, or Fail.
-6. Read the paired Pitch task changelog. Find its most recent transition into an In Review/Done
-   status while accounting for the current board-column mapping. It is eligible only when that
-   transition happened in the closed interval [now minus one calendar month, now] in Asia/Nicosia.
-   Missing, future, ambiguous, or older transitions are ineligible. Do not use issue `updated` as a
-   substitute for the status-transition timestamp.
-7. Order eligible calculation tasks by their Jira `created` timestamp, then numeric issue key as a
-   deterministic tie-breaker, and select exactly the oldest one. Re-fetch the epic, both paired
-   tasks, board configuration, and Pitch changelog immediately before the first outward write. If
-   eligibility changed, re-run selection; never work on a stale or guessed candidate.
-"""
+SELECTION_RULES = ISSUE_SELECTION_POLICY + "\nSelected task kind: `Расчет сверху и план тестирования`; paired task: `Проектирование и Питч`.\n"
 
 PREPARATION_PROMPT = f"""\
 [claude]
@@ -98,9 +68,8 @@ When no candidate is eligible, Sloperator stops before launching an agent, so th
 used for an empty selection.
 
 {SELECTION_RULES}
-These are pre-start selection rules. The reviewer has claimed the selected task: its expected
-current status is now In Progress. Do not reselect from the remaining queue or reject this expected
-status change. Re-check the exact epic, pair, and iteration; all other eligibility gates still apply.
+The reviewer has claimed this exact task; its expected current status is In Progress. Re-check
+its issue-level facts and scope without selecting another candidate.
 
 Execution:
 1. The reviewer has already started this exact task. Read and verify its In Progress status,
@@ -125,7 +94,8 @@ def preparation_prompt(candidate: DesignCandidate) -> str:
     """Bind the deterministic Jira selection to the preparation agent."""
     return f"""{PREPARATION_PROMPT}
 
-Authoritative deterministic selection:
+Authoritative scheduler selection context:
+{candidate.to_json()}
 - calculation task: `{candidate.task_key}`
 - paired Pitch task: `{candidate.pitch_key}`
 - epic: `{candidate.epic_key}`
@@ -142,6 +112,9 @@ def start_prompt(candidate: DesignCandidate) -> str:
 {AUTOMATED_ATLASSIAN_IDENTITY}
 {AUTOMATED_RESPONSE_STYLE}
 {REVIEWER_OWNERSHIP_POLICY}
+
+Authoritative scheduler selection context:
+{candidate.to_json()}
 
 Start only task {candidate.task_key}, paired Pitch {candidate.pitch_key}, epic {candidate.epic_key}.
 {SELECTION_RULES}
@@ -199,11 +172,10 @@ Session ownership after publication:
   this way, re-check its sources when challenged, and make requested in-scope corrections to the
   project-page design under the same data-quality and publication safeguards.
 
-Before any write, re-fetch the exact task, epic, pair, and iteration. The pre-start selection
-rules below remain applicable except that the claimed task is now In Progress, so it must not be
-reselected from the remaining queue or compared to a new oldest queued task. On recovery, if it
-is already In Review or Done, verify the existing result and avoid duplicate comments or backward
-transitions; preserve completed fields. Fail if the task, pair, or scope changed unexpectedly.
+Before any write, re-fetch the exact task, epic, pair, and iteration. The claimed task is now
+In Progress and must not be reselected from the remaining queue. On recovery, if already In Review
+or Done, verify the existing result and avoid duplicate comments or backward transitions;
+preserve completed fields. Fail if the task, pair, or scope changed unexpectedly.
 {SELECTION_RULES}
 
 After the page is correct and verified:

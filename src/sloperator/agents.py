@@ -2024,7 +2024,8 @@ class AgentOrchestrator:
                                 )
                     else:
                         result = await self._run_with_retries(
-                            lambda: run_codex(
+                            partial(
+                                run_codex,
                                 replace(
                                     self.settings,
                                     agent_timeout_seconds=(

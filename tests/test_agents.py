@@ -127,7 +127,7 @@ async def test_communication_renderer_never_receives_artifact_contents(
         database_path=tmp_path / "events.sqlite3",
     )
     run = AsyncMock(
-        return_value=AgentRunResult(session_id="communication-session", text="Причина установлена.")
+        return_value=AgentRunResult(session_id="communication-session", text="ACCEPT")
     )
     monkeypatch.setattr("sloperator.agents.run_claude", run)
 
@@ -135,7 +135,7 @@ async def test_communication_renderer_never_receives_artifact_contents(
         "Review closed; cause is a campaign baseline.", "[1.0] UUSER: Что случилось?"
     )
 
-    assert result == "Причина установлена."
+    assert result == "Review closed; cause is a campaign baseline."
     prompt = run.await_args.args[2]
     assert "Do not request, open, inspect, download" in prompt
     assert "archive.zip" not in prompt
@@ -1059,3 +1059,69 @@ async def test_followup_updated_archive_requires_current_file_request(
     client.chat_postMessage.assert_awaited_once_with(
         channel="C123", thread_ts="100.1", markdown_text="Corrected claim."
     )
+
+
+@pytest.mark.parametrize("answer", [
+    "Могу сократить Comments — скажи, и сокращу.",
+    "Я не проверял эти решения в коде. Причина пока не установлена.",
+    "Если подтвердите, изменю страницу. Пока изменений нет.",
+])
+async def test_completion_gate_preserves_author_words(monkeypatch, answer):
+    gate = object.__new__(SlackCommunicationLayer)
+    monkeypatch.setattr(gate, "_run", AsyncMock(return_value="ACCEPT"))
+    assert await gate.render("🧭 Скилл: internal\n📚 Контекст: internal\n\n" + answer, "") == answer
+
+
+@pytest.mark.parametrize("decision", ["Сокращу Comments.", "RETURN_TO_WORKER", "", "ACCEPT\nСделано"])
+async def test_completion_gate_cannot_publish_generated_text(monkeypatch, decision):
+    gate = object.__new__(SlackCommunicationLayer)
+    monkeypatch.setattr(gate, "_run", AsyncMock(return_value=decision))
+    with pytest.raises(AgentExecutionError):
+        await gate.render("Могу сократить — скажи, и сокращу.", "")
+
+
+async def test_completion_rejection_resumes_author_before_publication(monkeypatch, tmp_path):
+    worker = AsyncMock(side_effect=[
+        AgentRunResult(session_id="same-session", text="Сейчас проверю."),
+        AgentRunResult(session_id="same-session", text="Проверил: изменений нет."),
+    ])
+    monkeypatch.setattr("sloperator.agents.run_claude", worker)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(slack_user_id="U1234567890", bot_token="test", app_token="test")
+    gate = SimpleNamespace(render=AsyncMock(side_effect=[
+        AgentExecutionError("Incomplete"), "Проверил: изменений нет.",
+    ]))
+    agent = AgentOrchestrator(settings, store, communication=gate)
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    await agent.submit(client, channel_id="C123", message_ts="100.1", thread_ts="100.1",
+                       text="Проверь результат", show_status=False)
+    await agent.drain()
+    assert worker.await_count == 2
+    assert worker.await_args.args[1].external_session_id == "same-session"
+    assert worker.await_args.kwargs["force_resume"] is True
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="C123", thread_ts="100.1", markdown_text="Проверил: изменений нет.",
+    )
+
+
+async def test_completion_repeated_rejection_fails_without_publishing_draft(monkeypatch, tmp_path):
+    worker = AsyncMock(return_value=AgentRunResult("same-session", "Сейчас проверю."))
+    monkeypatch.setattr("sloperator.agents.run_claude", worker)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(slack_user_id="U1234567890", bot_token="test", app_token="test")
+
+    async def reject(*args, **kwargs):
+        assert store.get_agent_session("C123", "100.1").status != "idle"
+        raise AgentExecutionError("Incomplete")
+
+    agent = AgentOrchestrator(settings, store, communication=SimpleNamespace(render=reject))
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    await agent.submit(client, channel_id="C123", message_ts="100.1", thread_ts="100.1",
+                       text="Проверь результат", show_status=False)
+    await agent.drain()
+    assert worker.await_count == 3
+    assert store.get_agent_session("C123", "100.1").status == "failed"
+    client.chat_postMessage.assert_awaited_once()
+    assert "Сейчас проверю" not in str(client.chat_postMessage.await_args)

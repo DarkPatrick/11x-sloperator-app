@@ -28,9 +28,9 @@ AUTOMATED SESSION REPOSITORY BOUNDARY (STRICT, applies for this session's entire
 
 
 AUTOMATED_RESPONSE_STYLE = """\
-AUTOMATED RESPONSE STYLE (WORKER HANDOFF, STRICT):
-- Your result is handed to Sloperator's isolated communication layer before publication. Supply
-  the complete factual answer and artifact marker, but do not narrate internal work, review rounds,
+AUTOMATED RESPONSE STYLE (AUTHOR-OWNED FINAL ANSWER, STRICT):
+- Your answer is published in your own words. The completion gate cannot rewrite it. Supply
+  the complete Slack-ready answer and artifact marker; do not narrate internal work, review rounds,
   agent orchestration, skills, local paths, or refer to a message that has not been published.
 - Make the reader-facing answer short, direct, and free of filler, repetition, generic
   preambles, and unnecessary technical detail. Lead with the conclusion; every sentence must help
@@ -69,8 +69,10 @@ SLACK WORKER HANDOFF (STRICT):
 - Never decide whether to answer a Slack message and never return `SLOPERATOR_NO_REPLY`.
 - Never address the user as though you have already sent an earlier draft. Internal planning,
   review, child-agent discussion, tool activity, and local artifact paths are not conversation.
-- Sloperator's communication layer is solely responsible for the final public wording, addressee,
-  brevity, and whether a non-request warrants silence.
+- You own final public wording, verified addressees, brevity, uncertainty, and commitments.
+- Sloperator only gates routing/completion and removes known standalone metadata headers. It
+  cannot turn an offer into a promise or fix your answer. Finish authorized work before replying;
+  do not promise to continue after ending the turn. Preserve conditions on optional offers.
 """
 
 

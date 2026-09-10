@@ -223,7 +223,8 @@ def normalize_review_notification(text: str, task_key: str) -> str:
     candidates = {
         line.strip()
         for line in stripped.splitlines()
-        if f"browse/{task_key}" in line and ("check" in line.lower() or "провер" in line.lower())
+        if f"browse/{task_key}" in line
+        and any(word in line.lower() for word in ("check", "провер", "посмотр"))
     }
     if (failures and candidates) or len(failures) > 1 or len(candidates) > 1:
         raise InvalidAnalyticsResult("Review agent returned ambiguous terminal results")
@@ -237,7 +238,11 @@ def normalize_review_notification(text: str, task_key: str) -> str:
     if result.startswith("`") and result.endswith("`"):
         result = result[1:-1].strip()
     links = set(TASK_LINK_RE.findall(result))
-    if links != {task_key} or "analytics" not in result.lower() or "\n" in result:
+    if (
+        links != {task_key}
+        or not any(word in result.lower() for word in ("analytics", "аналитик"))
+        or "\n" in result
+    ):
         raise InvalidAnalyticsResult("Review notification has an invalid task or format")
     return result
 

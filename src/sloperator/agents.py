@@ -89,10 +89,12 @@ the existing session and workspace state. Inspect what has already completed, av
 finished expensive calculations, and continue through the originally requested final response.
 """
 INTERIM_RECOVERY_PROMPT = """\
-Your previous response was only a progress update, so Sloperator did not publish it. Continue the
-existing work from its current state. Do not return another progress update, promise to continue
-later, or stop while a child task is still running. Wait for or inspect the ongoing work as needed,
-then return only the final response required by the original request.
+Sloperator did not accept or publish your previous response as a terminal result. It may be a
+progress update or may not match the required final-response format. Check the original request
+and return the final response in its required format. If the work is already complete, correct
+only the response; do not repeat completed writes. Otherwise continue from the current state,
+wait for or inspect ongoing work as needed, and finish before responding. Do not promise to
+continue later or stop while a child task is still running.
 """
 PATH_GUARD_RECOVERY_PROMPT = """\
 Your previous response was only the short correction requested by the reply-path Stop hook.

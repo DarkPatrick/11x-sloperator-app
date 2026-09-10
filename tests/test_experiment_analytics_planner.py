@@ -12,6 +12,7 @@ from sloperator.experiment_analytics_planner import (
     InvalidAnalyticsResult,
     normalize_review_notification,
     review_prompt,
+    review_result_validator,
     run_once,
 )
 from sloperator.experiment_design_selector import DesignCandidate
@@ -83,6 +84,28 @@ def test_review_notification_rejects_wrong_task() -> None:
             "Analytics is ready, please check https://mu--se.atlassian.net/browse/UMN-99999",
             CANDIDATE.task_key,
         )
+
+
+@pytest.mark.parametrize("project", ["Checkout button visibility on low viewports", "Новый экран"])
+@pytest.mark.parametrize("review_request", ["посмотрите, пожалуйста", "проверьте, пожалуйста"])
+def test_review_notification_accepts_russian_result(project: str, review_request: str) -> None:
+    notification = (
+        f"<@U02Q5ETBB08> спека аналитики по проекту «{project}» готова и опубликована "
+        f"на странице проекта — {review_request}: "
+        "<https://mu--se.atlassian.net/browse/UMN-12869|UMN-12869>"
+    )
+    assert normalize_review_notification(notification, "UMN-12869") == notification
+    assert review_result_validator("UMN-12869")(notification)
+
+
+@pytest.mark.parametrize("text", [
+    "Документ готов, посмотрите, пожалуйста",  # Missing analytics subject.
+    "Спека аналитики готова",  # Missing review request.
+    "Спека аналитики готова, посмотрите https://mu--se.atlassian.net/browse/UMN-99999",
+])
+def test_review_notification_preserves_validation_guards(text: str) -> None:
+    notification = f"{text}: <https://mu--se.atlassian.net/browse/UMN-12869|UMN-12869>"
+    assert not review_result_validator("UMN-12869")(notification)
 
 
 def test_reviewer_starts_and_worker_has_read_only_jira() -> None:

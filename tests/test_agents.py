@@ -1016,3 +1016,46 @@ async def test_communication_gate_accepts_inline_code_decisions(
         "&gt; Cloudflare's override rules changed\nа пруфы есть?",
         "[1.0] UBOT: Cloudflare's override rules changed",
     ) is expected
+
+
+@pytest.mark.parametrize("requested", [False, True])
+async def test_followup_updated_archive_requires_current_file_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, requested: bool,
+) -> None:
+    async def worker(*args, **kwargs):
+        (tmp_path / "rev2.zip").write_bytes(b"updated report and old evidence")
+        return AgentRunResult(
+            session_id="existing-session",
+            text="Corrected claim. Report updated.\nSLOPERATOR_ARTIFACT: rev2.zip",
+        )
+
+    monkeypatch.setattr("sloperator.agents.run_claude", worker)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.create_agent_session("C123", "100.1", "claude", "opus", "existing-session")
+    store.finish_agent_turn("C123", "100.1", "existing-session")
+    settings = Settings(
+        slack_user_id="U1234567890", bot_token="xoxb-test", app_token="xapp-test",
+        agent_workspace=tmp_path,
+    )
+    communication = SimpleNamespace(
+        attachment_requested=AsyncMock(return_value=requested),
+        render=AsyncMock(return_value="Corrected claim."),
+    )
+    orchestrator = AgentOrchestrator(settings, store, communication=communication)
+    client = SimpleNamespace(chat_postMessage=AsyncMock(), files_upload_v2=AsyncMock())
+    await orchestrator.submit(
+        client, channel_id="C123", message_ts="100.2", thread_ts="100.1",
+        text="Send the corrected report" if requested else "а пруфы есть?",
+        show_status=False,
+    )
+    await orchestrator.drain()
+    communication.attachment_requested.assert_awaited_once()
+    assert client.files_upload_v2.await_count == int(requested)
+    if not requested:
+        assert "No attachment will be sent" in (
+            communication.render.await_args.kwargs["output_requirements"]
+        )
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="C123", thread_ts="100.1", markdown_text="Corrected claim."
+    )

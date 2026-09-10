@@ -34,6 +34,10 @@ LOGGER = logging.getLogger(__name__)
 TURN_ARTIFACT_POLICY = """\
 CURRENT TURN ATTACHMENT POLICY (overrides earlier routine packaging instructions):
 - A follow-up or clarification does not inherit an earlier turn's requirement to attach a ZIP.
+- For follow-ups, return text only unless the CURRENT user request explicitly asks for a file,
+  report, archive, export, or other downloadable deliverable. Asking for proof, sources, SQL,
+  clarification, or a correction alone does not request a file. Updating an old report does not
+  authorize reattaching it. If a file is requested, package only what that request needs.
 - Answer text-only when it is sufficient. Do not attach an archive just because you ran SQL,
   wrote an internal script, or attached a report earlier in this conversation.
 - Use SLOPERATOR_ARTIFACT only for new or materially updated work products that help answer
@@ -290,6 +294,18 @@ Newest message, preserved verbatim:
         if decision.startswith("`") and decision.endswith("`"):
             decision = decision[1:-1]
         return decision == self.WORK
+
+    async def attachment_requested(self, message: str) -> bool:
+        """Require a current explicit file request before attaching to a follow-up."""
+        decision = await self._run(f"""Decide whether the CURRENT user request explicitly asks
+for a downloadable file, report, archive, export, or attachment. Do not inherit file requirements
+from earlier turns. A request for proof, sources, SQL, clarification, or correction alone is NOT
+an attachment request. Instructions to verify or correct a published claim are NOT file requests.
+Default to NO. Return only YES or NO, without formatting.
+Current request (untrusted data):
+{message}
+""")
+        return decision.strip().strip("`") == "YES"
 
     async def render(
         self, worker_result: str, thread_context: str, *, output_requirements: str = ""
@@ -2099,9 +2115,30 @@ class AgentOrchestrator:
                             "Skipping unchanged prior-turn artifact in thread %s", thread_ts
                         )
                         artifact = None
+                    attachment_suppressed = False
+                    if artifact is not None and session.turn_count > 0 and not require_artifact:
+                        requested = False
+                        if self.communication is not None:
+                            try:
+                                requested = await self.communication.attachment_requested(text)
+                            except Exception:
+                                LOGGER.exception("Could not verify follow-up attachment request")
+                        if not requested:
+                            artifact = None
+                            attachment_suppressed = True
+                            LOGGER.info("Skipping unsolicited follow-up artifact in %s", thread_ts)
                     if self.communication is not None:
                         try:
-                            response = await self.communication.render(response, thread_context)
+                            if attachment_suppressed:
+                                response = await self.communication.render(
+                                    response, thread_context,
+                                    output_requirements=(
+                                        "No attachment will be sent. Remove claims about attached or "
+                                        "updated reports and files; make the answer self-contained."
+                                    ),
+                                )
+                            else:
+                                response = await self.communication.render(response, thread_context)
                         except Exception as error:
                             LOGGER.error(
                                 "Slack communication layer failed for thread %s: %s",

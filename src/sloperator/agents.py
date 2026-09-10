@@ -568,6 +568,24 @@ def normalize_slack_markdown(text: str) -> str:
     return "\n".join(normalized)
 
 
+SLACK_MENTION_RE = re.compile(r"<@[UW][A-Z0-9]+>")
+
+
+def slack_message_payload(text: str) -> dict[str, str]:
+    """Keep native mentions out of Slack's standard Markdown translator."""
+    if not SLACK_MENTION_RE.search(text):
+        return {"markdown_text": text}
+    # Protect fenced/inline code and native Slack links while translating prose.
+    parts = re.split(r"(```[\s\S]*?```|`[^`\n]+`|<[^>\n]+>)", text)
+    for index in range(0, len(parts), 2):
+        prose = parts[index]
+        prose = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", prose, flags=re.MULTILINE)
+        prose = re.sub(r"\*\*(.+?)\*\*", r"*\1*", prose)
+        prose = re.sub(r"\[([^]\n]+)\]\((https?://[^\s)]+)\)", r"<\2|\1>", prose)
+        parts[index] = prose
+    return {"text": "".join(parts)}
+
+
 def extract_artifact(text: str, workspace: Path) -> tuple[str, Path | None]:
     """Remove and validate one ZIP marker or render one reused-analysis marker."""
     artifact: Path | None = None
@@ -873,7 +891,7 @@ class AgentOrchestrator:
         conversation = await client.conversations_open(users=self.settings.slack_user_id)
         await client.chat_postMessage(
             channel=conversation["channel"]["id"],
-            markdown_text=authentication_failure_notice(
+            text=authentication_failure_notice(
                 provider,
                 self.settings.slack_user_id,
             ),
@@ -1688,14 +1706,12 @@ class AgentOrchestrator:
         """Publish already separated public text and opaque attachment metadata."""
         response = normalize_slack_markdown(response)
         for chunk in split_slack_message(response):
-            # Agent CLIs return standard Markdown. Slack's legacy `text`
-            # parameter expects its incompatible `mrkdwn` dialect, while
-            # `markdown_text` lets Slack translate LLM output correctly.
+            payload = slack_message_payload(chunk)
             if disable_link_previews:
                 await client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
-                    markdown_text=chunk,
+                    **payload,
                     unfurl_links=False,
                     unfurl_media=False,
                 )
@@ -1703,7 +1719,7 @@ class AgentOrchestrator:
                 await client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
-                    markdown_text=chunk,
+                    **payload,
                 )
         if artifact is not None:
             fingerprint = await asyncio.to_thread(artifact_fingerprint, artifact)

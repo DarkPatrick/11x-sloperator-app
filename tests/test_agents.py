@@ -334,7 +334,7 @@ async def test_slack_turn_reports_authentication_failure_immediately(
     post_message.assert_awaited_once_with(
         channel="C123",
         thread_ts="100.1",
-        markdown_text=authentication_failure_notice(provider, "U1234567890"),
+        text=authentication_failure_notice(provider, "U1234567890"),
     )
     session = store.get_agent_session("C123", "100.1")
     assert session is not None
@@ -369,7 +369,7 @@ async def test_headless_authentication_failure_immediately_dms_owner(
     client.conversations_open.assert_awaited_once_with(users="U1234567890")
     client.chat_postMessage.assert_awaited_once_with(
         channel="D123",
-        markdown_text=authentication_failure_notice("claude", "U1234567890"),
+        text=authentication_failure_notice("claude", "U1234567890"),
     )
 
 
@@ -978,3 +978,19 @@ async def test_jira_role_policy_reaches_provider_even_for_old_requests(
         assert "sole Jira writer" in prompt
         assert "Speak as the person who did the work" in prompt
         assert prompt.index("JIRA RESULT OWNERSHIP") > prompt.index("Old instruction")
+
+
+@pytest.mark.parametrize("disable_previews", [False, True])
+async def test_reply_preserves_native_mentions(settings: Settings, disable_previews: bool) -> None:
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    orchestrator = object.__new__(AgentOrchestrator)
+    orchestrator.settings = settings
+    await orchestrator._reply(
+        client, "C123", "100.1", "<@U0149RHN7D3>\n**Impact:** recovered",
+        disable_link_previews=disable_previews,
+    )
+    expected = {"unfurl_links": False, "unfurl_media": False} if disable_previews else {}
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="C123", thread_ts="100.1", text="<@U0149RHN7D3>\n*Impact:* recovered",
+        **expected,
+    )

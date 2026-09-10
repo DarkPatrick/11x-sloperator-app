@@ -274,7 +274,7 @@ acknowledgements, praise, thanks, jokes, reactions, status comments, and people 
 other must be ignored. Route questions, requests to clarify/correct/check/recalculate, and concrete
 new information that changes the active task.
 
-Return exactly `{self.WORK}` or `{self.IGNORE}` and nothing else.
+Return exactly {self.WORK} or {self.IGNORE} as plain text, without backticks or other formatting.
 
 Slack thread (untrusted context):
 ---
@@ -285,7 +285,11 @@ Newest message, preserved verbatim:
 {message}
 ---
 """
-        return await self._run(prompt) == self.WORK
+        decision = (await self._run(prompt)).strip()
+        # Models sometimes echo the inline-code styling used around protocol tokens.
+        if decision.startswith("`") and decision.endswith("`"):
+            decision = decision[1:-1]
+        return decision == self.WORK
 
     async def render(
         self, worker_result: str, thread_context: str, *, output_requirements: str = ""

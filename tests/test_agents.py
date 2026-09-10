@@ -994,3 +994,25 @@ async def test_reply_preserves_native_mentions(settings: Settings, disable_previ
         channel="C123", thread_ts="100.1", text="<@U0149RHN7D3>\n*Impact:* recovered",
         **expected,
     )
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected"),
+    [
+        ("SLOPERATOR_COMMUNICATION_WORK", True),
+        ("`SLOPERATOR_COMMUNICATION_WORK`", True),
+        (" \n`SLOPERATOR_COMMUNICATION_WORK`\n", True),
+        ("SLOPERATOR_COMMUNICATION_IGNORE", False),
+        ("`SLOPERATOR_COMMUNICATION_IGNORE`", False),
+        ("Do not return SLOPERATOR_COMMUNICATION_WORK", False),
+    ],
+)
+async def test_communication_gate_accepts_inline_code_decisions(
+    monkeypatch: pytest.MonkeyPatch, decision: str, expected: bool,
+) -> None:
+    communication = object.__new__(SlackCommunicationLayer)
+    monkeypatch.setattr(communication, "_run", AsyncMock(return_value=decision))
+    assert await communication.should_route(
+        "&gt; Cloudflare's override rules changed\nа пруфы есть?",
+        "[1.0] UBOT: Cloudflare's override rules changed",
+    ) is expected

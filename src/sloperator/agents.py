@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -571,7 +571,12 @@ def normalize_slack_markdown(text: str) -> str:
 SLACK_MENTION_RE = re.compile(r"<@[UW][A-Z0-9]+>")
 
 
-def slack_message_payload(text: str) -> dict[str, str]:
+class SlackMessagePayload(TypedDict, total=False):
+    text: str
+    markdown_text: str
+
+
+def slack_message_payload(text: str) -> SlackMessagePayload:
     """Keep native mentions out of Slack's standard Markdown translator."""
     if not SLACK_MENTION_RE.search(text):
         return {"markdown_text": text}

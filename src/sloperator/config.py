@@ -56,6 +56,8 @@ class Settings:
     codex_cli: Path = Path("/usr/bin/codex")
     agent_timeout_seconds: int = 2_700
     agent_max_concurrency: int = 2
+    automated_claude_input_budget: int = 5_000_000
+    automated_claude_output_budget: int = 30_000
     experiment_finalizer_enabled: bool = True
     experiment_finalizer_timezone: str = "Asia/Nicosia"
     experiment_finalizer_hour: int = 12
@@ -120,6 +122,14 @@ class Settings:
         app_token = _required("SLOPERATOR_SLACK_BOT_SOCKET_TOKEN_ID")
         host = os.environ.get("SLOPERATOR_HOST", "127.0.0.1").strip()
         log_level = os.environ.get("SLOPERATOR_LOG_LEVEL", "INFO").strip().upper()
+        automated_claude_input_budget = int(os.environ.get(
+            "SLOPERATOR_AUTOMATED_CLAUDE_INPUT_BUDGET", "5000000"
+        ))
+        automated_claude_output_budget = int(os.environ.get(
+            "SLOPERATOR_AUTOMATED_CLAUDE_OUTPUT_BUDGET", "30000"
+        ))
+        if min(automated_claude_input_budget, automated_claude_output_budget) <= 0:
+            raise ConfigurationError("Automated Claude token budgets must be positive")
         database_path = Path(
             os.environ.get("SLOPERATOR_DATABASE_PATH", "data/sloperator.sqlite3")
         ).expanduser()
@@ -369,6 +379,8 @@ class Settings:
             port=port,
             log_level=log_level,
             database_path=database_path,
+            automated_claude_input_budget=automated_claude_input_budget,
+            automated_claude_output_budget=automated_claude_output_budget,
             backfill_limit=backfill_limit,
             sync_interval_seconds=sync_interval_seconds,
             agent_workspace=agent_workspace,

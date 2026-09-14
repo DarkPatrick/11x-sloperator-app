@@ -23,6 +23,13 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.artifacts import artifact_fingerprint
 from sloperator.automated_session_policy import slack_worker_prompt
+from sloperator.claude_budget import (
+    ClaudeBudgetExceeded,
+    ClaudeQuotaExceeded,
+    TranscriptBudget,
+    quota_exhausted,
+    transcript_directory,
+)
 from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
 from sloperator.config import Settings
 from sloperator.jira_agent_policy import policy_for_job
@@ -481,6 +488,7 @@ class ActiveAgentRun:
         self.codex: CodexAppServer | None = None
         self._claude_steering: list[str] = []
         self._lock = asyncio.Lock()
+        self.enforce_claude_budget = False
 
     async def steer(self, text: str) -> bool:
         """Steer Codex natively or interrupt Claude for an immediate resume."""
@@ -800,15 +808,31 @@ async def run_claude(
     else:
         command.extend(("--resume", session_id))
         effective_prompt = prompt
+    if control is not None and control.enforce_claude_budget:
+        effective_prompt += (
+            "\nAUTOMATED SESSION SPENDING LIMIT: This session, including child agents and "
+            f"resumes, is capped at {settings.automated_claude_output_budget} generated tokens "
+            f"and {settings.automated_claude_input_budget} cumulative input tokens (including "
+            "cached context). Save useful findings early. Keep tool output small, avoid repeated "
+            "polling, and use at most one report-review round. Prioritize the requested finding "
+            "over report formatting. The runtime will stop the process when the cap is reached."
+        )
     command.append(effective_prompt)
 
-    return_code, stdout, stderr = await _run_process(
-        _with_workspace_lock(settings, command),
-        cwd=str(settings.agent_workspace),
-        timeout_seconds=settings.agent_timeout_seconds,
-        control=control,
-        environment_overrides=environment_overrides,
+    operation = partial(
+        _run_process, _with_workspace_lock(settings, command),
+        cwd=str(settings.agent_workspace), timeout_seconds=settings.agent_timeout_seconds,
+        control=control, environment_overrides=environment_overrides,
     )
+    if control is not None and control.enforce_claude_budget:
+        budget = TranscriptBudget(
+            transcript_directory(settings.agent_workspace), session_id,
+            input_limit=settings.automated_claude_input_budget,
+            output_limit=settings.automated_claude_output_budget,
+        )
+        return_code, stdout, stderr = await budget.run(operation)
+    else:
+        return_code, stdout, stderr = await operation()
     diagnostic = f"{stdout}\n{stderr}"
     if is_authentication_failure(diagnostic):
         raise AgentAuthenticationError("claude", _tail(diagnostic))
@@ -819,6 +843,8 @@ async def run_claude(
             f"Claude returned invalid JSON; stderr={_tail(stderr)!r}"
         ) from error
     if return_code != 0 or payload.get("is_error"):
+        if quota_exhausted(diagnostic):
+            raise ClaudeQuotaExceeded("Claude usage limit reached; automatic retries stopped")
         raise AgentExecutionError(
             f"Claude failed with exit code {return_code}; stderr={_tail(stderr)!r}"
         )
@@ -1900,6 +1926,7 @@ class AgentOrchestrator:
                 # addressed to the agent. Steering it would replace that safety gate with the
                 # generic continuation prompt. Queue later messages as independent gated turns.
                 control = ActiveAgentRun(session.provider, steerable=not optional_reply)
+                control.enforce_claude_budget = automated and session.provider == "claude"
                 self._active_runs[key] = control
                 environment_overrides = {
                     **(
@@ -2196,6 +2223,18 @@ class AgentOrchestrator:
         except ValueError as error:
             await self._reply(client, channel_id, thread_ts, str(error))
             request_status = "rejected"
+        except (ClaudeBudgetExceeded, ClaudeQuotaExceeded) as error:
+            await asyncio.to_thread(
+                self.store.fail_agent_turn, channel_id, thread_ts, str(error),
+            )
+            LOGGER.warning("Stopped Claude Slack thread %s: %s", thread_ts, error)
+            notice = (
+                "Расследование остановлено: достигнут установленный бюджет расхода. "
+                "Работа не завершена; созданные файлы сохранены. Автоповторов не будет."
+                if isinstance(error, ClaudeBudgetExceeded)
+                else "Работа остановлена: исчерпан лимит Claude. Автоповторы прекращены."
+            )
+            await self._reply(client, channel_id, thread_ts, notice)
         except AgentAuthenticationError as error:
             await asyncio.to_thread(
                 self.store.fail_agent_turn,

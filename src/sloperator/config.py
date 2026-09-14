@@ -123,10 +123,10 @@ class Settings:
         host = os.environ.get("SLOPERATOR_HOST", "127.0.0.1").strip()
         log_level = os.environ.get("SLOPERATOR_LOG_LEVEL", "INFO").strip().upper()
         automated_claude_input_budget = int(os.environ.get(
-            "SLOPERATOR_AUTOMATED_CLAUDE_INPUT_BUDGET", "5000000"
+            "SLOPERATOR_AUTOMATED_CLAUDE_INPUT_BUDGET", "30000000"
         ))
         automated_claude_output_budget = int(os.environ.get(
-            "SLOPERATOR_AUTOMATED_CLAUDE_OUTPUT_BUDGET", "30000"
+            "SLOPERATOR_AUTOMATED_CLAUDE_OUTPUT_BUDGET", "100000"
         ))
         if min(automated_claude_input_budget, automated_claude_output_budget) <= 0:
             raise ConfigurationError("Automated Claude token budgets must be positive")

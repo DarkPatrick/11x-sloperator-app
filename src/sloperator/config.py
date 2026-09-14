@@ -73,6 +73,7 @@ class Settings:
     experiment_analytics_hour: int = 16
     experiment_analytics_timeout_seconds: int = 7_200
     experiment_analytics_channel: str = "C07A9FDQ14P"
+    automation_alert_channel: str = ""
     jira_task_automation_enabled: bool = True
     jira_url: str = "https://mu--se.atlassian.net"
     jira_username: str | None = None
@@ -183,6 +184,7 @@ class Settings:
         experiment_analytics_channel = os.environ.get(
             "EXPERIMENT_ANALYTICS_CHANNEL", "C07A9FDQ14P"
         ).strip()
+        automation_alert_channel = os.environ.get("AUTOMATION_ALERT_CHANNEL", "").strip()
         jira_task_automation_enabled = os.environ.get(
             "JIRA_TASK_AUTOMATION_ENABLED", "true"
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -325,6 +327,8 @@ class Settings:
             ) from error
         if not experiment_analytics_channel.startswith("C"):
             raise ConfigurationError("EXPERIMENT_ANALYTICS_CHANNEL must be a Slack channel ID")
+        if automation_alert_channel and not automation_alert_channel.startswith("C"):
+            raise ConfigurationError("AUTOMATION_ALERT_CHANNEL must be a Slack channel ID")
         if not jira_url.startswith("https://"):
             raise ConfigurationError("JIRA_URL must be an HTTPS URL")
         if bool(jira_username) != bool(jira_api_token):
@@ -408,6 +412,7 @@ class Settings:
             experiment_analytics_hour=experiment_analytics_hour,
             experiment_analytics_timeout_seconds=experiment_analytics_timeout_seconds,
             experiment_analytics_channel=experiment_analytics_channel,
+            automation_alert_channel=automation_alert_channel,
             jira_task_automation_enabled=jira_task_automation_enabled,
             jira_url=jira_url,
             jira_username=jira_username,

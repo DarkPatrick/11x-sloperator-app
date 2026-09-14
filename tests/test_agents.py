@@ -19,6 +19,7 @@ from sloperator.agents import (
     ActiveAgentRun,
     AgentAuthenticationError,
     AgentExecutionError,
+    AgentInfrastructureError,
     AgentOrchestrator,
     AgentRunResult,
     AgentTimeoutError,
@@ -28,6 +29,7 @@ from sloperator.agents import (
     fetch_thread_context,
     has_required_deliverable,
     is_authentication_failure,
+    is_infrastructure_failure,
     is_reply_path_guard_correction,
     optional_reply_instruction,
     parse_agent_request,
@@ -250,6 +252,16 @@ async def test_agent_service_errors_retry_with_progressive_backoff(
     assert result == "completed"
     assert operation.await_count == 3
     assert [call.args[0] for call in sleep.await_args_list] == [15, 30]
+
+
+async def test_infrastructure_failure_is_not_retried() -> None:
+    operation = AsyncMock(side_effect=AgentInfrastructureError("HTTP 503 Redash"))
+
+    with pytest.raises(AgentInfrastructureError):
+        await retry_agent_service_errors(operation, context="test turn", delays=(0, 0))
+
+    assert operation.await_count == 1
+    assert is_infrastructure_failure("clickhouse connection refused")
 
 
 async def test_agent_service_error_is_raised_only_after_all_retries(

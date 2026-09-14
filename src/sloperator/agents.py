@@ -90,6 +90,14 @@ TIMEOUT_RECOVERY_FAILURE_NOTICE = f"""\
 Агент не успел оформить частичный отчёт за дополнительное время. Уже собранные материалы и сессия
 сохранены; работу можно продолжить сообщением в этом треде.
 """
+AUTOMATED_INFRASTRUCTURE_POLICY = """\
+AUTOMATED DEPENDENCY FAILURE POLICY (STRICT):
+- If ClickHouse, clickhouse-worker, Metabase, Redash, Confluence, Jira, Slack, or any HTTP/API
+  dependency is unavailable, returns a network/DNS/connection timeout, or returns HTTP 4xx/5xx,
+  stop the task immediately. Do not retry the same command or poll the same request in a loop.
+- Return exactly one concise line beginning with `SLOPERATOR_INFRA_PAUSED:` followed by the
+  dependency, status/error, and a safe retry-after hint. Do not continue analysis or publication.
+"""
 RESTART_RECOVERY_PROMPT = """\
 The Sloperator service restarted while this automated turn was running. Resume the same task from
 the existing session and workspace state. Inspect what has already completed, avoid repeating
@@ -158,6 +166,10 @@ class AgentExecutionError(RuntimeError):
     """Raised when an agent CLI turn cannot complete successfully."""
 
 
+class AgentInfrastructureError(AgentExecutionError):
+    """Raised for a dependency outage that must not be retried by the agent."""
+
+
 class AgentTimeoutError(AgentExecutionError):
     """Raised when an agent turn reaches its configured work-time limit."""
 
@@ -184,7 +196,7 @@ async def retry_agent_service_errors[AgentResult](
     for retry_number, delay in enumerate(delays, start=1):
         try:
             return await operation()
-        except (AgentTimeoutError, AgentAuthenticationError):
+        except (AgentTimeoutError, AgentAuthenticationError, AgentInfrastructureError):
             raise
         except AgentExecutionError as error:
             LOGGER.warning(
@@ -747,12 +759,31 @@ AUTH_FAILURE_MARKERS = (
     "401 unauthorized",
     "invalid authentication credentials",
 )
+INFRASTRUCTURE_FAILURE_MARKERS = (
+    "clickhouse", "metabase", "redash", "confluence", "jira", "connection refused",
+    "connection reset", "timed out", "timeout", "dns", "http 4", "http 5",
+    "502 bad gateway", "503 service unavailable", "504 gateway timeout",
+)
 
 
 def is_authentication_failure(detail: str) -> bool:
     """Recognize provider credential failures that must never be retried."""
     normalized = detail.casefold()
     return any(marker in normalized for marker in AUTH_FAILURE_MARKERS)
+
+
+def is_infrastructure_failure(detail: str) -> bool:
+    normalized = detail.casefold()
+    return any(marker in normalized for marker in INFRASTRUCTURE_FAILURE_MARKERS)
+
+
+def infrastructure_failure_notice(detail: str, owner_user_id: str) -> str:
+    """Build a concise operator alert for a paused automated job."""
+    return (
+        f"<@{owner_user_id}> ⚠️ Автоматическая задача временно остановлена из-за недоступной "
+        f"зависимости: {_tail(detail, 500)}. Повторных попыток не будет; после восстановления "
+        "сервис запустится по следующему расписанию."
+    )
 
 
 def authentication_failure_notice(provider: str, owner_user_id: str) -> str:
@@ -817,6 +848,7 @@ async def run_claude(
             "polling, and use at most one report-review round. Prioritize the requested finding "
             "over report formatting. The runtime will stop the process when the cap is reached."
         )
+        effective_prompt += "\n\n" + AUTOMATED_INFRASTRUCTURE_POLICY
     command.append(effective_prompt)
 
     operation = partial(
@@ -839,12 +871,20 @@ async def run_claude(
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as error:
+        if is_infrastructure_failure(diagnostic):
+            raise AgentInfrastructureError(
+                f"Claude dependency failure: {_tail(diagnostic)}"
+            ) from error
         raise AgentExecutionError(
             f"Claude returned invalid JSON; stderr={_tail(stderr)!r}"
         ) from error
     if return_code != 0 or payload.get("is_error"):
         if quota_exhausted(diagnostic):
             raise ClaudeQuotaExceeded("Claude usage limit reached; automatic retries stopped")
+        if is_infrastructure_failure(diagnostic):
+            raise AgentInfrastructureError(
+                f"Claude dependency failure (exit {return_code}): {_tail(diagnostic)}"
+            )
         raise AgentExecutionError(
             f"Claude failed with exit code {return_code}; stderr={_tail(stderr)!r}"
         )
@@ -852,6 +892,8 @@ async def run_claude(
     result_session_id = payload.get("session_id")
     if not isinstance(result_text, str) or not isinstance(result_session_id, str):
         raise AgentExecutionError("Claude response is missing result or session_id")
+    if result_text.lstrip().startswith("SLOPERATOR_INFRA_PAUSED:"):
+        raise AgentInfrastructureError(result_text.strip())
     return AgentRunResult(session_id=result_session_id, text=result_text)
 
 
@@ -894,6 +936,8 @@ async def run_codex(
     except CodexAppServerError as error:
         if is_authentication_failure(str(error)):
             raise AgentAuthenticationError("codex", str(error)) from error
+        if is_infrastructure_failure(str(error)):
+            raise AgentInfrastructureError(str(error)) from error
         raise AgentExecutionError("Codex agent service request failed") from error
     finally:
         control.codex = None
@@ -941,6 +985,21 @@ class AgentOrchestrator:
                 provider,
                 self.settings.slack_user_id,
             ),
+        )
+
+    async def _notify_owner_infrastructure_failure(self, detail: str) -> None:
+        """DM the owner once when an automated job pauses on a dependency outage."""
+        client = self._notification_client
+        if client is None:
+            LOGGER.error("Cannot send infrastructure alert: Slack client is not configured")
+            return
+        channel = self.settings.automation_alert_channel
+        if not channel:
+            conversation = await client.conversations_open(users=self.settings.slack_user_id)
+            channel = conversation["channel"]["id"]
+        await client.chat_postMessage(
+            channel=channel,
+            text=infrastructure_failure_notice(detail, self.settings.slack_user_id),
         )
 
     def headless_sessions(self) -> list[dict[str, object]]:
@@ -1377,6 +1436,14 @@ class AgentOrchestrator:
                 last_error=repr(error),
             )
             await self._notify_owner_auth_failure(error.provider)
+            raise
+        except AgentInfrastructureError as error:
+            self._headless_sessions[key].update(status="paused", last_error=str(error))
+            await asyncio.to_thread(
+                self.store.finish_scheduled_agent_run,
+                run_id, status="paused", last_error=str(error),
+            )
+            await self._notify_owner_infrastructure_failure(str(error))
             raise
         except Exception as error:
             self._headless_sessions[key].update(
@@ -2249,6 +2316,12 @@ class AgentOrchestrator:
                 else "Работа остановлена: исчерпан лимит Claude. Автоповторы прекращены."
             )
             await self._reply(client, channel_id, thread_ts, notice)
+        except AgentInfrastructureError as error:
+            await asyncio.to_thread(
+                self.store.fail_agent_turn, channel_id, thread_ts, str(error),
+            )
+            LOGGER.warning("Stopped agent thread %s on dependency failure", thread_ts)
+            await self._reply(client, channel_id, thread_ts, infrastructure_failure_notice(str(error), self.settings.slack_user_id))
         except AgentAuthenticationError as error:
             await asyncio.to_thread(
                 self.store.fail_agent_turn,

@@ -1530,6 +1530,20 @@ class AgentOrchestrator:
                 result = await self._run_with_retries(
                     resume_provider, context=f"recovered scheduled turn {run_id}"
                 )
+            except (ClaudeBudgetExceeded, ClaudeQuotaExceeded) as error:
+                LOGGER.warning("Stopped recovered scheduled turn %s: %s", run_id, error)
+                await asyncio.to_thread(
+                    self.store.finish_scheduled_agent_run,
+                    run_id,
+                    status="failed",
+                    external_session_id=session.external_session_id,
+                    result_text=None,
+                    last_error=str(error),
+                )
+                self._active_runs.pop(key, None)
+                self._headless_tasks.pop(key, None)
+                self._headless_sessions.pop(key, None)
+                continue
             except AgentExecutionError as error:
                 LOGGER.error(
                     "Circuit breaker stopped recovered scheduled turn %s after retry budget: %s",

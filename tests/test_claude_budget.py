@@ -140,6 +140,25 @@ async def test_run_claude_enforces_budget_before_launch(tmp_path, monkeypatch):
     process.assert_not_awaited()
 
 
+async def test_quota_stop_during_startup_does_not_crash_service(tmp_path, monkeypatch):
+    settings = Settings(
+        slack_user_id="U123", bot_token="test", app_token="test", agent_workspace=tmp_path
+    )
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    store.create_scheduled_agent_run(
+        "old", "experiment-config-check", "claude", "opus", "session", "Original request"
+    )
+    store.finish_scheduled_agent_run("old", status="interrupted")
+    runner = AsyncMock(side_effect=ClaudeQuotaExceeded("quota"))
+    monkeypatch.setattr("sloperator.agents.run_claude", runner)
+    orchestrator = AgentOrchestrator(settings, store)
+    assert await orchestrator.resume_interrupted_headless(60) == []
+    assert store.list_interrupted_scheduled_agent_runs() == []
+    assert orchestrator.active_keys() == set()
+    runner.assert_awaited_once()
+
+
 @pytest.mark.parametrize("error", [ClaudeBudgetExceeded("budget"), ClaudeQuotaExceeded("quota")])
 async def test_automated_slack_stop_is_terminal_and_explained(tmp_path, monkeypatch, error):
     settings = Settings(

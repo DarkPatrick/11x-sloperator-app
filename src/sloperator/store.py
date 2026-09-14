@@ -694,6 +694,48 @@ class EventStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def sync_completed_planner_tasks(self) -> int:
+        """Enroll past and future successful planner tasks once, without resetting ownership."""
+        from sloperator.planner_task_tracking import completed_task
+
+        enrolled = 0
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            runs = connection.execute(
+                """
+                SELECT * FROM scheduled_agent_runs
+                WHERE status = 'completed' AND external_session_id IS NOT NULL
+                  AND job_name IN ('experiment-design-reviewer',
+                                   'experiment-analytics-reviewer',
+                                   'experiment-finalizer-reviewer')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM metadata
+                    WHERE key = 'planner-task-tracked:' || scheduled_agent_runs.run_id
+                  )
+                ORDER BY datetime(updated_at) DESC
+                """
+            ).fetchall()
+            for run in runs:
+                task_key = completed_task(
+                    run['job_name'], run['result_text'] or '', run['prompt']
+                )
+                if task_key:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO jira_task_agent_links(
+                            task_key, reviewer_session_id, phase, last_jira_updated_at
+                        ) VALUES (?, ?, 'reviewer', ?)
+                        """,
+                        (task_key, run['external_session_id'],
+                         run['updated_at'].replace(' ', 'T') + '+00:00'),
+                    )
+                    enrolled += cursor.rowcount
+                connection.execute(
+                    "INSERT OR IGNORE INTO metadata(key, value) VALUES (?, '1')",
+                    ('planner-task-tracked:' + run['run_id'],),
+                )
+        return enrolled
+
     def active_jira_task_agent_links(self) -> list[dict[str, Any]]:
         with self._connect() as connection:
             connection.row_factory = sqlite3.Row

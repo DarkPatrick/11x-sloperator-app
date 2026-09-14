@@ -93,10 +93,12 @@ def is_reserved_experiment_task(summary: str) -> bool:
 
 def _adf_text(value: Any) -> str:
     if isinstance(value, dict):
+        if value.get("type") == "text":
+            return str(value.get("text", ""))
         return " ".join(filter(None, [_adf_text(item) for item in value.get("content", [])]))
     if isinstance(value, list):
         return " ".join(filter(None, [_adf_text(item) for item in value]))
-    return str(value.get("text", "")) if isinstance(value, dict) else ""
+    return ""
 
 
 def confluence_destination(summary: str) -> tuple[str, str | None]:
@@ -295,6 +297,9 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
         LOGGER.info("Starting ten-minute Jira task activity poll")
         reader = JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
         try:
+            enrolled = agent.store.sync_completed_planner_tasks()
+            if enrolled:
+                LOGGER.info("Enrolled %d completed planner task(s) for activity tracking", enrolled)
             agent.store.cleanup_jira_task_agent_links()
             usage = await read_usage_or_alert(settings, on_usage_error)
             if usage is None:
@@ -307,8 +312,6 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     task = await reader.task_snapshot(str(link["task_key"]))
                     if task.status == "Done":
                         agent.store.upsert_jira_task_agent_link(task.key, phase="done", terminal_at=dt.datetime.now(dt.UTC).isoformat())
-                        continue
-                    if is_reserved_experiment_task(task.summary):
                         continue
                     comments = await reader.recent_comments(task.key)
                     returned_to_work = await reader.was_returned_to_work(task.key, since=link.get("last_jira_updated_at"))
@@ -344,7 +347,13 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                         link = agent.store.jira_task_agent_link(task.key)
                         worker = await agent.execute_once(
                             worker_prompt(task.key, task.summary, task.description)
-                            + "\nThe task was returned to the queue. Read its newest comment and perform the requested follow-up.",
+                            + "\nThis is a follow-up on an existing deliverable, including tasks "
+                            "originally completed by a specialized experiment planner. Read the "
+                            "complete Jira description and newest comments, locate the existing "
+                            "project page and exact iteration, and update that deliverable in place. "
+                            "Preserve its structure and scope. Do not create a replacement page. "
+                            "If the requested correction is unclear, return the missing clarification "
+                            "to the reviewer. Existing page: " + page_context,
                             7200,
                             job_name="jira-task-worker",
                             existing_session_id=link.get("worker_session_id"),
@@ -471,7 +480,7 @@ class JiraTaskReader:
                 if response.status >= 400:
                     raise RuntimeError(f"Jira comment read failed with HTTP {response.status}")
                 payload: dict[str, Any] = json.loads(await response.text())
-        return [item for item in payload.get("comments", []) if isinstance(item, dict)]
+        return list(reversed([item for item in payload.get("comments", []) if isinstance(item, dict)]))
 
     async def was_returned_to_work(self, task_key: str, since: str | None = None) -> bool:
         async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
@@ -484,7 +493,9 @@ class JiraTaskReader:
                 payload: dict[str, Any] = json.loads(await response.text())
         histories = payload.get("changelog", {}).get("histories", [])
         for history in reversed(histories):
-            if since and str(history.get("created", "")) <= since:
+            if since and dt.datetime.fromisoformat(
+                str(history["created"]).replace("Z", "+00:00")
+            ) <= dt.datetime.fromisoformat(since):
                 continue
             for item in history.get("items", []):
                 if item.get("field") == "status":

@@ -105,7 +105,11 @@ in-process guard suppresses concurrent delivery retries.
 When `subscription_flow_monitor.py` posts a `SERIOUS` alert, Sloperator starts a Claude
 investigation in the alert thread with the exact detector output and an explanation of its
 upstream/downstream baseline model. The agent runs in `/home/egor/projects/ug-ai-analyst`, uses
-the `time-series-research` skill, and replies with an evidence-backed likely cause and action.
+the known-incident check before `time-series-research`, and replies with an evidence-backed
+likely cause and action. New platform components from one alert are claimed atomically and
+combined into one investigation and one shared answer (at most 120 words). Incident deduplication
+and recovery remain per platform; already active components are context only. Missing measurements
+and expected baseline volumes must not be presented as measured lost purchases.
 The same trusted-user thread continuation and no-channel-status rules apply.
 
 ## Mobile health critical-drop investigations

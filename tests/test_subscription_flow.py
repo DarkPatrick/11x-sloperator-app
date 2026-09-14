@@ -178,7 +178,7 @@ async def test_concurrent_live_and_history_delivery_launches_one_agent(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_multi_platform_alert_launches_separate_agents(tmp_path) -> None:
+async def test_multi_platform_alert_launches_one_agent_concurrently(tmp_path) -> None:
     settings = Settings(
         slack_user_id="UOWNER",
         bot_token="xoxb-test",
@@ -190,7 +190,7 @@ async def test_multi_platform_alert_launches_separate_agents(tmp_path) -> None:
     client = SimpleNamespace(auth_test=AsyncMock(return_value={"user_id": "USELF"}))
     responder = SubscriptionFlowResponder(settings, store, agent)
     text = (
-        _serious_alert("Android iOS recurring charges", "Android")
+        _serious_alert("Android iOS Web recurring charges", "Android")
         + """
 *iOS* — diagnosis
     • Upstream — source: *0* vs baseline *100* → *0% of normal* :red_circle:
@@ -199,23 +199,36 @@ async def test_multi_platform_alert_launches_separate_agents(tmp_path) -> None:
 """
     )
 
-    await responder.handle(
-        {
-            "channel": settings.subscription_flow_alert_channel,
-            "user": "USELF",
-            "bot_id": "BSELF",
-            "ts": "100.1",
-            "text": text,
-        },
-        client,
-    )
-
-    assert agent.submit.await_count == 2
-    message_ids = {call.kwargs["message_ts"] for call in agent.submit.await_args_list}
-    assert message_ids == {
-        "100.1:subscription-flow-analysis:android:recurring",
-        "100.1:subscription-flow-analysis:ios:recurring",
+    text += _serious_alert("Web recurring charges", "Web").split("\n\n", 1)[1]
+    event = {
+        "channel": settings.subscription_flow_alert_channel,
+        "user": "USELF",
+        "bot_id": "BSELF",
+        "ts": "100.1",
+        "text": text,
     }
+    await asyncio.gather(responder.handle(event, client), responder.handle(event, client))
+    agent.submit.assert_awaited_once()
+    call = agent.submit.await_args.kwargs
+    assert call["message_ts"] == "100.1:subscription-flow-analysis"
+    assert "Affected components: android:recurring, ios:recurring, web:recurring" in call["text"]
+
+    # A repeated combined alert stays quiet; closing one platform rearms only it.
+    await responder.handle({**event, "ts": "101.1"}, client)
+    assert agent.submit.await_count == 1
+    await responder.handle({
+        **event, "ts": "102.1", "thread_ts": "101.1",
+        "text": ":white_check_mark: *Recovered — iOS recurring charges*",
+    }, client)
+    await responder.handle({**event, "ts": "103.1"}, client)
+    assert agent.submit.await_count == 2
+    assert "Affected components: ios:recurring\n" in agent.submit.await_args.kwargs["text"]
+
+    # A new signature on the other platform is still eligible.
+    changed = text.replace("our ingestion is healthy", "our ingestion is stalled", 1)
+    await responder.handle({**event, "ts": "104.1", "text": changed}, client)
+    assert agent.submit.await_count == 3
+    assert "Affected components: android:recurring\n" in agent.submit.await_args.kwargs["text"]
 
 
 @pytest.mark.asyncio

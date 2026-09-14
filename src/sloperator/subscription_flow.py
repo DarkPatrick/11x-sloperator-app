@@ -160,7 +160,8 @@ def build_subscription_flow_agent_prompt(incident: SubscriptionFlowIncident) -> 
     """Give the analyst the detector semantics plus the exact alert that fired."""
     components = ", ".join(sorted(incident.components))
     return f"""\
-Use the `time-series-research` skill to investigate this SERIOUS UG subscription-flow alert.
+First apply the repository known-incident check. Only if deeper investigation is needed,
+use the `time-series-research` skill for this SERIOUS UG subscription-flow alert.
 Work from `/home/egor/projects/ug-ai-analyst`, follow CLAUDE.md and its freshness preflight,
 and use the repository's analytics context and data tools.
 
@@ -188,6 +189,9 @@ Detector context:
   dip rather than a delivery lag. Both replies close the affected component.
 
 Affected components: {components}
+These are the newly claimed components to investigate together in ONE run and ONE shared
+answer. Other components in the original alert are context only: their incident is already
+being handled. Do not publish separate platform reports or repeat their earlier diagnosis.
 
 Exact Slack alert:
 --- begin alert ---
@@ -199,6 +203,18 @@ ingestion lag, relevant recent changes, and whether business volumes actually mo
 this Slack thread with a concise evidence-backed diagnosis, confidence, impact, and recommended
 next action. If it is likely a delayed replica/proxy or a transient one-off, say so plainly.
 Do not merely paraphrase the detector's built-in diagnosis.
+
+Return one answer of at most 120 words, covering all newly affected components together.
+Lead with what happened and why, then impact, confidence, and one concrete next action.
+For a known incident, include the latest relevant Slack permalink and stop without a report.
+Keep internal skill/context bookkeeping out of the Slack-facing answer. Do not post directly
+with Slack tools: return the answer for Sloperator to deliver once.
+Distinguish missing measurements from lost purchases. Baselines are expectations, not measured
+lost sales. A shared outage does not prove that receivers, cron, pricing or releases are healthy;
+never say "nothing is broken" or rule out other causes without evidence. Do not claim simultaneous
+provider failures are impossible, or that backlog replay is guaranteed. Mark uncertain causality
+as likely and state what remains unknown. Do not recommend muting the detector or changing
+alert delivery unless explicitly requested.
 """
 
 
@@ -244,29 +260,33 @@ class SubscriptionFlowResponder:
             LOGGER.warning("Could not parse SERIOUS subscription-flow alert %s", message_ts)
             return
         channel = self.settings.subscription_flow_alert_channel
-        for incident in incidents:
-            should_launch = await asyncio.to_thread(
-                self.store.claim_subscription_flow_incident,
-                incident.nature_key,
-                set(incident.components),
-                message_ts,
-            )
-            if not should_launch:
-                LOGGER.info(
-                    "Suppressing repeated subscription-flow incident nature %s",
-                    incident.nature_key[:12],
-                )
-                continue
-            component = next(iter(incident.components))
-            await self.agent.submit(
-                client,
-                channel_id=channel,
-                message_ts=(f"{message_ts}:subscription-flow-analysis:{component}"),
-                thread_ts=message_ts,
-                text=build_subscription_flow_agent_prompt(incident),
-                show_status=False,
-                automated=True,
-            )
+        claimed = await asyncio.to_thread(
+            self.store.claim_subscription_flow_incidents,
+            [(incident.nature_key, set(incident.components)) for incident in incidents],
+            message_ts,
+        )
+        if not claimed:
+            LOGGER.info("Suppressing repeated subscription-flow alert %s", message_ts)
+            return
+        components = frozenset(
+            component
+            for incident in incidents if incident.nature_key in claimed
+            for component in incident.components
+        )
+        combined = SubscriptionFlowIncident(
+            hashlib.sha256(":".join(sorted(claimed)).encode()).hexdigest(),
+            components,
+            text,
+        )
+        await self.agent.submit(
+            client,
+            channel_id=channel,
+            message_ts=f"{message_ts}:subscription-flow-analysis",
+            thread_ts=message_ts,
+            text=build_subscription_flow_agent_prompt(combined),
+            show_status=False,
+            automated=True,
+        )
 
     async def _is_own_bot(
         self,

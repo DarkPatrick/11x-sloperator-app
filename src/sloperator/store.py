@@ -994,64 +994,78 @@ class EventStore:
         alert_ts: str,
     ) -> bool:
         """Open or extend an incident; return true only when Claude should be launched."""
-        if not nature_key or not components:
+        return nature_key in self.claim_subscription_flow_incidents(
+            [(nature_key, components)], alert_ts
+        )
+
+    def claim_subscription_flow_incidents(
+        self,
+        incidents: Sequence[tuple[str, set[str]]],
+        alert_ts: str,
+    ) -> set[str]:
+        """Claim all new platform natures atomically for one combined investigation."""
+        if any(not key or not components for key, components in incidents):
             raise ValueError("Subscription-flow incidents need a nature and components")
+        claimed: set[str] = set()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """
-                SELECT active, components_json
-                FROM subscription_flow_incidents
-                WHERE nature_key = ?
-                """,
-                (nature_key,),
-            ).fetchone()
-            if row is None:
-                component_alerts = {component: alert_ts for component in sorted(components)}
-                connection.execute(
+            for nature_key, components in incidents:
+                row = connection.execute(
                     """
-                    INSERT INTO subscription_flow_incidents(
-                        nature_key, active, components_json, first_alert_ts, last_alert_ts
-                    ) VALUES (?, 1, ?, ?, ?)
+                    SELECT active, components_json
+                    FROM subscription_flow_incidents
+                    WHERE nature_key = ?
                     """,
-                    (nature_key, _json(component_alerts), alert_ts, alert_ts),
+                    (nature_key,),
+                ).fetchone()
+                if row is None:
+                    component_alerts = {component: alert_ts for component in sorted(components)}
+                    connection.execute(
+                        """
+                        INSERT INTO subscription_flow_incidents(
+                            nature_key, active, components_json, first_alert_ts, last_alert_ts
+                        ) VALUES (?, 1, ?, ?, ?)
+                        """,
+                        (nature_key, _json(component_alerts), alert_ts, alert_ts),
+                    )
+                    claimed.add(nature_key)
+                    continue
+                active, raw_components = bool(row[0]), row[1]
+                decoded = json.loads(raw_components)
+                existing = (
+                    decoded
+                    if isinstance(decoded, dict)
+                    else {component: alert_ts for component in decoded}
                 )
-                return True
-            active, raw_components = bool(row[0]), row[1]
-            decoded = json.loads(raw_components)
-            existing = (
-                decoded
-                if isinstance(decoded, dict)
-                else {component: alert_ts for component in decoded}
-            )
-            merged = {**existing, **dict.fromkeys(sorted(components), alert_ts)}
-            if active:
+                merged = {**existing, **dict.fromkeys(sorted(components), alert_ts)}
+                if active:
+                    connection.execute(
+                        """
+                        UPDATE subscription_flow_incidents
+                        SET components_json = ?, last_alert_ts = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE nature_key = ?
+                        """,
+                        (_json(merged), alert_ts, nature_key),
+                    )
+                    continue
                 connection.execute(
                     """
                     UPDATE subscription_flow_incidents
-                    SET components_json = ?, last_alert_ts = ?,
+                    SET active = 1, components_json = ?, first_alert_ts = ?,
+                        last_alert_ts = ?, resolved_at = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE nature_key = ?
                     """,
-                    (_json(merged), alert_ts, nature_key),
+                    (
+                        _json({component: alert_ts for component in sorted(components)}),
+                        alert_ts,
+                        alert_ts,
+                        nature_key,
+                    ),
                 )
-                return False
-            connection.execute(
-                """
-                UPDATE subscription_flow_incidents
-                SET active = 1, components_json = ?, first_alert_ts = ?,
-                    last_alert_ts = ?, resolved_at = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE nature_key = ?
-                """,
-                (
-                    _json({component: alert_ts for component in sorted(components)}),
-                    alert_ts,
-                    alert_ts,
-                    nature_key,
-                ),
-            )
-        return True
+                claimed.add(nature_key)
+        return claimed
 
     def claim_anomaly_analyses(
         self,

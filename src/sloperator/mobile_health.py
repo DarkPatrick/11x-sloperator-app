@@ -15,6 +15,7 @@ from sloperator.anomaly_alerts import AgentSubmitter
 from sloperator.automated_session_policy import (
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
+    HEALTH_MONITOR_INCIDENT_HANDOFF,
 )
 from sloperator.config import Settings
 
@@ -139,6 +140,8 @@ analytics context and data tools.
 
 {AUTOMATED_RESPONSE_STYLE}
 
+{HEALTH_MONITOR_INCIDENT_HANDOFF}
+
 {recent_analysis_reuse_policy(
     channel_id,
     "platform + metric/card",
@@ -164,7 +167,8 @@ datamart/raw-source workflow to determine whether the movement is a real product
 a segment or composition shift, an experiment/release effect, or a freshness/pipeline artifact.
 Look for a shared cause when several metrics move together; do not force one if evidence differs.
 
-When no reusable analysis exists, do the full investigation and separate the detailed deliverable
+When no reusable analysis exists and incident/dependency triage permits data work, do the full
+investigation and separate the detailed deliverable
 from the Slack response:
 - Create a detailed self-contained HTML report with the evidence walkthrough, charts, diagnostic
   cuts, calculations, rejected hypotheses, limitations, and source links needed to audit the

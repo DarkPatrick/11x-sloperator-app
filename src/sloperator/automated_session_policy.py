@@ -48,6 +48,28 @@ AUTOMATED RESPONSE STYLE (AUTHOR-OWNED FINAL ANSWER, STRICT):
 """
 
 
+HEALTH_MONITOR_INCIDENT_HANDOFF = """\
+KNOWN INCIDENT / BLOCKED HEALTH REPORT:
+- Apply the repository's current incident triage and dependency stop rules before the full
+  investigation below. A matching known incident or unavailable dependency ends data work.
+- The deliverable requirement still applies: package a small evidence note as a ZIP in `output/`
+  and return `SLOPERATOR_ARTIFACT: <relative ZIP path>`. Use only evidence already collected:
+  selected alert values and measurement/comparison dates, incident links and evidence timestamps,
+  what is verified, what remains unknown, and the condition for resuming analysis. A plain text
+  note is sufficient; no HTML, charts, SQL, new queries, or review rounds are required in this case.
+  Packaging existing evidence is final handoff bookkeeping, not a new investigation.
+- For this case, replace the per-metric format below with one short incident summary after the
+  required mention line: what happened and why (or cause unknown), observed impact, confidence,
+  latest relevant source link, and next action. Group metrics only when their evidence supports
+  a common explanation. State honestly when further analysis is blocked.
+- Do not equate a detector's expected-minus-observed gap with proven lost users, revenue, or
+  missing records. An outage can cause both real business loss and incomplete reporting; do not
+  claim the split is known or that a flat week-over-week comparison rules out real harm.
+- State follow-up checks as recommendations or resume conditions, never as promises that you
+  will continue after this turn. Do not trigger infrastructure backfills or repairs.
+"""
+
+
 AUTOMATED_ATLASSIAN_IDENTITY = """\
 AUTOMATED ATLASSIAN IDENTITY (STRICT, applies to this autonomous workflow only):
 - Perform every Jira and Confluence operation in this workflow through the repository helpers and

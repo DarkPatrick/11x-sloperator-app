@@ -247,3 +247,8 @@ sudo cp deploy/sloperator.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sloperator
 ```
+
+## Operations log
+
+See [operations logging](docs/operations-log.md) for the dedicated Slack channel, full coverage
+matrix, independent collector service, durable delivery queue, and half-hour Claude usage.

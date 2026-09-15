@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sloperator.operations_store import install_schema as install_operations_schema
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
@@ -320,6 +322,7 @@ class EventStore:
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '5')"
             )
+            install_operations_schema(connection)
         os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:

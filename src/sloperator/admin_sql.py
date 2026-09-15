@@ -15,6 +15,7 @@ from sloperator.agents import (
     run_codex,
 )
 from sloperator.config import Settings
+from sloperator.operations_store import observed
 from sloperator.store import AgentSession, EventStore
 
 SQL_INITIAL_INSTRUCTION = """\
@@ -98,6 +99,7 @@ class AdminSqlManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._controls: dict[str, ActiveAgentRun] = {}
 
+    @observed("Admin SQL completion")
     async def complete(self, session_id: str, provider: str, sql: str) -> str:
         """Generate one SQL completion while preserving provider conversation context."""
         if provider not in {"claude", "codex"}:
@@ -162,6 +164,7 @@ class AdminSqlManager:
             state.turn_count += 1
             return _strip_markdown_fence(result.text)
 
+    @observed("Admin SQL execution")
     async def execute(self, sql: str) -> dict[str, Any]:
         """Run one bounded, read-only query through the analyst repository helper."""
         _validate_read_only_sql(sql)
@@ -199,6 +202,7 @@ class AdminSqlManager:
             raise RuntimeError("ClickHouse helper returned an invalid result")
         return result
 
+    @observed("Admin visualization")
     async def visualize(
         self,
         session_id: str,

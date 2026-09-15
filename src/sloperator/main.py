@@ -121,6 +121,7 @@ from sloperator.jira_task_automation import (
 from sloperator.jira_task_automation import (
     run_hourly as run_jira_task_automation,
 )
+from sloperator.operations_store import configure_operations
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
 from sloperator.scheduled_jobs import EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME
 from sloperator.store import EventStore
@@ -146,6 +147,7 @@ async def serve(settings: Settings) -> None:
     validate_agent_runtime(settings)
     store = EventStore(settings.database_path)
     await asyncio.to_thread(store.initialize)
+    configure_operations(settings.database_path)
     recovered = await asyncio.to_thread(store.recover_interrupted_agent_work)
     if recovered:
         LOGGER.warning("Recovered %d interrupted agent session(s)", recovered)

@@ -1,0 +1,36 @@
+[Unit]
+Description=Sloperator complete operations log and Claude usage reporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=egor
+Group=egor
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/home/egor/projects/11x-sloperator-app
+EnvironmentFile=/home/egor/projects/11x-sloperator-app/.env
+ExecStart=/home/egor/projects/11x-sloperator-app/.venv/bin/python -m sloperator.operations_log
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+# crontab uses its setgid helper to install this user's instrumented commands.
+# Do not enable NoNewPrivileges here; the bot service keeps its own sandbox.
+ProtectHome=read-only
+InaccessiblePaths=/home/egor/projects/11x-sloperator-app/.env
+ReadWritePaths=/home/egor/projects/11x-sloperator-app/data
+ReadWritePaths=/home/egor/.claude
+ReadWritePaths=/home/egor/.claude.json
+ReadWritePaths=-/home/egor/.cache
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

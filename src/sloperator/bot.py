@@ -21,6 +21,7 @@ from sloperator.experiment_config_check import (
     is_experiment_config_trigger,
 )
 from sloperator.mobile_health import MobileHealthResponder, is_mobile_health_trigger
+from sloperator.operations_slack import ObservedSlackClient, ObserveRequestClient
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
 from sloperator.store import EventStore
 from sloperator.subscription_flow import SubscriptionFlowResponder, is_subscription_flow_event
@@ -124,7 +125,8 @@ def create_app(
     automation_controls: AutomationControls | None = None,
 ) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
-    app = AsyncApp(token=settings.bot_token, process_before_response=True)
+    app = AsyncApp(client=ObservedSlackClient(token=settings.bot_token), process_before_response=True)
+    app.use(ObserveRequestClient().__call__)
     app.use(ArchiveMiddleware(store, app.client))
     anomaly_responder = AnomalyAlertResponder(settings, store, orchestrator)
     mobile_health_responder = MobileHealthResponder(settings, orchestrator)

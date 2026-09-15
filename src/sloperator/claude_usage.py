@@ -79,7 +79,13 @@ async def read_usage(cli: Path, *, model: str = "opus", cwd: Path = Path("/tmp")
         str(cli), "-p", "--model", model, "--output-format", "json", "/usage",
         cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+    except (TimeoutError, asyncio.CancelledError):
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        raise
     if process.returncode != 0:
         diagnostic = usage_diagnostic(stderr.decode(errors="replace"))
         error = ClaudeUsageError(

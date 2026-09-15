@@ -32,6 +32,7 @@ from sloperator.experiment_analytics_planner import review_prompt as analytics_r
 from sloperator.experiment_config_check import build_experiment_config_prompt
 from sloperator.experiment_design_planner import review_prompt
 from sloperator.mobile_health import MobileCriticalMetric, build_mobile_health_agent_prompt
+from sloperator.operations_cron import unwrap_command
 from sloperator.payment_layer import build_payment_layer_agent_prompt
 from sloperator.scheduled_jobs import (
     EMBEDDED_SCHEDULED_JOBS,
@@ -654,7 +655,7 @@ def _cron_jobs(crontab: str) -> list[dict[str, Any]]:
                 {
                     "name": current_name,
                     "schedule": " ".join(fields[:5]),
-                    "command": fields[5],
+                    "command": unwrap_command(fields[5]),
                     "enabled": enabled,
                 }
             )
@@ -915,7 +916,7 @@ def _label_cron_history(
     """Attach configured job names and launch status to CRON journal events."""
     labelled: list[dict[str, str]] = []
     for row in rows:
-        command = row["command"]
+        command = unwrap_command(row["command"])
         job = next(
             (
                 item["name"]

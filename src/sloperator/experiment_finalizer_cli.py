@@ -6,12 +6,12 @@ import argparse
 import asyncio
 from contextlib import suppress
 
-from slack_sdk.web.async_client import AsyncWebClient
-
 from sloperator.agents import AgentOrchestrator, validate_agent_runtime
 from sloperator.config import ConfigurationError, Settings
 from sloperator.experiment_finalizer import START_PROMPT, run_once
 from sloperator.main import configure_logging
+from sloperator.operations_slack import ObservedSlackClient
+from sloperator.operations_store import configure_operations
 from sloperator.store import EventStore
 from sloperator.vpn import VpnManager
 
@@ -21,9 +21,10 @@ async def launch(settings: Settings) -> None:
     validate_agent_runtime(settings)
     store = EventStore(settings.database_path)
     await asyncio.to_thread(store.initialize)
+    configure_operations(settings.database_path)
     vpn = VpnManager(settings)
     orchestrator = AgentOrchestrator(settings, store, vpn)
-    client = AsyncWebClient(token=settings.bot_token)
+    client = ObservedSlackClient(token=settings.bot_token)
     orchestrator.set_notification_client(client)
     try:
         await run_once(client, orchestrator, settings)

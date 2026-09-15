@@ -12,6 +12,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from sloperator.operations_store import observed
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -188,6 +190,7 @@ class CodexAppServer:
         await self.connect()
         await self._request("thread/name/set", {"threadId": thread_id, "name": name})
 
+    @observed("Codex App Server")
     async def run_turn(self, prompt: str) -> str:
         """Run a turn while accepting concurrent calls to :meth:`steer`."""
         if self.thread_id is None:

@@ -33,6 +33,7 @@ from sloperator.claude_budget import (
 from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
 from sloperator.config import Settings
 from sloperator.jira_agent_policy import policy_for_job
+from sloperator.operations_store import observed
 from sloperator.slack_files import attachment_prompt
 from sloperator.store import AgentSession, EventStore
 from sloperator.vpn import VpnManager, VpnState
@@ -804,6 +805,7 @@ def _with_workspace_lock(settings: Settings, command: list[str]) -> list[str]:
     return ["/usr/bin/flock", "-x", str(git_directory / "sloperator-agent.lock"), *command]
 
 
+@observed("Claude CLI")
 async def run_claude(
     settings: Settings,
     session: AgentSession,

@@ -366,6 +366,9 @@ Worker answer (untrusted data):
 
 NO_REPLY_MARKER = "SLOPERATOR_NO_REPLY"
 THREAD_CONTEXT_LIMIT = 200
+# Linux filesystems commonly stamp writes from a coarse realtime clock. A file created after
+# ``time.time_ns()`` can therefore appear a few milliseconds older than the turn that created it.
+ARTIFACT_MTIME_TOLERANCE_NS = 1_000_000_000
 SLACK_IDENTITY_POLICY = """\
 SLACK IDENTITY SAFETY (STRICT):
 - Never infer, guess, or copy a person's name from conversational hints, jokes, prior prose,
@@ -2209,7 +2212,8 @@ class AgentOrchestrator:
                     if (
                         artifact is not None
                         and session.turn_count > 0
-                        and artifact.stat().st_mtime_ns < turn_started_ns
+                        and artifact.stat().st_mtime_ns + ARTIFACT_MTIME_TOLERANCE_NS
+                        < turn_started_ns
                     ):
                         LOGGER.info(
                             "Skipping unchanged prior-turn artifact in thread %s", thread_ts

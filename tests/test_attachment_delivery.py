@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import zipfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -177,10 +178,38 @@ async def test_followup_only_attaches_current_turn_artifact(tmp_path, monkeypatc
         message_ts="1.2",
         text="Clarify the cause",
         show_status=False,
+        require_artifact=True,
     )
     await orchestrator.drain()
     assert client.files_upload_v2.await_count == int(update)
     client.chat_postMessage.assert_awaited_once()
+
+
+async def test_followup_accepts_new_artifact_with_coarse_filesystem_mtime(tmp_path, monkeypatch):
+    _, store, orchestrator = setup_orchestrator(tmp_path)
+    store.create_agent_session("CALERT", "1.1", "claude", "opus", "session-1")
+    store.finish_agent_turn("CALERT", "1.1", "session-1")
+    archive = tmp_path / "analysis.zip"
+
+    async def run(*args, **kwargs):
+        write_zip(archive, "Corrected evidence")
+        coarse_mtime_ns = time.time_ns() - 10_000_000
+        os.utime(archive, ns=(coarse_mtime_ns, coarse_mtime_ns))
+        return AgentRunResult("session-1", "Answer\nSLOPERATOR_ARTIFACT: analysis.zip")
+
+    monkeypatch.setattr("sloperator.agents.run_claude", run)
+    client = SimpleNamespace(chat_postMessage=AsyncMock(), files_upload_v2=AsyncMock())
+    await orchestrator.submit(
+        client,
+        channel_id="CALERT",
+        thread_ts="1.1",
+        message_ts="1.2",
+        text="Clarify the cause",
+        show_status=False,
+        require_artifact=True,
+    )
+    await orchestrator.drain()
+    client.files_upload_v2.assert_awaited_once()
 
 
 async def test_failed_upload_does_not_mark_archive_delivered(tmp_path):

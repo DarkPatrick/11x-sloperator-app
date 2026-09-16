@@ -6,11 +6,13 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from sloperator.agents import (
     ActiveAgentRun,
+    retry_claude_quota,
     run_claude,
     run_codex,
 )
@@ -138,14 +140,19 @@ class AdminSqlManager:
             )
             try:
                 if provider == "claude":
-                    result = await run_claude(
+                    result = await retry_claude_quota(
+                        partial(
+                            run_claude,
+                            self.settings,
+                            agent_session,
+                            prompt,
+                            control,
+                            environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
+                            initial_instruction="",
+                            command_options=("--safe-mode",),
+                        ),
                         self.settings,
-                        agent_session,
-                        prompt,
-                        control,
-                        environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
-                        initial_instruction="",
-                        command_options=("--safe-mode",),
+                        context=f"admin SQL session {session_id}",
                     )
                 else:
                     result = await run_codex(
@@ -233,14 +240,19 @@ class AdminSqlManager:
         control = ActiveAgentRun(provider)
         prompt = f"{VIZ_INSTRUCTION}{sql}\n\nColumns and top 20 sample rows:\n{sample}"
         if provider == "claude":
-            result = await run_claude(
+            result = await retry_claude_quota(
+                partial(
+                    run_claude,
+                    self.settings,
+                    agent_session,
+                    prompt,
+                    control,
+                    environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
+                    initial_instruction="",
+                    command_options=("--safe-mode",),
+                ),
                 self.settings,
-                agent_session,
-                prompt,
-                control,
-                environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
-                initial_instruction="",
-                command_options=("--safe-mode",),
+                context=f"admin SQL visualization {session_id}",
             )
         else:
             result = await run_codex(

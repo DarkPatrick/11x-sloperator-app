@@ -8,6 +8,7 @@ import pytest
 from sloperator.agents import (
     ActiveAgentRun,
     AgentOrchestrator,
+    AgentRunResult,
     retry_agent_service_errors,
     run_claude,
 )
@@ -83,7 +84,7 @@ async def test_spending_stops_are_never_retried(error):
     operation.assert_awaited_once()
 
 
-async def test_provider_quota_response_is_terminal(tmp_path, monkeypatch):
+async def test_provider_quota_response_is_detected(tmp_path, monkeypatch):
     settings = Settings(
         slack_user_id="U123", bot_token="test", app_token="test", agent_workspace=tmp_path
     )
@@ -150,16 +151,23 @@ async def test_quota_stop_during_startup_does_not_crash_service(tmp_path, monkey
         "old", "experiment-config-check", "claude", "opus", "session", "Original request"
     )
     store.finish_scheduled_agent_run("old", status="interrupted")
-    runner = AsyncMock(side_effect=ClaudeQuotaExceeded("quota"))
+    runner = AsyncMock(side_effect=[
+        ClaudeQuotaExceeded("quota"),
+        AgentRunResult(session_id="session", text="Recovered result"),
+    ])
     monkeypatch.setattr("sloperator.agents.run_claude", runner)
+    wait = AsyncMock()
+    monkeypatch.setattr("sloperator.agents.wait_for_claude_quota_reset", wait)
     orchestrator = AgentOrchestrator(settings, store)
-    assert await orchestrator.resume_interrupted_headless(60) == []
-    assert store.list_interrupted_scheduled_agent_runs() == []
+    recovered = await orchestrator.resume_interrupted_headless(60)
+    assert [run.text for run in recovered] == ["Recovered result"]
+    assert store.list_interrupted_scheduled_agent_runs()[0]["status"] == "recovered"
     assert orchestrator.active_keys() == set()
-    runner.assert_awaited_once()
+    assert runner.await_count == 2
+    wait.assert_awaited_once()
 
 
-@pytest.mark.parametrize("error", [ClaudeBudgetExceeded("budget"), ClaudeQuotaExceeded("quota")])
+@pytest.mark.parametrize("error", [ClaudeBudgetExceeded("budget")])
 async def test_automated_slack_stop_is_terminal_and_explained(tmp_path, monkeypatch, error):
     settings = Settings(
         slack_user_id="U123", bot_token="test", app_token="test", agent_workspace=tmp_path

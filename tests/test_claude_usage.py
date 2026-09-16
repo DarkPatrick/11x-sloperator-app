@@ -1,9 +1,17 @@
+import datetime as dt
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from sloperator.claude_usage import ClaudeUsageError, parse_usage, usage_diagnostic
+from sloperator.claude_usage import (
+    ClaudeUsage,
+    ClaudeUsageError,
+    parse_reset_at,
+    parse_usage,
+    quota_retry_at,
+    usage_diagnostic,
+)
 from sloperator.config import Settings
 from sloperator.jira_task_automation import ClaudeUsageAlert
 
@@ -16,6 +24,25 @@ def test_parse_usage_reports_remaining_percentages() -> None:
     assert usage.session_remaining_percent == 75
     assert usage.week_remaining_percent == 88
     assert usage.session_reset_text == "Sep 7, 5:40pm (UTC)"
+
+
+def test_quota_retry_waits_seven_minutes_after_latest_exhausted_reset() -> None:
+    now = dt.datetime(2026, 9, 16, 9, 0, tzinfo=dt.UTC)
+    usage = ClaudeUsage(100, 100, "Sep 16, 11:50am (UTC)", "Sep 18, 10pm (UTC)")
+
+    assert parse_reset_at(usage.session_reset_text, now=now) == dt.datetime(
+        2026, 9, 16, 11, 50, tzinfo=dt.UTC
+    )
+    assert quota_retry_at(usage, now=now) == dt.datetime(
+        2026, 9, 18, 22, 7, tzinfo=dt.UTC
+    )
+
+
+def test_quota_retry_uses_five_minute_floor_when_reset_already_passed() -> None:
+    now = dt.datetime(2026, 9, 16, 12, 0, tzinfo=dt.UTC)
+    usage = ClaudeUsage(100, 80, "Sep 16, 11:50am (UTC)", "Sep 18, 10pm (UTC)")
+
+    assert quota_retry_at(usage, now=now) == now + dt.timedelta(minutes=5)
 
 
 def test_parse_usage_allows_blank_lines_between_limits_and_100_percent() -> None:

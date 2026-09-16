@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from sloperator.claude_budget import (
     quota_exhausted,
     transcript_directory,
 )
+from sloperator.claude_usage import ClaudeUsageError, quota_retry_at, read_usage
 from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
 from sloperator.config import Settings
 from sloperator.jira_agent_policy import policy_for_job
@@ -55,6 +57,46 @@ CURRENT TURN ATTACHMENT POLICY (overrides earlier routine packaging instructions
 - If findings changed and a report is needed, update its conclusions and evidence before
   packaging it; do not attach the previous report to an answer that contradicts it.
 """
+
+
+async def wait_for_claude_quota_reset(settings: Settings, *, context: str) -> None:
+    """Wait until five-to-ten minutes after Claude's exhausted allowance resets."""
+    while True:
+        try:
+            usage = await read_usage(settings.claude_cli, model=settings.claude_model)
+        except (ClaudeUsageError, OSError, TimeoutError) as error:
+            LOGGER.warning(
+                "%s is waiting for Claude quota; /usage failed (%s), retrying the "
+                "usage check in 5 minutes",
+                context,
+                error,
+            )
+            await asyncio.sleep(300)
+            continue
+        now = dt.datetime.now(dt.UTC)
+        retry_at = quota_retry_at(usage, now=now)
+        LOGGER.warning(
+            "%s is waiting for Claude quota until %s",
+            context,
+            retry_at.isoformat(),
+        )
+        await asyncio.sleep(max(0.0, (retry_at - now).total_seconds()))
+        return
+
+
+async def retry_claude_quota[Result](
+    operation: Callable[[], Awaitable[Result]],
+    settings: Settings,
+    *,
+    context: str,
+) -> Result:
+    """Retry one Claude operation after its subscription allowance resets."""
+    while True:
+        try:
+            return await operation()
+        except ClaudeQuotaExceeded as error:
+            LOGGER.warning("%s hit Claude quota: %s", context, error)
+            await wait_for_claude_quota_reset(settings, context=context)
 AGENT_RETRY_DELAYS = (60, 300, 900, 1_800, 3_600)
 DIRECTIVE_RE = re.compile(
     r"^\[(?P<provider>claude|codex)(?::(?P<model>[A-Za-z0-9._:-]{1,100}))?\]\s*",
@@ -276,14 +318,19 @@ class SlackCommunicationLayer:
             turn_count=0,
             last_error=None,
         )
-        result = await run_claude(
+        result = await retry_claude_quota(
+            partial(
+                run_claude,
+                isolated_settings,
+                session,
+                prompt,
+                ActiveAgentRun("claude", steerable=False),
+                initial_instruction="",
+                command_options=("--tools", ""),
+                environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
+            ),
             isolated_settings,
-            session,
-            prompt,
-            ActiveAgentRun("claude", steerable=False),
-            initial_instruction="",
-            command_options=("--tools", ""),
-            environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
+            context="Slack communication gate",
         )
         return result.text.strip()
 
@@ -885,7 +932,7 @@ async def run_claude(
         ) from error
     if return_code != 0 or payload.get("is_error"):
         if quota_exhausted(diagnostic):
-            raise ClaudeQuotaExceeded("Claude usage limit reached; automatic retries stopped")
+            raise ClaudeQuotaExceeded("Claude usage limit reached")
         if is_infrastructure_failure(diagnostic):
             raise AgentInfrastructureError(
                 f"Claude dependency failure (exit {return_code}): {_tail(diagnostic)}"
@@ -1044,7 +1091,11 @@ class AgentOrchestrator:
             async with self._semaphore:
                 return await operation()
 
-        return await retry_agent_service_errors(run_with_capacity, context=context)
+        return await retry_claude_quota(
+            partial(retry_agent_service_errors, run_with_capacity, context=context),
+            self.settings,
+            context=context,
+        )
 
     async def _agent_environment(self, *, automated: bool) -> dict[str, str]:
         """Build agent environment from the current VPN state for each attempt."""
@@ -1353,13 +1404,17 @@ class AgentOrchestrator:
                 recovery_session = replace(session, status="cancelled")
                 environment_overrides = await self._agent_environment(automated=True)
                 if session.provider == "claude":
-                    result = await run_claude(
-                        recovery_settings,
-                        recovery_session,
-                        TIMEOUT_RECOVERY_PROMPT,
-                        control,
-                        force_resume=True,
-                        environment_overrides=environment_overrides,
+                    result = await self._run_with_retries(
+                        partial(
+                            run_claude,
+                            recovery_settings,
+                            recovery_session,
+                            TIMEOUT_RECOVERY_PROMPT,
+                            control,
+                            force_resume=True,
+                            environment_overrides=environment_overrides,
+                        ),
+                        context="scheduled agent timeout recovery",
                     )
                 else:
                     result = await run_codex(
@@ -1602,7 +1657,21 @@ class AgentOrchestrator:
                 result = await self._run_with_retries(
                     resume_provider, context=f"recovered scheduled turn {run_id}"
                 )
-            except (ClaudeBudgetExceeded, ClaudeQuotaExceeded) as error:
+            except ClaudeQuotaExceeded as error:
+                LOGGER.warning("Deferred recovered scheduled turn %s: %s", run_id, error)
+                await asyncio.to_thread(
+                    self.store.finish_scheduled_agent_run,
+                    run_id,
+                    status="interrupted",
+                    external_session_id=session.external_session_id,
+                    result_text=None,
+                    last_error=str(error),
+                )
+                self._active_runs.pop(key, None)
+                self._headless_tasks.pop(key, None)
+                self._headless_sessions.pop(key, None)
+                continue
+            except ClaudeBudgetExceeded as error:
                 LOGGER.warning("Stopped recovered scheduled turn %s: %s", run_id, error)
                 await asyncio.to_thread(
                     self.store.finish_scheduled_agent_run,
@@ -1654,13 +1723,17 @@ class AgentOrchestrator:
                 )
                 environment_overrides = await self._agent_environment(automated=True)
                 if session.provider == "claude":
-                    result = await run_claude(
-                        recovery_settings,
-                        session,
-                        TIMEOUT_RECOVERY_PROMPT,
-                        control,
-                        force_resume=True,
-                        environment_overrides=environment_overrides,
+                    result = await self._run_with_retries(
+                        partial(
+                            run_claude,
+                            recovery_settings,
+                            session,
+                            TIMEOUT_RECOVERY_PROMPT,
+                            control,
+                            force_resume=True,
+                            environment_overrides=environment_overrides,
+                        ),
+                        context=f"recovered scheduled turn {run_id} timeout recovery",
                     )
                 else:
                     result = await run_codex(
@@ -2168,13 +2241,17 @@ class AgentOrchestrator:
                     recovery_session = replace(session, status="cancelled")
                     try:
                         if session.provider == "claude":
-                            result = await run_claude(
-                                recovery_settings,
-                                recovery_session,
-                                TIMEOUT_RECOVERY_PROMPT,
-                                control,
-                                force_resume=True,
-                                environment_overrides=environment_overrides,
+                            result = await self._run_with_retries(
+                                partial(
+                                    run_claude,
+                                    recovery_settings,
+                                    recovery_session,
+                                    TIMEOUT_RECOVERY_PROMPT,
+                                    control,
+                                    force_resume=True,
+                                    environment_overrides=environment_overrides,
+                                ),
+                                context=f"Slack thread {thread_ts} timeout recovery",
                             )
                         else:
                             result = await run_codex(
@@ -2310,7 +2387,13 @@ class AgentOrchestrator:
         except ValueError as error:
             await self._reply(client, channel_id, thread_ts, str(error))
             request_status = "rejected"
-        except (ClaudeBudgetExceeded, ClaudeQuotaExceeded) as error:
+        except ClaudeQuotaExceeded as error:
+            await asyncio.to_thread(
+                self.store.cancel_agent_turn, channel_id, thread_ts,
+            )
+            request_status = "interrupted"
+            LOGGER.warning("Deferred Claude Slack thread %s for quota recovery: %s", thread_ts, error)
+        except ClaudeBudgetExceeded as error:
             await asyncio.to_thread(
                 self.store.fail_agent_turn, channel_id, thread_ts, str(error),
             )
@@ -2318,8 +2401,6 @@ class AgentOrchestrator:
             notice = (
                 "Расследование остановлено: достигнут установленный бюджет расхода. "
                 "Работа не завершена; созданные файлы сохранены. Автоповторов не будет."
-                if isinstance(error, ClaudeBudgetExceeded)
-                else "Работа остановлена: исчерпан лимит Claude. Автоповторы прекращены."
             )
             await self._reply(client, channel_id, thread_ts, notice)
         except AgentInfrastructureError as error:

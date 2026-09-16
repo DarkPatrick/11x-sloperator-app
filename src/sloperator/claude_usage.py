@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import re
@@ -20,6 +21,12 @@ WEEK_USAGE_RE = re.compile(
     r"^Current week \(all models\):\s*(?P<week>\d+)%\s+used\b[^\n]*?\bresets\s+(?P<reset>[^\n]+)",
     re.IGNORECASE | re.MULTILINE,
 )
+RESET_TIME_RE = re.compile(
+    r"^(?P<month>[A-Za-z]{3})\s+(?P<day>\d{1,2}),\s*"
+    r"(?P<time>\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*\(UTC\)$",
+    re.IGNORECASE,
+)
+QUOTA_RESET_BUFFER = dt.timedelta(minutes=7)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +51,37 @@ class ClaudeUsageError(RuntimeError):
     def __init__(self, message: str, *, diagnostic: str = "") -> None:
         super().__init__(message)
         self.diagnostic = diagnostic
+
+
+def parse_reset_at(value: str, *, now: dt.datetime) -> dt.datetime | None:
+    """Parse Claude's reset label into the next matching UTC datetime."""
+    match = RESET_TIME_RE.fullmatch(value.strip())
+    if match is None:
+        return None
+    time_format = "%I:%M%p" if ":" in match.group("time") else "%I%p"
+    parsed = dt.datetime.strptime(
+        f"{now.year} {match.group('month')} {match.group('day')} {match.group('time')}",
+        f"%Y %b %d {time_format}",
+    ).replace(tzinfo=dt.UTC)
+    if parsed < now - dt.timedelta(days=1):
+        parsed = parsed.replace(year=parsed.year + 1)
+    return parsed
+
+
+def quota_retry_at(usage: ClaudeUsage, *, now: dt.datetime) -> dt.datetime:
+    """Return a safe retry time after every exhausted Claude allowance resets."""
+    resets = [
+        (usage.session_used_percent, parse_reset_at(usage.session_reset_text, now=now)),
+        (usage.week_used_percent, parse_reset_at(usage.week_reset_text, now=now)),
+    ]
+    exhausted = [reset for used, reset in resets if used >= 99 and reset is not None]
+    available = [reset for _, reset in resets if reset is not None]
+    if exhausted:
+        reset_at = max(exhausted)
+    else:
+        future = [reset for reset in available if reset >= now]
+        reset_at = min(future) if future else now
+    return max(reset_at + QUOTA_RESET_BUFFER, now + dt.timedelta(minutes=5))
 
 
 def usage_diagnostic(text: str) -> str:

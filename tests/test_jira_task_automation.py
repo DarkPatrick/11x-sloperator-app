@@ -3,6 +3,7 @@ import datetime as dt
 from sloperator.claude_usage import ClaudeUsage
 from sloperator.jira_task_automation import (
     confluence_destination,
+    latest_external_confluence_activity,
     reviewer_prompt,
     weekly_quota_allows_launch,
     worker_prompt,
@@ -52,6 +53,25 @@ def test_confluence_destination_selects_parent_and_required_templates() -> None:
     assert release_template == "Product release"
     assert hypothesis_parent.endswith("2.+Hypothesis+um")
     assert hypothesis_template == "Hypotheses"
+
+
+def test_latest_external_confluence_activity_ignores_service_account() -> None:
+    comments = [
+        {
+            "author": "Egor Semin",
+            "created": "2026-09-16T08:01:31.054Z",
+            "updated": "2026-09-16T08:01:31.054Z",
+        },
+        {
+            "author": "ug-ai-analyst",
+            "created": "2026-09-16T08:05:00.000Z",
+            "updated": "2026-09-16T08:05:00.000Z",
+        },
+    ]
+
+    assert latest_external_confluence_activity(comments) == dt.datetime(
+        2026, 9, 16, 8, 1, 31, 54000, tzinfo=dt.UTC
+    )
 
 
 async def test_reviewer_start_requires_explicit_verified_success() -> None:

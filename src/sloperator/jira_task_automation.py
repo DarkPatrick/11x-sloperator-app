@@ -188,6 +188,32 @@ async def read_confluence_version(page_url: str, workspace: Path) -> int | None:
     value = payload.get("version")
     return int(value) if isinstance(value, int) else None
 
+
+def latest_external_confluence_activity(
+    comments: list[dict[str, Any]],
+) -> dt.datetime | None:
+    """Return the newest human comment timestamp, excluding the service account."""
+    timestamps: list[dt.datetime] = []
+    for comment in comments:
+        author = comment.get("author")
+        if isinstance(author, dict):
+            author_text = " ".join(str(value) for value in author.values())
+        else:
+            author_text = str(author or "")
+        if "ug-ai-analyst" in author_text.casefold():
+            continue
+        raw_timestamp = comment.get("updated") or comment.get("created")
+        if not isinstance(raw_timestamp, str):
+            continue
+        try:
+            timestamp = dt.datetime.fromisoformat(raw_timestamp)
+        except ValueError:
+            continue
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=dt.UTC)
+        timestamps.append(timestamp)
+    return max(timestamps, default=None)
+
 async def abuse_precheck(settings: Settings, summary: str, comments: list[dict[str, Any]]) -> bool:
     trusted = []
     for comment in comments:
@@ -326,12 +352,23 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                         page_comments = await read_confluence_comments(
                             str(link["confluence_page_url"]), settings.agent_workspace
                         )
+                    latest_page_activity = latest_external_confluence_activity(page_comments)
                     previous_jira = link.get("last_jira_updated_at")
                     previous_page = link.get("confluence_page_version")
+                    previous_page_activity = (
+                        dt.datetime.fromisoformat(str(link["last_confluence_activity_at"]))
+                        if link.get("last_confluence_activity_at")
+                        else None
+                    )
+                    has_new_page_comment = latest_page_activity is not None and (
+                        previous_page_activity is None
+                        or latest_page_activity > previous_page_activity
+                    )
                     if (
                         previous_jira
                         and task.updated_at <= dt.datetime.fromisoformat(str(previous_jira))
                         and (page_version is None or page_version == previous_page)
+                        and not has_new_page_comment
                         and not returned_to_work
                     ):
                         continue
@@ -375,7 +412,11 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     agent.store.upsert_jira_task_agent_link(
                         task.key, reviewer_session_id=result.session_id, phase="reviewer",
                         last_jira_updated_at=task.updated_at.isoformat(),
-                        last_confluence_activity_at=dt.datetime.now(dt.UTC).isoformat(),
+                        last_confluence_activity_at=(
+                            latest_page_activity.isoformat()
+                            if latest_page_activity is not None
+                            else None
+                        ),
                         confluence_page_version=page_version,
                     )
         except Exception:

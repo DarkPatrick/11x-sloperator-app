@@ -263,10 +263,11 @@ class OperationsCollector:
             elif " CMD (" in message and "sloperator.operations_cron" in message:
                 pass  # wrapper owns accurate start/end; CRON only means dispatch
             else:
+                target_unit = unit.startswith(("sloperator", "ug-ai-analyst"))
                 match = re.search(
-                    r"\b(INFO|WARNING|ERROR|CRITICAL) (sloperator\.[\w.]+): (.*)", message
+                    r"\b(INFO|WARNING|ERROR|CRITICAL) ([\w.]+): (.*)", message
                 )
-                if match:
+                if match and target_unit:
                     level, source, body = match.groups()
                     status = {"INFO": "info", "WARNING": "warning"}.get(level, "failed")
                     # Routine traffic is batched, but still present in raw journal evidence.
@@ -278,16 +279,26 @@ class OperationsCollector:
                         source,
                         status,
                         body,
-                        "journalctl -u sloperator.service",
+                        f"journalctl -u {unit}",
                         key="journal:" + str(position),
                     )
-                elif "sloperator" in unit or "ug-ai-analyst" in unit or " CMD (" in message:
+                elif target_unit and item.get("SYSLOG_IDENTIFIER") == "systemd":
                     status = (
                         "failed" if re.search(r"error|fail|traceback", message, re.I) else "info"
                     )
                     self.store.emit(
                         unit,
                         status,
+                        message,
+                        f"journalctl -u {unit}",
+                        key="journal:" + str(position),
+                    )
+                elif re.match(r"^\(egor\) CMD \(", message):
+                    # Only this user's unwrapped jobs belong to Sloperator's scope.
+                    # System cron entries such as root's debian-sa1 stay in journald.
+                    self.store.emit(
+                        unit,
+                        "info",
                         message,
                         f"journalctl -u {unit}",
                         key="journal:" + str(position),

@@ -222,6 +222,7 @@ def test_journal_covers_runtime_systemd_and_unwrapped_cron(database, monkeypatch
         {
             "__CURSOR": "2",
             "UNIT": "ug-ai-analyst-update.service",
+            "SYSLOG_IDENTIFIER": "systemd",
             "MESSAGE": "Main process exited, status=1/FAILURE",
         },
         {"__CURSOR": "3", "SYSLOG_IDENTIFIER": "CRON", "MESSAGE": "(egor) CMD (unwrapped-new-job)"},
@@ -231,6 +232,18 @@ def test_journal_covers_runtime_systemd_and_unwrapped_cron(database, monkeypatch
             "MESSAGE": "Slack log delivery failed",
         },
         {"__CURSOR": "5", "_SYSTEMD_UNIT": "ssh.service", "MESSAGE": "unrelated auth message"},
+        {
+            "__CURSOR": "6",
+            "_SYSTEMD_UNIT": "ug-ai-analyst-update.service",
+            "SYSLOG_IDENTIFIER": "flock",
+            "MESSAGE": "A documentation line mentioning a failed dependency",
+        },
+        {
+            "__CURSOR": "7",
+            "_SYSTEMD_UNIT": "cron.service",
+            "SYSLOG_IDENTIFIER": "CRON",
+            "MESSAGE": "(root) CMD (debian-sa1 1 1)",
+        },
     ]
 
     def run(*a, **k):
@@ -244,7 +257,7 @@ def test_journal_covers_runtime_systemd_and_unwrapped_cron(database, monkeypatch
     events = collector.store.pending()
     assert len(events) == 3
     assert events[0]["status"] == "failed"
-    assert collector.store.cursor("journal") == "5"
+    assert collector.store.cursor("journal") == "7"
 
 
 def test_detached_retry_and_rotated_log_covered(database, tmp_path):

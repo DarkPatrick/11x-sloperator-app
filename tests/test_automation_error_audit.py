@@ -21,7 +21,7 @@ from sloperator.config import Settings
 
 
 def test_prompt_is_claude_read_only_and_uses_automated_response_style() -> None:
-    assert AUDIT_PROMPT.startswith("[claude:opus]")
+    assert AUDIT_PROMPT.startswith("[claude:claude-opus-5]")
     assert AUTOMATED_RESPONSE_STYLE in AUDIT_PROMPT
     assert "preceding 24 hours" in AUDIT_PROMPT
     assert "Slack-triggered agent runs" in AUDIT_PROMPT

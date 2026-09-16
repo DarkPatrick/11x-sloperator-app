@@ -26,7 +26,7 @@ REPORT_PREFIX = "Automation errors detected:"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 AUDIT_PROMPT = f"""\
-[claude:opus]
+[claude:claude-opus-5]
 This is the daily read-only audit of Sloperator automation failures. Work inside the current
 Sloperator repository and inspect executions from the preceding 24 hours. Check both cron jobs
 managed by this host and Slack-triggered agent runs. Use the Sloperator SQLite history, current

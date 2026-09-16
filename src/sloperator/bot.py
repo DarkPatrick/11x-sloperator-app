@@ -76,7 +76,7 @@ def response_for(command: str) -> str:
                 "Любой другой текст запускает или продолжает сессию в этом треде.\n"
                 "По умолчанию: Claude Opus. Выбор для нового Chat:\n"
                 "• `[claude] запрос`\n"
-                "• `[claude:opus] запрос`\n"
+                "• `[claude:claude-opus-5] запрос`\n"
                 "• `[codex:gpt-5.6-sol] запрос`"
             )
         case "ping":

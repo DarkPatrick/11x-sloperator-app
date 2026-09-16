@@ -222,7 +222,7 @@ Claude Opus is the default. Select the provider and model in the first message:
 
 ```text
 [claude] Analyze experiment 1234
-[claude:opus] Analyze experiment 1234
+[claude:claude-opus-5] Analyze experiment 1234
 [codex:gpt-5.6-sol] Review the analysis scripts
 ```
 

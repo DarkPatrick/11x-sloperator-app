@@ -191,7 +191,7 @@ def test_parse_agent_request_uses_default(settings: Settings) -> None:
     request = parse_agent_request("Посчитай эксперимент", settings)
 
     assert request.provider == "claude"
-    assert request.model == "opus"
+    assert request.model == "claude-opus-5"
     assert request.prompt == "Посчитай эксперимент"
 
 

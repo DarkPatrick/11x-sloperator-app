@@ -48,9 +48,9 @@ class Settings:
     sync_interval_seconds: int = 300
     agent_workspace: Path = Path("/home/egor/projects/ug-ai-analyst")
     default_agent: str = "claude"
-    claude_model: str = "opus"
+    claude_model: str = "claude-opus-5"
     codex_model: str = "gpt-5.6-sol"
-    slack_communication_model: str = "haiku"
+    slack_communication_model: str = "claude-opus-5"
     slack_communication_timeout_seconds: int = 120
     claude_cli: Path = Path("/home/egor/.local/bin/claude")
     codex_cli: Path = Path("/usr/bin/codex")
@@ -145,10 +145,12 @@ class Settings:
         with suppress(PermissionError):
             load_dotenv(agent_workspace / ".env", override=False, interpolate=False)
         default_agent = os.environ.get("SLOPERATOR_DEFAULT_AGENT", "claude").strip().lower()
-        claude_model = os.environ.get("SLOPERATOR_CLAUDE_MODEL", "opus").strip()
+        claude_model = os.environ.get(
+            "SLOPERATOR_CLAUDE_MODEL", "claude-opus-5"
+        ).strip()
         codex_model = os.environ.get("SLOPERATOR_CODEX_MODEL", "gpt-5.6-sol").strip()
         slack_communication_model = os.environ.get(
-            "SLOPERATOR_SLACK_COMMUNICATION_MODEL", "haiku"
+            "SLOPERATOR_SLACK_COMMUNICATION_MODEL", "claude-opus-5"
         ).strip()
         slack_communication_timeout_seconds = int(
             os.environ.get("SLOPERATOR_SLACK_COMMUNICATION_TIMEOUT_SECONDS", "120")

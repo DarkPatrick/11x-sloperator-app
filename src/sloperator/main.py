@@ -124,6 +124,8 @@ from sloperator.jira_task_automation import (
 from sloperator.operations_store import configure_operations
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
 from sloperator.scheduled_jobs import EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME
+from sloperator.skill_docs_sync import cancel_task as cancel_skill_docs_sync
+from sloperator.skill_docs_sync import run_daily as run_daily_skill_docs_sync
 from sloperator.store import EventStore
 from sloperator.subscription_flow import (
     SubscriptionFlowResponder,
@@ -167,6 +169,7 @@ async def serve(settings: Settings) -> None:
         "experiment-analytics-planner"
     ]
     error_audit_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["automation-error-audit"]
+    skill_docs_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["skill-docs-sync"]
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
     experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
@@ -247,6 +250,7 @@ async def serve(settings: Settings) -> None:
     jira_task_automation_task: asyncio.Task[None] | None = None
     jira_task_poll_task: asyncio.Task[None] | None = None
     automation_error_audit_task: asyncio.Task[None] | None = None
+    skill_docs_sync_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -552,6 +556,15 @@ async def serve(settings: Settings) -> None:
             ),
             name="daily-automation-error-audit",
         )
+        skill_docs_sync_task = asyncio.create_task(
+            run_daily_skill_docs_sync(
+                settings,
+                lambda: not automation_controls.disabled(
+                    "crons", skill_docs_job.display_name
+                ),
+            ),
+            name="daily-skill-docs-sync",
+        )
         LOGGER.info(
             "Sloperator started; health http://%s:%d/healthz; admin /admin; archive %s",
             settings.host,
@@ -575,6 +588,7 @@ async def serve(settings: Settings) -> None:
         await cancel_experiment_design(experiment_design_task)
         await cancel_experiment_analytics(experiment_analytics_task)
         await cancel_automation_error_audit(automation_error_audit_task)
+        await cancel_skill_docs_sync(skill_docs_sync_task)
         await orchestrator.close()
         await slack_handler.close_async()  # type: ignore[no-untyped-call]
         await runner.cleanup()

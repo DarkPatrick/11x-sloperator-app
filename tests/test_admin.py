@@ -21,6 +21,7 @@ from sloperator.admin import (
     _systemd_scheduler_jobs,
     _unmatched_cron_launches,
 )
+from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.config import Settings
 
 
@@ -278,6 +279,12 @@ def test_cron_agent_prompt_cards_share_the_slack_trigger_component() -> None:
             "command": "embedded scheduler",
             "enabled": True,
         },
+        {
+            "name": "skill-docs-sync (sloperator.service)",
+            "schedule": "daily 00:00 UTC",
+            "command": "embedded scheduler",
+            "enabled": True,
+        },
     ]
 
     prompts = _cron_agent_prompt_definitions(jobs)
@@ -290,6 +297,8 @@ def test_cron_agent_prompt_cards_share_the_slack_trigger_component() -> None:
     assert prompts[0]["name"] == jobs[0]["name"]
     assert prompts[1]["name"] == jobs[1]["name"]
     assert "daily read-only audit" in prompts[1]["prompt"]
+    assert prompts[2]["name"] == jobs[2]["name"]
+    assert AUTOMATED_RESPONSE_STYLE in prompts[2]["prompt"]
     assert "AUTOMATED RESPONSE STYLE" in prompts[0]["prompt"]
 
 
@@ -467,6 +476,11 @@ def test_systemd_scheduler_jobs_include_every_registered_schedule_and_runtime_st
         {
             "name": "automation-error-audit (sloperator.service)",
             "schedule": "daily 14:00 Asia/Nicosia",
+            "command": "embedded asyncio scheduler · active · PID 123",
+        },
+        {
+            "name": "skill-docs-sync (sloperator.service)",
+            "schedule": "daily 00:00 UTC",
             "command": "embedded asyncio scheduler · active · PID 123",
         },
     ]

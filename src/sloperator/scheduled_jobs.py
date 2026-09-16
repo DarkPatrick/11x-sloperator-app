@@ -11,6 +11,10 @@ from sloperator.experiment_analytics_planner import PREPARATION_PROMPT as ANALYT
 from sloperator.experiment_design_planner import PREPARATION_PROMPT
 from sloperator.experiment_finalizer import START_PROMPT as FINALIZATION_PROMPT
 from sloperator.jira_task_automation import WORKER_PROMPT
+from sloperator.skill_docs_sync import HOUR as SKILL_DOCS_HOUR
+from sloperator.skill_docs_sync import PROMPT as SKILL_DOCS_PROMPT
+from sloperator.skill_docs_sync import PROMPT_SOURCE as SKILL_DOCS_PROMPT_SOURCE
+from sloperator.skill_docs_sync import TIMEZONE_NAME as SKILL_DOCS_TIMEZONE
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,24 @@ EMBEDDED_SCHEDULED_JOBS = (
         prompt_source="sloperator.automation_error_audit.AUDIT_PROMPT",
         condition="Daily read-only audit; sends a DM only when failures are found",
         prompt=AUDIT_PROMPT,
+    ),
+    EmbeddedScheduledJob(
+        job_name="skill-docs-sync",
+        run_job_names=("skill-docs-sync",),
+        display_name="skill-docs-sync (sloperator.service)",
+        schedule=lambda _settings: (
+            f"daily {SKILL_DOCS_HOUR:02d}:00 {SKILL_DOCS_TIMEZONE}"
+        ),
+        logger_name="sloperator.skill_docs_sync",
+        scheduled_prefix="Next skill docs sync scheduled for ",
+        started_message="Starting scheduled skill docs sync",
+        completed_message="Skill docs sync completed",
+        failed_message="Daily skill docs sync failed",
+        prompt_source=SKILL_DOCS_PROMPT_SOURCE,
+        condition=(
+            "Daily fast-forward of ug-ai-analyst main and Confluence regeneration for stale skills"
+        ),
+        prompt=SKILL_DOCS_PROMPT,
     ),
 )
 

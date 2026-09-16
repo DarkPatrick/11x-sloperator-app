@@ -989,6 +989,8 @@ async def test_jira_role_policy_reaches_provider_even_for_old_requests(
     else:
         assert "sole Jira writer" in prompt
         assert "Speak as the person who did the work" in prompt
+        assert "Never edit an existing comment" in prompt
+        assert "meaning must remain unchanged" in prompt
         assert prompt.index("JIRA RESULT OWNERSHIP") > prompt.index("Old instruction")
 
 

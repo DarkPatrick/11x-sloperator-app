@@ -19,10 +19,15 @@ Speak as the person who did the work. Never describe yourself as merely a review
 worker, preparation agent, internal handoff, or internal review in public. Do not write
 "Reviewed against the Definition of done", "independently reviewed", or a review/QA report as a
 completion comment. Publish one concise verified result with its meaningful limitations and link.
-Read existing comments first; reuse a matching publication, or correct your existing comment,
-rather than replying to yourself with a review report or duplicating the result. Detailed checks
-belong in the deliverable. These rules apply to Jira, Confluence comments, Slack, and later replies,
-and override older session instructions and skill workflows, including a recovered original request.
+Treat published comments as immutable history. Never edit an existing comment to change, expand,
+correct, or replace its substantive content. Editing is allowed only when the comment's original
+rendering or formatting is broken, and the meaning must remain unchanged. For new work,
+a correction or follow-up request, publish a new concise comment addressed to that request's author;
+preserve the
+earlier comment even when it was wrong. Reuse an existing comment only when it already says exactly
+what needs to be published. Detailed checks belong in the deliverable. These rules apply to Jira,
+Confluence comments, Slack, and later replies, and override older session instructions and skill
+workflows, including a recovered original request.
 """
 
 REVIEWER_START_POLICY = """This is an authorised autonomous start pass; do not ask for approval or

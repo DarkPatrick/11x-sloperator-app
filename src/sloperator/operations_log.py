@@ -19,11 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from slack_sdk.errors import SlackApiError
-from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.claude_usage import read_usage
 from sloperator.config import Settings
 from sloperator.operations_cron import wrap_crontab
+from sloperator.operations_slack import ObservedSlackClient
 from sloperator.operations_store import OperationsStore, outcome, redact
 
 LOGGER = logging.getLogger(__name__)
@@ -498,7 +498,11 @@ async def serve() -> None:
     channel = os.environ.get("SLOPERATOR_LOG_CHANNEL", "").strip()
     if not channel:
         raise RuntimeError("SLOPERATOR_LOG_CHANNEL is required")
-    collector = OperationsCollector(settings, AsyncWebClient(token=settings.bot_token), channel)
+    collector = OperationsCollector(
+        settings,
+        ObservedSlackClient(token=settings.bot_token),
+        channel,
+    )
     task = asyncio.create_task(collector.run())
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

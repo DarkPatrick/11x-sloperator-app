@@ -8,6 +8,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.web.async_slack_response import AsyncSlackResponse
 
 from sloperator.operations_store import emit_runtime
+from sloperator.slack_identity import resolve_payload_mentions
 
 
 class ObservedSlackClient(AsyncWebClient):
@@ -15,6 +16,12 @@ class ObservedSlackClient(AsyncWebClient):
         payload = kwargs.get("json") or kwargs.get("data") or {}
         if not isinstance(payload, dict):
             payload = {}
+        if api_method in {"chat.postMessage", "chat.update"}:
+            payload = await resolve_payload_mentions(self, payload)
+            if "json" in kwargs:
+                kwargs["json"] = payload
+            elif "data" in kwargs:
+                kwargs["data"] = payload
         channel = str(payload.get("channel") or payload.get("channel_id") or "")
         thread = str(payload.get("thread_ts") or "")
         try:

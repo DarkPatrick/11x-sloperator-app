@@ -192,7 +192,8 @@ Final notification (reviewer only):
 - Add at most two extremely short bullets with the most important conclusions.
 - Mention every distinct person listed in the project-page header table under DRI / Project owner
   and Team. Resolve Slack user ids and use real `<@USERID>` mentions; never invent ids. If a person
-  cannot be resolved, name them plainly and report the resolution gap.
+  cannot be resolved inside the agent, use their exact plain display name without a resolution-gap
+  note; Sloperator performs the authoritative workspace lookup at delivery time.
 - Do not include a separate Project page line, Jira link/key/epic, Execution audit, calculation
   metadata, verification details, artifact list, file paths, or any other operational appendix.
   After the heading, mentions, and at most two conclusion bullets, stop.

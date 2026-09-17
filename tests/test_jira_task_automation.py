@@ -4,6 +4,7 @@ from sloperator.claude_usage import ClaudeUsage
 from sloperator.jira_task_automation import (
     confluence_destination,
     latest_external_confluence_activity,
+    latest_external_jira_comment,
     reviewer_prompt,
     weekly_quota_allows_launch,
     worker_prompt,
@@ -44,6 +45,8 @@ def test_worker_and_reviewer_prompts_are_task_scoped() -> None:
     assert "duedate" in reviewer
     assert "transition with ID 181" in reviewer
     assert "Confluence page" in reviewer
+    assert "--reply-to-comment-id <COMMENT_ID>" in reviewer
+    assert "real Jira mention" in reviewer
 
 
 def test_confluence_destination_selects_parent_and_required_templates() -> None:
@@ -71,6 +74,30 @@ def test_latest_external_confluence_activity_ignores_service_account() -> None:
 
     assert latest_external_confluence_activity(comments) == dt.datetime(
         2026, 9, 16, 8, 1, 31, 54000, tzinfo=dt.UTC
+    )
+
+
+def test_latest_external_jira_comment_selects_new_human_reply() -> None:
+    comments = [
+        {
+            "id": "352762",
+            "author": {"accountId": "human"},
+            "created": "2026-09-17T11:43:59.369+0300",
+            "parentId": 352750,
+        },
+        {
+            "id": "352763",
+            "author": {"accountId": "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"},
+            "created": "2026-09-17T11:48:11.739+0300",
+        },
+    ]
+
+    assert latest_external_jira_comment(
+        comments, since="2026-09-17T08:40:00+00:00"
+    ) == comments[0]
+    assert (
+        latest_external_jira_comment(comments, since="2026-09-17T08:44:00+00:00")
+        is None
     )
 
 

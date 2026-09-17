@@ -23,8 +23,12 @@ Treat published comments as immutable history. Never edit an existing comment to
 correct, or replace its substantive content. Editing is allowed only when the comment's original
 rendering or formatting is broken, and the meaning must remain unchanged. For new work,
 a correction or follow-up request, publish a new concise comment addressed to that request's author;
-preserve the
-earlier comment even when it was wrong. Reuse an existing comment only when it already says exactly
+preserve the earlier comment even when it was wrong. Whenever the request came from an existing Jira
+comment, publish through `.claude/jira/jira_issue.py add-comment --reply-to-comment-id <COMMENT_ID>`
+using the exact triggering human comment ID. That helper preserves the thread and prepends a native
+Jira mention of the author. Never substitute a typed name or plain-text @name for the native
+mention.
+Reuse an existing comment only when it already says exactly
 what needs to be published. Detailed checks belong in the deliverable. These rules apply to Jira,
 Confluence comments, Slack, and later replies, and override older session instructions and skill
 workflows, including a recovered original request.

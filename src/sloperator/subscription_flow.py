@@ -286,6 +286,7 @@ class SubscriptionFlowResponder:
             text=build_subscription_flow_agent_prompt(combined),
             show_status=False,
             automated=True,
+            agent_name="subscription-flow/slack",
         )
 
     async def _is_own_bot(

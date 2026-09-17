@@ -249,6 +249,7 @@ class MobileHealthResponder:
                 require_artifact=True,
                 timeout_seconds=self.settings.mobile_health_timeout_seconds,
                 automated=True,
+                agent_name="mobile-health/slack",
                 reuse_key="mobile:" + repr(sorted(
                     (metric.platform, metric.query_title, metric.metric_line.split(" | ", 1)[0])
                     for metric in metrics

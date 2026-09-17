@@ -226,6 +226,7 @@ class WebHealthResponder:
                 require_artifact=True,
                 timeout_seconds=self.settings.mobile_health_timeout_seconds,
                 automated=True,
+                agent_name="web-health/slack",
                 reuse_key="web:" + repr(sorted(
                     (metric.query_title, metric.metric_line.split(" | ", 1)[0])
                     for metric in metrics

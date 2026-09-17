@@ -10,6 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from sloperator.agent_usage import AgentUsageContext
 from sloperator.agents import (
     ActiveAgentRun,
     retry_claude_quota,
@@ -150,6 +151,10 @@ class AdminSqlManager:
                             environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
                             initial_instruction="",
                             command_options=("--safe-mode",),
+                            usage_context=AgentUsageContext(
+                                "admin/sql-completion", "admin", "sql-completion", "admin",
+                                session_id,
+                            ),
                         ),
                         self.settings,
                         context=f"admin SQL session {session_id}",
@@ -163,6 +168,10 @@ class AdminSqlManager:
                         self.store,
                         environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
                         initial_instruction="",
+                        usage_context=AgentUsageContext(
+                            "admin/sql-completion", "admin", "sql-completion", "admin",
+                            session_id,
+                        ),
                     )
             finally:
                 self._controls.pop(session_id, None)
@@ -250,6 +259,10 @@ class AdminSqlManager:
                     environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
                     initial_instruction="",
                     command_options=("--safe-mode",),
+                    usage_context=AgentUsageContext(
+                        "admin/sql-visualization", "admin", "sql-visualization", "admin",
+                        session_id,
+                    ),
                 ),
                 self.settings,
                 context=f"admin SQL visualization {session_id}",
@@ -263,6 +276,10 @@ class AdminSqlManager:
                 self.store,
                 environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
                 initial_instruction="",
+                usage_context=AgentUsageContext(
+                    "admin/sql-visualization", "admin", "sql-visualization", "admin",
+                    session_id,
+                ),
             )
         html = _strip_markdown_fence(result.text)
         if html.count("__SLOPERATOR_DATA__") != 1:

@@ -214,6 +214,7 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <button id="tab-agents" onclick="setTab('agents')">Агенты</button>
 <button id="tab-cron" onclick="setTab('cron')">Cron</button>
 <button id="tab-triggers" onclick="setTab('triggers')">Slack-триггеры</button>
+<button id="tab-usage" onclick="setTab('usage')">Usage</button>
 <button id="tab-codex" onclick="setTab('codex')">Codex</button>
 <button id="tab-sql" onclick="setTab('sql')">SQL editor</button>
 </nav>
@@ -235,6 +236,10 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <div class="sub cron-toolbar">Configured event-driven launches · last 28 days · UTC</div>
 <div id="trigger-configs" class="grid trigger-configs"></div>
 <div id="trigger-history"></div></section>
+<section id="panel-usage" class="panel"><h2>Agent usage</h2>
+<div class="row spread cron-toolbar"><span class="sub">Последние 30 дней · точные provider tokens, включая cache</span>
+<label>Агент <select id="usage-agent" onchange="usageSelected=this.value;renderUsage(window.agentUsage)"></select></label></div>
+<div id="usage"></div></section>
 <section id="panel-codex" class="panel"><h2>Codex sessions</h2><div class="card codex-shell">
 <aside class="codex-sidebar"><div class="codex-sidebar-head"><button onclick="newCodexSession()">
 + Новая</button></div><div id="codex-sessions" class="codex-session-list"></div></aside>
@@ -285,8 +290,8 @@ function applyTheme(theme){document.documentElement.dataset.theme=theme;
 document.getElementById("theme-toggle").textContent=theme==="light"?"Тёмная тема":"Светлая тема"}
 function toggleTheme(){const next=document.documentElement.dataset.theme==="light"?"dark":"light";
 localStorage.setItem("sloperator-theme",next);applyTheme(next)}
-function setTab(tab){if(!["agents","cron","triggers","codex","sql"].includes(tab))tab="agents";
-for(const name of ["agents","cron","triggers","codex","sql"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
+function setTab(tab){if(!["agents","cron","triggers","usage","codex","sql"].includes(tab))tab="agents";
+for(const name of ["agents","cron","triggers","usage","codex","sql"]){document.getElementById("panel-"+name).classList.toggle("active",name===tab);
 document.getElementById("tab-"+name).classList.toggle("active",name===tab)}
 if(location.hash!=="#"+tab)history.replaceState(null,"","#"+tab)}
 async function refreshCsrf(){const page=await fetch(location.pathname,{cache:"no-store"});
@@ -349,6 +354,8 @@ modal.querySelector("button").focus()}
 function closePrompt(){document.getElementById("prompt-modal").hidden=true;document.body.style.overflow=""}
 addEventListener("keydown",event=>{if(event.key==="Escape")closePrompt()});
 let cronSignature="",triggerSignature="";
+let usageSignature="";
+let usageSelected="";
 let codexSignature="",selectedCodex=localStorage.getItem("sloperator-codex-session")||"",
 codexDrafts={},codexDetail=null;
 async function selectCodex(id){if(selectedCodex)codexDrafts[selectedCodex]=
@@ -592,6 +599,30 @@ itemKey:trigger=>trigger.key,label:(trigger,triggerEvents)=>`<div class="cron-jo
 <thead><tr><th>Time</th><th>Trigger</th><th>Status</th><th>Channel</th><th>Links</th></tr></thead>
 <tbody>${eventRows||'<tr><td colspan="5" class="sub">No launches in the last 28 days</td></tr>'}
 </tbody></table></div></details>`}
+function tokenCount(value){return new Intl.NumberFormat("ru-RU").format(Number(value||0))}
+function renderUsage(report){window.agentUsage=report;const agents=report.agents||[];
+const names=[...new Set(agents.map(x=>x.agent_name))].sort();if(usageSelected&&!names.includes(usageSelected))usageSelected="";
+const selector=document.getElementById("usage-agent");selector.innerHTML='<option value="">Все</option>'+names.map(name=>
+`<option value="${esc(name)}" ${name===usageSelected?"selected":""}>${esc(name)}</option>`).join("");
+const daily=(report.daily||[]).filter(x=>!usageSelected||x.agent_name===usageSelected);
+const recent=(report.recent||[]).filter(x=>!usageSelected||x.agent_name===usageSelected);
+const agentRows=agents.map(x=>`<tr><td><b>${esc(x.agent_name)}</b><div class="meta">${esc(x.provider)} · ${esc(x.model)}</div></td>
+<td>${tokenCount(x.invocations)}</td><td>${tokenCount(x.input_tokens)}</td><td>${tokenCount(x.cache_creation_input_tokens)}</td>
+<td>${tokenCount(x.cache_read_input_tokens)}</td><td>${tokenCount(x.output_tokens)}</td><td><b>${tokenCount(x.total_tokens)}</b></td>
+<td>${tokenCount(Math.round(x.avg_tokens||0))}</td><td>${tokenCount(x.running)}</td><td>${tokenCount(x.failed)}</td></tr>`).join("");
+const dailyRows=daily.slice().reverse().map(x=>`<tr><td>${esc(x.day)}</td><td>${esc(x.agent_name)}</td>
+<td>${tokenCount(x.invocations)}</td><td>${tokenCount(x.input_tokens)}</td><td>${tokenCount(x.cache_read_input_tokens)}</td>
+<td>${tokenCount(x.output_tokens)}</td><td><b>${tokenCount(x.total_tokens)}</b></td></tr>`).join("");
+const recentRows=recent.map(x=>`<tr><td>${esc(x.started_at)} UTC</td><td>${esc(x.agent_name)}</td>
+<td><span class="badge ${esc(x.status)}">${esc(x.status)}</span></td><td>${esc(x.usage_source)}</td>
+<td>${tokenCount(x.total_tokens)}</td><td>${tokenCount(x.duration_ms)} ms</td></tr>`).join("");
+document.getElementById("usage").innerHTML=`<details class="card" open><summary>Агрегаты по агентам</summary><div class="table-wrap"><table>
+<thead><tr><th>Агент</th><th>Вызовы</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th><th>Total</th><th>Avg</th><th>Сейчас</th><th>Ошибки</th></tr></thead>
+<tbody>${agentRows||'<tr><td colspan="10" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
+<details class="card" open><summary>Динамика по дням</summary><div class="table-wrap"><table><thead><tr><th>День</th><th>Агент</th><th>Вызовы</th><th>Input</th><th>Cache read</th><th>Output</th><th>Total</th></tr></thead>
+<tbody>${dailyRows||'<tr><td colspan="7" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
+<details class="card"><summary>Последние вызовы</summary><div class="table-wrap"><table><thead><tr><th>Время</th><th>Агент</th><th>Статус</th><th>Источник</th><th>Токены</th><th>Длительность</th></tr></thead>
+<tbody>${recentRows||'<tr><td colspan="6" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>`}
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
 const nextCodexSignature=JSON.stringify([d.codex_sessions,selectedCodex]);
@@ -613,7 +644,9 @@ const nextScroll=document.querySelector(".cron-scroll");if(nextScroll)nextScroll
 cronSignature=nextCronSignature}
 const nextTriggerSignature=JSON.stringify([d.slack_triggers,d.slack_trigger_runs]);
 if(nextTriggerSignature!==triggerSignature){renderTriggerHistory(d.slack_triggers,d.slack_trigger_runs);
-triggerSignature=nextTriggerSignature}}
+triggerSignature=nextTriggerSignature}
+const nextUsageSignature=JSON.stringify(d.agent_usage);if(nextUsageSignature!==usageSignature){
+renderUsage(d.agent_usage);usageSignature=nextUsageSignature}}
 applyTheme(preferredTheme());initSqlEditor();setTab(location.hash.slice(1));
 addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
 load();setInterval(load,5000);
@@ -1436,6 +1469,7 @@ def create_admin_routes(
                     for trigger in _slack_trigger_definitions(orchestrator.settings)
                 ],
                 "slack_trigger_runs": await asyncio.to_thread(store.list_slack_trigger_runs),
+                "agent_usage": await asyncio.to_thread(store.agent_usage_report, 30),
                 "crontab": crontab,
                 "cron_jobs": all_cron_jobs,
                 "cron_agent_prompts": await asyncio.to_thread(

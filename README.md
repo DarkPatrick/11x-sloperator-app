@@ -58,7 +58,13 @@ operator; the UI additionally uses a per-process CSRF token for mutations.
 The UI shows the current user crontab, cron launch records from the last seven days of the
 system journal, and recent durable agent sessions. An agent turn can be stopped, a session
 can be permanently closed, or a message can be sent into the existing session. Agent replies
-continue to be delivered to the original Slack thread.
+continue to be delivered to the original Slack thread. The **Usage** tab keeps per-invocation
+token accounting for every logical agent, with 30-day aggregates, daily dynamics, failures,
+duration, provider/model, and recent calls. Input, cache creation, cache reads, and output stay
+separate. Stable names such as `experiment-finalizer/worker`,
+`experiment-finalizer/reviewer`, and `experiment-finalizer/slack` let each role be compared over
+time. Claude uses provider JSON counters and falls back to the local transcript delta (including
+child agents); Codex uses the App Server completion event.
 
 The schema includes disabled-by-default trigger rules and an action-run ledger. No
 actions execute until an explicit condition and action are configured.

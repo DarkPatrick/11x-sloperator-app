@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from collections.abc import Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -208,16 +210,52 @@ class AdminCodexManager:
         server = self._server(lock_workspace=True)
         self._servers[session_id] = server
         self._invalidate()
+        invocation_id = str(uuid.uuid4())
+        started = time.monotonic()
+        await asyncio.to_thread(
+            self.store.start_agent_usage_invocation,
+            invocation_id,
+            source_run_id=session_id,
+            agent_name="admin/codex-chat",
+            workflow="admin",
+            role="codex-chat",
+            source="admin",
+            provider="codex",
+            model=self.settings.codex_model,
+            external_session_id=session_id,
+        )
+        error_text: str | None = None
         try:
             await server.start(session_id)
             await server.run_turn(prompt)
+        except asyncio.CancelledError as error:
+            error_text = repr(error)
+            raise
         except (TimeoutError, CodexAppServerError, OSError) as error:
             LOGGER.exception("Admin Codex turn failed")
             detail = str(error).strip() or type(error).__name__
             self._last_errors[session_id] = f"Codex turn failed: {detail}"
+            error_text = repr(error)
         else:
             self._pending_messages.pop(session_id, None)
         finally:
+            usage = getattr(server, "last_usage", None)
+            await asyncio.to_thread(
+                self.store.finish_agent_usage_invocation,
+                invocation_id,
+                status="failed" if error_text else "completed",
+                usage_source="provider_event" if usage else "unavailable",
+                input_tokens=usage.input_tokens if usage else None,
+                cache_creation_input_tokens=(
+                    usage.cache_creation_input_tokens if usage else None
+                ),
+                cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
+                output_tokens=usage.output_tokens if usage else None,
+                total_tokens=usage.total_tokens if usage else None,
+                duration_ms=round((time.monotonic() - started) * 1000),
+                external_session_id=session_id,
+                error=error_text,
+            )
             self._servers.pop(session_id, None)
             self._tasks.pop(session_id, None)
             self._invalidate()

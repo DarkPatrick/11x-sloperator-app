@@ -1,0 +1,149 @@
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+from sloperator.agent_usage import (
+    context_for_job,
+    parse_claude_usage,
+    parse_codex_usage,
+    slack_agent_name,
+    transcript_usage,
+)
+from sloperator.agents import ActiveAgentRun, run_claude
+from sloperator.config import Settings
+from sloperator.store import AgentSession, EventStore
+
+
+def test_logical_agent_names_split_workflow_roles() -> None:
+    worker = context_for_job("experiment-finalizer-preparer", source_run_id="run-1")
+    reviewer = context_for_job("experiment-finalizer-reviewer")
+
+    assert (worker.agent_name, worker.workflow, worker.role) == (
+        "experiment-finalizer/worker",
+        "experiment-finalizer",
+        "worker",
+    )
+    assert reviewer.agent_name == "experiment-finalizer/reviewer"
+    assert slack_agent_name("experiment-finalizer-reviewer") == "experiment-finalizer/slack"
+
+
+def test_provider_usage_parsers_keep_cache_separate() -> None:
+    claude = parse_claude_usage(
+        {
+            "usage": {
+                "input_tokens": 10,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 30,
+                "output_tokens": 4,
+            },
+            "total_cost_usd": 1.25,
+            "num_turns": 3,
+        }
+    )
+    codex = parse_codex_usage(
+        {"usage": {"inputTokens": 11, "cachedInputTokens": 12, "outputTokens": 13}}
+    )
+
+    assert claude is not None and claude.total_tokens == 64
+    assert claude.cost_usd == 1.25
+    assert codex is not None and codex.total_tokens == 36
+
+
+def _transcript_record(path: Path, identifier: str, *, cached: int, output: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": identifier,
+                        "usage": {
+                            "input_tokens": 2,
+                            "cache_read_input_tokens": cached,
+                            "output_tokens": output,
+                        },
+                    },
+                }
+            )
+            + "\n"
+        )
+
+
+def test_transcript_usage_includes_child_agents_without_double_counting(tmp_path) -> None:
+    _transcript_record(tmp_path / "session.jsonl", "root", cached=10, output=3)
+    _transcript_record(tmp_path / "session.jsonl", "root", cached=10, output=5)
+    _transcript_record(
+        tmp_path / "session/subagents/worker.jsonl", "child", cached=20, output=7
+    )
+
+    usage = transcript_usage(tmp_path, "session")
+
+    assert usage.input_tokens == 4
+    assert usage.cache_read_input_tokens == 30
+    assert usage.output_tokens == 12
+    assert usage.total_tokens == 46
+
+
+async def test_claude_invocation_is_persisted_and_aggregated(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "archive.sqlite3"
+    store = EventStore(database)
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U123",
+        bot_token="test",
+        app_token="test",
+        agent_workspace=tmp_path,
+        database_path=database,
+    )
+    session = AgentSession(
+        channel_id="scheduled",
+        thread_ts="run-1",
+        provider="claude",
+        model="opus",
+        external_session_id="session-1",
+        status="queued",
+        turn_count=0,
+        last_error=None,
+    )
+    monkeypatch.setattr(
+        "sloperator.agents._run_process",
+        AsyncMock(
+            return_value=(
+                0,
+                json.dumps(
+                    {
+                        "result": "done",
+                        "session_id": "session-1",
+                        "usage": {
+                            "input_tokens": 100,
+                            "cache_creation_input_tokens": 20,
+                            "cache_read_input_tokens": 300,
+                            "output_tokens": 40,
+                        },
+                        "total_cost_usd": 0.75,
+                        "num_turns": 2,
+                    }
+                ),
+                "",
+            )
+        ),
+    )
+
+    result = await run_claude(
+        settings,
+        session,
+        "Work",
+        ActiveAgentRun("claude"),
+        usage_context=context_for_job("experiment-finalizer-preparer", source_run_id="run-1"),
+    )
+
+    assert result.text == "done"
+    report = store.agent_usage_report()
+    aggregate = report["agents"][0]
+    assert aggregate["agent_name"] == "experiment-finalizer/worker"
+    assert aggregate["invocations"] == aggregate["completed"] == 1
+    assert aggregate["running"] == aggregate["failed"] == 0
+    assert aggregate["total_tokens"] == aggregate["avg_tokens"] == 460
+    assert aggregate["cost_usd"] == 0.75
+    assert report["recent"][0]["usage_source"] == "provider_json"

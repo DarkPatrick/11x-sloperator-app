@@ -277,6 +277,7 @@ class AnomalyAlertResponder:
                     show_status=False,
                     require_artifact=True,
                     automated=True,
+                    agent_name="anomaly-alerts/slack",
                     reuse_key="analytics:" + repr(sorted(alert.key() for alert, _ in monetisation)),
                 )
         finally:

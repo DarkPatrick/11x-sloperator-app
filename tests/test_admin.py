@@ -412,6 +412,15 @@ def test_admin_contains_codex_session_chat_ui() -> None:
     assert 'document.getElementById("codex-input")?.value' in ADMIN_HTML
 
 
+def test_admin_contains_per_agent_usage_dashboard() -> None:
+    assert 'id="tab-usage"' in ADMIN_HTML
+    assert 'id="panel-usage"' in ADMIN_HTML
+    assert 'id="usage-agent"' in ADMIN_HTML
+    assert "function renderUsage(report)" in ADMIN_HTML
+    assert "cache_creation_input_tokens" in ADMIN_HTML
+    assert "cache_read_input_tokens" in ADMIN_HTML
+
+
 def test_admin_contains_debounced_two_pane_sql_editor() -> None:
     assert 'id="tab-sql"' in ADMIN_HTML
     assert 'class="card sql-workbench"' in ADMIN_HTML

@@ -118,6 +118,7 @@ class PaymentLayerResponder:
                 text=build_payment_layer_agent_prompt(text),
                 show_status=False,
                 automated=True,
+                agent_name="payment-layer/slack",
             )
         finally:
             self._in_flight.discard(message_ts)

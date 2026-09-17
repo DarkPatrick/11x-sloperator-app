@@ -12,6 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from sloperator.agent_usage import TokenUsage, parse_codex_usage
 from sloperator.operations_store import observed
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class CodexAppServer:
         self.process: asyncio.subprocess.Process | None = None
         self.thread_id: str | None = None
         self.turn_id: str | None = None
+        self.last_usage: TokenUsage | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[str] | None = None
         self._pending: dict[int, asyncio.Future[Mapping[str, Any]]] = {}
@@ -206,6 +208,7 @@ class CodexAppServer:
         if not isinstance(turn, Mapping) or not isinstance(turn.get("id"), str):
             raise CodexAppServerError("Codex did not return a turn ID")
         self.turn_id = turn["id"]
+        self.last_usage = None
         final_messages: list[str] = []
 
         async with asyncio.timeout(self.timeout_seconds):
@@ -233,6 +236,7 @@ class CodexAppServer:
                             "Codex turn ended unsuccessfully: "
                             f"{dict(completed)!r}"
                         )
+                    self.last_usage = parse_codex_usage(completed)
                     if not final_messages:
                         raise CodexAppServerError("Codex completed without a final answer")
                     return final_messages[-1]

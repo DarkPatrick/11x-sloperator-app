@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_activity_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    agent_name TEXT,
     PRIMARY KEY (channel_id, thread_ts)
 ) STRICT;
 
@@ -204,6 +205,37 @@ CREATE TABLE IF NOT EXISTS delivered_agent_artifacts (
     delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (channel_id, thread_ts, fingerprint)
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS agent_usage_invocations (
+    invocation_id TEXT PRIMARY KEY,
+    source_run_id TEXT,
+    agent_name TEXT NOT NULL,
+    workflow TEXT NOT NULL,
+    role TEXT NOT NULL,
+    source TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK(provider IN ('claude', 'codex')),
+    model TEXT NOT NULL,
+    external_session_id TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    usage_source TEXT,
+    input_tokens INTEGER,
+    cache_creation_input_tokens INTEGER,
+    cache_read_input_tokens INTEGER,
+    output_tokens INTEGER,
+    total_tokens INTEGER,
+    cost_usd REAL,
+    provider_turns INTEGER,
+    duration_ms INTEGER,
+    error TEXT,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS agent_usage_agent_started_idx
+ON agent_usage_invocations(agent_name, started_at);
+
+CREATE INDEX IF NOT EXISTS agent_usage_workflow_started_idx
+ON agent_usage_invocations(workflow, role, started_at);
 """
 OTP_MESSAGE_RE = re.compile(r"^\s*(?:vpn\s+otp\s+)?\d{6,8}\s*$", re.IGNORECASE)
 REDACTED_OTP = "[redacted one-time code]"
@@ -241,6 +273,7 @@ class AgentSession:
     status: str
     turn_count: int
     last_error: str | None
+    agent_name: str | None = None
 
 
 class EventStore:
@@ -285,6 +318,8 @@ class EventStore:
                     WHERE last_activity_at IS NULL
                     """
                 )
+            if "agent_name" not in agent_session_columns:
+                connection.execute("ALTER TABLE agent_sessions ADD COLUMN agent_name TEXT")
             scheduled_columns = {
                 row[1]
                 for row in connection.execute("PRAGMA table_info(scheduled_agent_runs)")
@@ -312,6 +347,28 @@ class EventStore:
                 )
             connection.execute(
                 """
+                UPDATE agent_sessions
+                SET agent_name = COALESCE(
+                    (
+                        SELECT CASE
+                            WHEN r.job_name LIKE '%-reviewer'
+                                THEN substr(r.job_name, 1, length(r.job_name) - 9) || '/slack'
+                            WHEN r.job_name LIKE '%-preparer'
+                                THEN substr(r.job_name, 1, length(r.job_name) - 9) || '/slack'
+                            ELSE r.job_name || '/slack'
+                        END
+                        FROM scheduled_agent_runs AS r
+                        WHERE r.external_session_id = agent_sessions.external_session_id
+                        ORDER BY datetime(r.updated_at) DESC
+                        LIMIT 1
+                    ),
+                    'slack/general'
+                )
+                WHERE agent_name IS NULL
+                """
+            )
+            connection.execute(
+                """
                 UPDATE admin_codex_sessions
                 SET status = 'failed',
                     last_error = 'Service restarted during an active turn',
@@ -320,7 +377,7 @@ class EventStore:
                 """
             )
             connection.execute(
-                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '5')"
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '6')"
             )
             install_operations_schema(connection)
         os.chmod(self.path, 0o600)
@@ -332,6 +389,135 @@ class EventStore:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
         return connection
+
+    def start_agent_usage_invocation(
+        self,
+        invocation_id: str,
+        *,
+        source_run_id: str | None,
+        agent_name: str,
+        workflow: str,
+        role: str,
+        source: str,
+        provider: str,
+        model: str,
+        external_session_id: str | None,
+    ) -> None:
+        """Persist an invocation before the provider process starts."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_usage_invocations(
+                    invocation_id, source_run_id, agent_name, workflow, role, source,
+                    provider, model, external_session_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    invocation_id, source_run_id, agent_name, workflow, role, source,
+                    provider, model, external_session_id,
+                ),
+            )
+
+    def finish_agent_usage_invocation(
+        self,
+        invocation_id: str,
+        *,
+        status: str,
+        usage_source: str | None = None,
+        input_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
+        cache_read_input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        total_tokens: int | None = None,
+        cost_usd: float | None = None,
+        provider_turns: int | None = None,
+        duration_ms: int | None = None,
+        external_session_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Complete one invocation, retaining rows even for failures and timeouts."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE agent_usage_invocations
+                SET status = ?, usage_source = ?, input_tokens = ?,
+                    cache_creation_input_tokens = ?, cache_read_input_tokens = ?,
+                    output_tokens = ?, total_tokens = ?, cost_usd = ?, provider_turns = ?,
+                    duration_ms = ?, external_session_id = COALESCE(?, external_session_id),
+                    error = ?, finished_at = CURRENT_TIMESTAMP
+                WHERE invocation_id = ?
+                """,
+                (
+                    status, usage_source, input_tokens, cache_creation_input_tokens,
+                    cache_read_input_tokens, output_tokens, total_tokens, cost_usd,
+                    provider_turns, duration_ms, external_session_id, error, invocation_id,
+                ),
+            )
+
+    def agent_usage_report(self, days: int = 30) -> dict[str, Any]:
+        """Return compact per-agent aggregates, daily dynamics and recent invocations."""
+        days = min(max(int(days), 1), 365)
+        window = f"-{days - 1} days"
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            agents = connection.execute(
+                """
+                SELECT agent_name, workflow, role, provider, model,
+                       COUNT(*) AS invocations,
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+                       SUM(CASE WHEN status NOT IN ('completed', 'running') THEN 1 ELSE 0 END)
+                           AS failed,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+                       COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       ROUND(AVG(total_tokens), 1) AS avg_tokens,
+                       MAX(total_tokens) AS max_tokens,
+                       ROUND(AVG(duration_ms), 0) AS avg_duration_ms,
+                       ROUND(COALESCE(SUM(cost_usd), 0), 4) AS cost_usd
+                FROM agent_usage_invocations
+                WHERE date(started_at) >= date('now', ?)
+                GROUP BY agent_name, workflow, role, provider, model
+                ORDER BY total_tokens DESC, invocations DESC
+                """,
+                (window,),
+            ).fetchall()
+            daily = connection.execute(
+                """
+                SELECT date(started_at) AS day, agent_name,
+                       COUNT(*) AS invocations,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+                       COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens
+                FROM agent_usage_invocations
+                WHERE date(started_at) >= date('now', ?)
+                GROUP BY date(started_at), agent_name
+                ORDER BY day, agent_name
+                """,
+                (window,),
+            ).fetchall()
+            recent = connection.execute(
+                """
+                SELECT invocation_id, source_run_id, agent_name, workflow, role, source,
+                       provider, model, external_session_id, status, usage_source,
+                       input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+                       output_tokens, total_tokens, cost_usd, provider_turns, duration_ms,
+                       error, started_at, finished_at
+                FROM agent_usage_invocations
+                ORDER BY datetime(started_at) DESC
+                LIMIT 200
+                """
+            ).fetchall()
+        return {
+            "days": days,
+            "agents": [dict(row) for row in agents],
+            "daily": [dict(row) for row in daily],
+            "recent": [dict(row) for row in recent],
+        }
 
     def upsert_workspace(self, team_id: str, name: str, bot_user_id: str) -> None:
         with self._connect() as connection:
@@ -518,7 +704,7 @@ class EventStore:
             row = connection.execute(
                 """
                 SELECT channel_id, thread_ts, provider, model, external_session_id,
-                       status, turn_count, last_error
+                       status, turn_count, last_error, agent_name
                 FROM agent_sessions
                 WHERE channel_id = ? AND thread_ts = ?
                 """,
@@ -535,7 +721,7 @@ class EventStore:
                 SELECT s.channel_id, COALESCE(c.name, s.channel_id) AS channel_name,
                        s.thread_ts, s.provider, s.model, s.external_session_id,
                        s.status, s.turn_count, s.last_error, s.created_at,
-                       s.updated_at, s.last_activity_at
+                       s.updated_at, s.last_activity_at, s.agent_name
                 FROM agent_sessions AS s
                 LEFT JOIN channels AS c ON c.channel_id = s.channel_id
                 ORDER BY datetime(s.updated_at) DESC
@@ -1161,6 +1347,7 @@ class EventStore:
         provider: str,
         model: str,
         external_session_id: str | None = None,
+        agent_name: str | None = None,
     ) -> AgentSession:
         """Create a durable agent session before its first CLI turn."""
         with self._connect() as connection:
@@ -1168,10 +1355,10 @@ class EventStore:
                 """
                 INSERT INTO agent_sessions(
                     channel_id, thread_ts, provider, model, external_session_id,
-                    last_activity_at
-                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    last_activity_at, agent_name
+                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
                 """,
-                (channel_id, thread_ts, provider, model, external_session_id),
+                (channel_id, thread_ts, provider, model, external_session_id, agent_name),
             )
         session = self.get_agent_session(channel_id, thread_ts)
         if session is None:

@@ -22,6 +22,16 @@ from typing import Any, TypedDict
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
+from sloperator.agent_usage import (
+    AgentUsageContext,
+    TokenUsage,
+    context_for_job,
+    fallback_context,
+    parse_claude_usage,
+    slack_agent_name,
+    slack_context,
+    transcript_usage,
+)
 from sloperator.artifacts import artifact_fingerprint
 from sloperator.automated_session_policy import slack_worker_prompt
 from sloperator.claude_budget import (
@@ -278,6 +288,8 @@ class AgentRunResult:
 
     session_id: str
     text: str
+    usage: TokenUsage | None = None
+    usage_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +301,7 @@ class HeadlessAgentRun:
     session_id: str
     text: str
     run_id: str | None = None
+    job_name: str | None = None
 
 
 class SlackCommunicationLayer:
@@ -328,6 +341,13 @@ class SlackCommunicationLayer:
                 initial_instruction="",
                 command_options=("--tools", ""),
                 environment_overrides={"UG_SKIP_PREFLIGHT": "1"},
+                usage_context=AgentUsageContext(
+                    "slack/communication-gate",
+                    "slack",
+                    "communication-gate",
+                    "slack",
+                    session.thread_ts,
+                ),
             ),
             isolated_settings,
             context="Slack communication gate",
@@ -856,7 +876,7 @@ def _with_workspace_lock(settings: Settings, command: list[str]) -> list[str]:
 
 
 @observed("Claude CLI")
-async def run_claude(
+async def _run_claude(
     settings: Settings,
     session: AgentSession,
     prompt: str,
@@ -946,10 +966,139 @@ async def run_claude(
         raise AgentExecutionError("Claude response is missing result or session_id")
     if result_text.lstrip().startswith("SLOPERATOR_INFRA_PAUSED:"):
         raise AgentInfrastructureError(result_text.strip())
-    return AgentRunResult(session_id=result_session_id, text=result_text)
+    return AgentRunResult(
+        session_id=result_session_id,
+        text=result_text,
+        usage=parse_claude_usage(payload),
+        usage_source="provider_json" if parse_claude_usage(payload) is not None else None,
+    )
 
 
-async def run_codex(
+def _usage_context(
+    session: AgentSession, usage_context: AgentUsageContext | None
+) -> AgentUsageContext:
+    return usage_context or fallback_context(session.channel_id, session.thread_ts)
+
+
+async def _recorded_agent_call(
+    settings: Settings,
+    session: AgentSession,
+    context: AgentUsageContext,
+    operation: Callable[[], Awaitable[AgentRunResult]],
+    *,
+    transcript_before: TokenUsage | None = None,
+) -> AgentRunResult:
+    invocation_id = str(uuid.uuid4())
+    store = EventStore(settings.database_path)
+    started = time.monotonic()
+    recorded = True
+    try:
+        await asyncio.to_thread(
+            store.start_agent_usage_invocation,
+            invocation_id,
+            source_run_id=context.source_run_id,
+            agent_name=context.agent_name,
+            workflow=context.workflow,
+            role=context.role,
+            source=context.source,
+            provider=session.provider,
+            model=session.model,
+            external_session_id=session.external_session_id,
+        )
+    except Exception:
+        recorded = False
+        LOGGER.debug("Agent usage store is not initialized; skipping invocation row", exc_info=True)
+    result: AgentRunResult | None = None
+    error: BaseException | None = None
+    try:
+        result = await operation()
+        return result
+    except BaseException as caught:
+        error = caught
+        raise
+    finally:
+        if recorded:
+            usage = result.usage if result is not None else None
+            usage_source = result.usage_source if result is not None else None
+            if session.provider == "claude" and transcript_before is not None:
+                after = await asyncio.to_thread(
+                    transcript_usage,
+                    transcript_directory(settings.agent_workspace),
+                    result.session_id if result is not None else session.external_session_id or "",
+                )
+                delta = after.minus(transcript_before)
+                if delta.total_tokens and (usage is None or delta.total_tokens > usage.total_tokens):
+                    usage = TokenUsage(
+                        input_tokens=delta.input_tokens,
+                        cache_creation_input_tokens=delta.cache_creation_input_tokens,
+                        cache_read_input_tokens=delta.cache_read_input_tokens,
+                        output_tokens=delta.output_tokens,
+                        cost_usd=usage.cost_usd if usage else None,
+                        provider_turns=usage.provider_turns if usage else None,
+                    )
+                    usage_source = "transcript_delta"
+            status = "completed" if error is None else (
+                "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
+            )
+            try:
+                await asyncio.to_thread(
+                    store.finish_agent_usage_invocation,
+                    invocation_id,
+                    status=status,
+                    usage_source=usage_source or "unavailable",
+                    input_tokens=usage.input_tokens if usage else None,
+                    cache_creation_input_tokens=(
+                        usage.cache_creation_input_tokens if usage else None
+                    ),
+                    cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
+                    output_tokens=usage.output_tokens if usage else None,
+                    total_tokens=usage.total_tokens if usage else None,
+                    cost_usd=usage.cost_usd if usage else None,
+                    provider_turns=usage.provider_turns if usage else None,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    external_session_id=result.session_id if result else None,
+                    error=repr(error)[:2000] if error else None,
+                )
+            except Exception:
+                LOGGER.exception("Failed to finish agent usage invocation %s", invocation_id)
+
+
+async def run_claude(
+    settings: Settings,
+    session: AgentSession,
+    prompt: str,
+    control: ActiveAgentRun,
+    *,
+    force_resume: bool = False,
+    environment_overrides: dict[str, str] | None = None,
+    initial_instruction: str = CLAUDE_INITIAL_INSTRUCTION,
+    command_options: Sequence[str] = (),
+    usage_context: AgentUsageContext | None = None,
+) -> AgentRunResult:
+    """Run Claude and persist one usage row for this exact provider invocation."""
+    session_id = session.external_session_id or ""
+    before = await asyncio.to_thread(
+        transcript_usage, transcript_directory(settings.agent_workspace), session_id
+    )
+    return await _recorded_agent_call(
+        settings,
+        session,
+        _usage_context(session, usage_context),
+        lambda: _run_claude(
+            settings,
+            session,
+            prompt,
+            control,
+            force_resume=force_resume,
+            environment_overrides=environment_overrides,
+            initial_instruction=initial_instruction,
+            command_options=command_options,
+        ),
+        transcript_before=before,
+    )
+
+
+async def _run_codex(
     settings: Settings,
     session: AgentSession,
     prompt: str,
@@ -980,7 +1129,12 @@ async def run_codex(
             f"{initial_instruction}{prompt}" if session.external_session_id is None else prompt
         )
         text = await server.run_turn(effective_prompt)
-        return AgentRunResult(session_id=session_id, text=text)
+        return AgentRunResult(
+            session_id=session_id,
+            text=text,
+            usage=server.last_usage,
+            usage_source="provider_event" if server.last_usage is not None else None,
+        )
     except TimeoutError:
         raise AgentTimeoutError(
             f"Agent turn exceeded the {settings.agent_timeout_seconds}-second timeout"
@@ -994,6 +1148,34 @@ async def run_codex(
     finally:
         control.codex = None
         await server.close()
+
+
+async def run_codex(
+    settings: Settings,
+    session: AgentSession,
+    prompt: str,
+    control: ActiveAgentRun,
+    store: EventStore,
+    environment_overrides: dict[str, str] | None = None,
+    initial_instruction: str = INITIAL_INSTRUCTION,
+    *,
+    usage_context: AgentUsageContext | None = None,
+) -> AgentRunResult:
+    """Run Codex and persist one usage row for this exact provider invocation."""
+    return await _recorded_agent_call(
+        settings,
+        session,
+        _usage_context(session, usage_context),
+        lambda: _run_codex(
+            settings,
+            session,
+            prompt,
+            control,
+            store,
+            environment_overrides,
+            initial_instruction,
+        ),
+    )
 
 
 class AgentOrchestrator:
@@ -1122,6 +1304,7 @@ class AgentOrchestrator:
         optional_reply: bool = False,
         require_artifact: bool = False,
         automated: bool = False,
+        agent_name: str | None = None,
         reuse_key: str | None = None,
         reuse_mention_line: str | None = None,
         files: Sequence[Mapping[str, Any]] = (),
@@ -1178,6 +1361,7 @@ class AgentOrchestrator:
             "optional_reply": optional_reply,
             "require_artifact": require_artifact,
             "automated": automated,
+            "agent_name": agent_name,
             "reuse_key": reuse_key,
             "reuse_mention_line": reuse_mention_line,
         }
@@ -1241,6 +1425,7 @@ class AgentOrchestrator:
                 optional_reply=optional_reply,
                 require_artifact=require_artifact,
                 automated=automated,
+                agent_name=agent_name,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
@@ -1274,6 +1459,9 @@ class AgentOrchestrator:
                     optional_reply=bool(options.get("optional_reply", False)),
                     require_artifact=bool(options.get("require_artifact", False)),
                     automated=bool(options.get("automated", False)),
+                    agent_name=(
+                        str(options["agent_name"]) if options.get("agent_name") else None
+                    ),
                     files=options.get("files", []),
                 ),
                 name=f"recovered-agent-turn-{channel_id}-{message_ts}",
@@ -1310,6 +1498,7 @@ class AgentOrchestrator:
             text += "\n\n" + role_policy
         parsed = parse_agent_request(text, self.settings)
         run_id = str(uuid.uuid4())
+        usage_context = context_for_job(job_name, source_run_id=run_id)
         session = AgentSession(
             channel_id="scheduled",
             thread_ts=run_id,
@@ -1375,6 +1564,7 @@ class AgentOrchestrator:
                     parsed.prompt,
                     control,
                     environment_overrides=environment_overrides,
+                    usage_context=usage_context,
                 )
             else:
                 result = await run_codex(
@@ -1384,6 +1574,7 @@ class AgentOrchestrator:
                     control,
                     self.store,
                     environment_overrides,
+                    usage_context=usage_context,
                 )
             return result
 
@@ -1413,6 +1604,7 @@ class AgentOrchestrator:
                             control,
                             force_resume=True,
                             environment_overrides=environment_overrides,
+                            usage_context=usage_context,
                         ),
                         context="scheduled agent timeout recovery",
                     )
@@ -1424,6 +1616,7 @@ class AgentOrchestrator:
                         control,
                         self.store,
                         environment_overrides,
+                        usage_context=usage_context,
                     )
                 result = replace(
                     result,
@@ -1456,6 +1649,7 @@ class AgentOrchestrator:
                         control,
                         force_resume=True,
                         environment_overrides=environment_overrides,
+                        usage_context=usage_context,
                     )
                 else:
                     continue_provider = partial(
@@ -1466,6 +1660,7 @@ class AgentOrchestrator:
                         control,
                         self.store,
                         environment_overrides,
+                        usage_context=usage_context,
                     )
                 result = await self._run_with_retries(
                     continue_provider,
@@ -1558,6 +1753,7 @@ class AgentOrchestrator:
             session_id=result.session_id,
             text=response,
             run_id=run_id,
+            job_name=job_name,
         )
 
     async def resume_interrupted_headless(
@@ -1574,6 +1770,8 @@ class AgentOrchestrator:
         completed: list[HeadlessAgentRun] = []
         for row in rows:
             run_id = str(row["run_id"])
+            recovered_job_name = str(row["job_name"])
+            usage_context = context_for_job(recovered_job_name, source_run_id=run_id)
             if (
                 row["status"] == "recovered"
                 and isinstance(row["result_text"], str)
@@ -1586,6 +1784,7 @@ class AgentOrchestrator:
                         session_id=str(row["external_session_id"] or ""),
                         text=str(row["result_text"]),
                         run_id=run_id,
+                        job_name=recovered_job_name,
                     )
                 )
                 continue
@@ -1633,6 +1832,7 @@ class AgentOrchestrator:
                 run_settings: Settings = run_settings,
                 recovery_prompt: str = recovery_prompt,
                 control: ActiveAgentRun = control,
+                usage_context: AgentUsageContext = usage_context,
             ) -> AgentRunResult:
                 environment_overrides = await self._agent_environment(automated=True)
                 if session.provider == "claude":
@@ -1643,6 +1843,7 @@ class AgentOrchestrator:
                         control,
                         force_resume=True,
                         environment_overrides=environment_overrides,
+                        usage_context=usage_context,
                     )
                 return await run_codex(
                     run_settings,
@@ -1651,6 +1852,7 @@ class AgentOrchestrator:
                     control,
                     self.store,
                     environment_overrides,
+                    usage_context=usage_context,
                 )
 
             try:
@@ -1732,6 +1934,7 @@ class AgentOrchestrator:
                             control,
                             force_resume=True,
                             environment_overrides=environment_overrides,
+                            usage_context=usage_context,
                         ),
                         context=f"recovered scheduled turn {run_id} timeout recovery",
                     )
@@ -1743,6 +1946,7 @@ class AgentOrchestrator:
                         control,
                         self.store,
                         environment_overrides,
+                        usage_context=usage_context,
                     )
                 result = replace(
                     result,
@@ -1776,6 +1980,7 @@ class AgentOrchestrator:
                         control,
                         force_resume=True,
                         environment_overrides=environment_overrides,
+                        usage_context=usage_context,
                     )
                 else:
                     continue_provider = partial(
@@ -1786,6 +1991,7 @@ class AgentOrchestrator:
                         control,
                         self.store,
                         environment_overrides,
+                        usage_context=usage_context,
                     )
                 result = await self._run_with_retries(
                     continue_provider,
@@ -1805,6 +2011,7 @@ class AgentOrchestrator:
                     session_id=result.session_id,
                     text=result.text,
                     run_id=run_id,
+                    job_name=recovered_job_name,
                 )
             )
             self._active_runs.pop(key, None)
@@ -1827,6 +2034,7 @@ class AgentOrchestrator:
             run.provider,
             run.model,
             run.session_id,
+            slack_agent_name(run.job_name),
         )
         await asyncio.to_thread(
             self.store.finish_agent_turn,
@@ -1969,6 +2177,7 @@ class AgentOrchestrator:
         optional_reply: bool,
         require_artifact: bool,
         automated: bool,
+        agent_name: str | None = None,
         files: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         key = (channel_id, thread_ts)
@@ -2048,6 +2257,7 @@ class AgentOrchestrator:
                         parsed.provider,
                         parsed.model,
                         preassigned_id,
+                        agent_name or "slack/general",
                     )
                 elif DIRECTIVE_RE.match(text):
                     if parsed.provider != session.provider or parsed.model != session.model:
@@ -2087,6 +2297,10 @@ class AgentOrchestrator:
                 control = ActiveAgentRun(session.provider, steerable=not optional_reply)
                 control.enforce_claude_budget = automated and session.provider == "claude"
                 self._active_runs[key] = control
+                usage_context = slack_context(
+                    session.agent_name,
+                    source_run_id=f"{channel_id}:{message_ts}",
+                )
                 environment_overrides = {
                     **(
                         self.vpn.agent_environment()
@@ -2116,6 +2330,7 @@ class AgentOrchestrator:
                                         control,
                                         force_resume=force_resume,
                                         environment_overrides=environment_overrides,
+                                        usage_context=usage_context,
                                     ),
                                     context=f"Slack thread {thread_ts}",
                                 )
@@ -2168,6 +2383,7 @@ class AgentOrchestrator:
                                     control,
                                     force_resume=True,
                                     environment_overrides=environment_overrides,
+                                    usage_context=usage_context,
                                 ),
                                 context=f"Slack thread {thread_ts} path-guard recovery",
                             )
@@ -2201,6 +2417,7 @@ class AgentOrchestrator:
                                     control,
                                     force_resume=True,
                                     environment_overrides=environment_overrides,
+                                    usage_context=usage_context,
                                 ),
                                 context=f"Slack thread {thread_ts} final deliverable recovery",
                             )
@@ -2223,6 +2440,7 @@ class AgentOrchestrator:
                                 control,
                                 self.store,
                                 environment_overrides,
+                                usage_context=usage_context,
                             ),
                             context=f"Slack thread {thread_ts}",
                         )
@@ -2250,6 +2468,7 @@ class AgentOrchestrator:
                                     control,
                                     force_resume=True,
                                     environment_overrides=environment_overrides,
+                                    usage_context=usage_context,
                                 ),
                                 context=f"Slack thread {thread_ts} timeout recovery",
                             )
@@ -2261,6 +2480,7 @@ class AgentOrchestrator:
                                 control,
                                 self.store,
                                 environment_overrides,
+                                usage_context=usage_context,
                             )
                         result = replace(
                             result,
@@ -2349,6 +2569,7 @@ class AgentOrchestrator:
                                                 run_claude, recovery_settings, session, recovery_prompt,
                                                 control, force_resume=True,
                                                 environment_overrides=environment_overrides,
+                                                usage_context=usage_context,
                                             ),
                                             context=f"Slack thread {thread_ts} completion recovery",
                                         )
@@ -2357,6 +2578,7 @@ class AgentOrchestrator:
                                             partial(
                                                 run_codex, recovery_settings, session, recovery_prompt,
                                                 control, self.store, environment_overrides,
+                                                usage_context=usage_context,
                                             ),
                                             context=f"Slack thread {thread_ts} completion recovery",
                                         )

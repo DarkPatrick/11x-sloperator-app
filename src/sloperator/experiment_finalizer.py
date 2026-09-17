@@ -166,9 +166,11 @@ Execution for the selected experiment:
    only; do not send Slack yourself.
 
 Preparation result:
-- Return exactly `FINALIZATION_PREPARED: <experiment id> | <project page URL> | Iteration <n>` after
-  Confluence verification. Return `{NO_OP_NOTIFICATION}` for no eligible candidates, or a concise
-  `Experiment finalisation failed: <reason>` line on failure. Do not return any other text.
+- After Confluence verification, return
+  `FINALIZATION_PREPARED: <experiment id> | <project page URL> | Iteration <n>` as the exact first
+  line, followed by the private evidence handoff the reviewer needs. Return `{NO_OP_NOTIFICATION}`
+  for no eligible candidates, or a concise `Experiment finalisation failed: <reason>` line on
+  failure.
 
 Final notification (reviewer only):
 - Return the final notification to Sloperator only from the independent reviewer; it will publish it as one top-level message in the
@@ -303,7 +305,9 @@ class InvalidFinalizationNotification(ValueError):
     """The scheduled agent returned text that is unsafe to publish directly."""
 
 
-PREPARED_RE = re.compile(r"FINALIZATION_PREPARED:\s*(\d+)\s*\|\s*(\S+)\s*\|\s*Iteration\s+(\d+)")
+PREPARED_RE = re.compile(
+    r"^FINALIZATION_PREPARED:\s*(\d+)\s*\|\s*(\S+)\s*\|\s*Iteration\s+(\d+)[ \t]*(?:\n|$)"
+)
 
 
 STARTED_RE = re.compile(
@@ -323,7 +327,11 @@ def is_reviewer_result(text: str) -> bool:
 
 def is_preparation_result(text: str) -> bool:
     stripped = text.strip()
-    return bool(PREPARED_RE.search(stripped) or stripped.startswith(NO_OP_PREFIX) or stripped.startswith(FAILURE_PREFIXES))
+    return bool(
+        PREPARED_RE.match(stripped)
+        or stripped.startswith(NO_OP_PREFIX)
+        or stripped.startswith(FAILURE_PREFIXES)
+    )
 
 
 def normalize_finalization_notification(text: str) -> str:
@@ -407,11 +415,13 @@ async def run_preparation(
     prepared_text = prepared_run.text.strip()
     if prepared_text.startswith(NO_OP_PREFIX) or prepared_text.startswith(FAILURE_PREFIXES):
         raise InvalidFinalizationNotification(prepared_text)
-    if PREPARED_RE.search(prepared_text) is None:
+    if PREPARED_RE.match(prepared_text) is None:
         raise InvalidFinalizationNotification("Preparation agent returned no FINALIZATION_PREPARED marker")
-    prepared = PREPARED_RE.fullmatch(prepared_text)
+    prepared = PREPARED_RE.match(prepared_text)
     started = STARTED_RE.fullmatch(started_run.text.strip())
-    if prepared is None or started is None or prepared.groups() != started.groups()[:3]:
+    if prepared is None or started is None:
+        raise InvalidFinalizationNotification("Invalid finalization start or preparation marker")
+    if prepared.groups() != started.groups()[:3]:
         raise InvalidFinalizationNotification("Preparation does not match reviewer selection")
     return await run_review(
         client, agent, settings, prepared_text,
@@ -427,7 +437,7 @@ async def run_review(
     reviewer_session_id: str | None = None,
     start_context: str = "",
 ) -> str:
-    if PREPARED_RE.fullmatch(prepared_text.strip()) is None:
+    if PREPARED_RE.match(prepared_text.strip()) is None:
         raise InvalidFinalizationNotification("Invalid preparation result")
     review_run = await agent.execute_once(
         REVIEW_PROMPT.format(prepared_result=prepared_text + "\n" + start_context),

@@ -17,6 +17,7 @@ from sloperator.experiment_finalizer import (
     START_PROMPT,
     InvalidFinalizationNotification,
     is_finalization_notification,
+    is_preparation_result,
     next_run_at,
     normalize_finalization_notification,
     run_once,
@@ -174,6 +175,45 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     attached_run = agent.attach_session.await_args.args[2]
     assert attached_run.text == VALID_NOTIFICATION.strip()
     assert attached_run.session_id == review_run.session_id
+
+
+async def test_worker_private_handoff_reaches_reviewer() -> None:
+    prepared_text = (
+        "FINALIZATION_PREPARED: 7607 | https://alice.example/project | Iteration 3\n\n"
+        "Private evidence handoff for the reviewer."
+    )
+    client = SimpleNamespace(
+        chat_postMessage=AsyncMock(return_value={"channel": "CFINAL", "ts": "100.1"}),
+    )
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(
+            side_effect=[
+                HeadlessAgentRun(
+                    "claude",
+                    "opus",
+                    "reviewer-session",
+                    "FINALIZATION_STARTED: 7607 | https://alice.example/project | "
+                    "Iteration 3 | UMN-13000",
+                ),
+                HeadlessAgentRun("claude", "opus", "worker-session", prepared_text),
+                HeadlessAgentRun("claude", "opus", "reviewer-session", VALID_NOTIFICATION),
+            ]
+        ),
+        attach_session=AsyncMock(),
+    )
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        experiment_finalizer_channel="CFINAL",
+    )
+
+    assert is_preparation_result(prepared_text)
+    await run_once(client, agent, settings)
+
+    review_call = agent.execute_once.await_args_list[2]
+    assert prepared_text in review_call.args[0]
+    assert review_call.kwargs["existing_session_id"] == "reviewer-session"
 
 
 def test_notification_normalizer_removes_operational_preamble() -> None:

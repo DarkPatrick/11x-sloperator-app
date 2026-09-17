@@ -1315,6 +1315,19 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
         "{{ current rate vs baseline · estimated loss }}\n"
         "{{ incident responders }} · investigation in thread"
     )
+    alert_dashboard_summary = (
+        "> No agent runs for this trigger — it executes the deterministic "
+        "`ug-ai-analyst` pipeline.\n\n"
+        "1. `scripts/alert_dashboard_registry.py` — rebuild the metric -> source card registry\n"
+        "2. `scripts/alert_dashboard_parse_report.py --red-only` — the run's "
+        ":red_circle: alerts\n"
+        "3. `scripts/alert_dashboard_build_sql.py --red-only --validate` — one chart plus two "
+        "KPI queries per alert\n"
+        "4. `scripts/alert_dashboard_publish.py` — rebuild dashboard "
+        f"{settings.alert_dashboard_id} in collection {settings.alert_dashboard_collection}\n\n"
+        "The channel then gets one line: `:bar_chart: Свежий дашборд за <date> по аномалиям "
+        "собран`, linking the dashboard from the opening phrase."
+    )
     preview_note = (
         "> Preview: values in `{{ double braces }}` are filled from the triggering Slack "
         "report. The surrounding instructions are the current production prompt.\n\n"
@@ -1359,6 +1372,19 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             "condition": "Red critical metrics in the Web report section",
             "limit": "at most 5 metrics per report",
             "prompt": preview_note + web_prompt,
+        },
+        {
+            "key": "alert-dashboard",
+            "name": "Daily red-alert dashboard rebuild",
+            "channel_id": settings.mobile_health_alert_channel,
+            "channel_name": "ug-monetization-metrics-monitoring",
+            "source": settings.mobile_health_bot_id,
+            "condition": (
+                "All three monitoring reports of one run have arrived "
+                "(WEB health, Mobile health, WEB subscriptions)"
+            ),
+            "limit": "one rebuild per run; announced in the channel",
+            "prompt": alert_dashboard_summary,
         },
         {
             "key": "payment-layer",

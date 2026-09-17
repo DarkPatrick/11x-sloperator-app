@@ -144,6 +144,27 @@ reports. Sloperator selects at most five red critical metrics from the Web secti
 an equivalent investigation grounded in dashboard 104's card-level SQL and the repository's
 `ug_web_health_monitoring.md` knowledge source.
 
+## Daily red-alert dashboard
+
+The monitor posts three reports per run into `#ug-monetization-metrics-monitoring` a few
+minutes apart: `UG Monetisation: WEB health monitoring`, `UG Monetisation: Mobile Health
+Monitoring Dashboard`, and `UG Monetisation: WEB Subscriptions Monitoring`. Sloperator waits
+until all three of one run have arrived, including their continuation chunks, and then rebuilds
+the "Daily red alerts" Metabase dashboard from their `:red_circle:` alerts.
+
+The rebuild runs no agent. It executes the `ug-ai-analyst` pipeline directly — the metric
+registry, the report parser, the per-alert chart and KPI query generator, and the publisher —
+so every red alert becomes one chart plus two KPI tiles, grouped into Web / iOS / Android / Web
+subscriptions tabs. Sloperator then posts one line into the channel — `:bar_chart: Свежий
+дашборд за <date> по аномалиям собран`, with the dashboard link behind the opening phrase — and
+a failed rebuild is reported privately to the owner instead.
+
+Only the last report of a run starts the rebuild, and the run is recorded in
+`data/alert-dashboard-state.json`, so a redelivered event or a service restart does not rebuild
+it twice. Reports further apart than an hour belong to different runs and never complete a set.
+Configure it with `ALERT_DASHBOARD_DETECTOR_SRC`, `ALERT_DASHBOARD_ID`,
+`ALERT_DASHBOARD_COLLECTION`, and `ALERT_DASHBOARD_TIMEOUT_SECONDS`.
+
 Confirmed Analytics Bot anomalies are deduplicated per metric, platform, and metric type.
 Once an agent investigation is launched for a combination, repeated alerts for that same
 combination are excluded from agent analysis for 24 hours; new combinations in a mixed alert

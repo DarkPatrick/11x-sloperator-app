@@ -12,6 +12,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import AgentOrchestrator, SubmitResult, thread_key
+from sloperator.alert_dashboard import AlertDashboardResponder, is_alert_dashboard_trigger
 from sloperator.anomaly_alerts import AnomalyAlertResponder, is_anomaly_trigger
 from sloperator.archive import ArchiveMiddleware
 from sloperator.automation_controls import AutomationControls
@@ -131,6 +132,8 @@ def create_app(
     anomaly_responder = AnomalyAlertResponder(settings, store, orchestrator)
     mobile_health_responder = MobileHealthResponder(settings, orchestrator)
     web_health_responder = WebHealthResponder(settings, orchestrator)
+    alert_dashboard_responder = AlertDashboardResponder(settings)
+    alert_dashboard_tasks: set[asyncio.Task[None]] = set()
     subscription_flow_responder = subscription_flow_responder or SubscriptionFlowResponder(
         settings,
         store,
@@ -151,6 +154,12 @@ def create_app(
         def enabled(key: str) -> bool:
             return automation_controls is None or not automation_controls.disabled("triggers", key)
 
+        if enabled("alert-dashboard") and is_alert_dashboard_trigger(dict(event), settings):
+            # One rebuild consumes all three reports of a run, so it watches the same messages
+            # the health triggers below answer and must never consume the event itself.
+            task = asyncio.create_task(alert_dashboard_responder.handle(dict(event), client))
+            alert_dashboard_tasks.add(task)
+            task.add_done_callback(alert_dashboard_tasks.discard)
         if enabled("analytics-anomaly") and is_anomaly_trigger(dict(event), settings):
             await anomaly_responder.handle(dict(event), client)
             return

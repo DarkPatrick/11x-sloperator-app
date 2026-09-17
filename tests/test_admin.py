@@ -230,6 +230,7 @@ def test_slack_trigger_definitions_include_all_automatic_investigations() -> Non
         "subscription-flow",
         "mobile-health",
         "web-health",
+        "alert-dashboard",
         "payment-layer",
     ]
     assert definitions[2]["channel_id"] == settings.mobile_health_alert_channel
@@ -239,8 +240,11 @@ def test_slack_trigger_definitions_include_all_automatic_investigations() -> Non
     assert "context/data-warehouse/anomaly-detection.md" in definitions[2]["prompt"]
     assert definitions[3]["channel_id"] == settings.mobile_health_alert_channel
     assert "ug_web_health_monitoring.md" in definitions[3]["prompt"]
-    assert definitions[4]["channel_id"] == settings.payment_layer_alert_channel
-    assert "no more than five short lines" in definitions[4]["prompt"]
+    assert definitions[4]["channel_id"] == settings.mobile_health_alert_channel
+    assert "alert_dashboard_publish.py" in definitions[4]["prompt"]
+    assert str(settings.alert_dashboard_id) in definitions[4]["prompt"]
+    assert definitions[5]["channel_id"] == settings.payment_layer_alert_channel
+    assert "no more than five short lines" in definitions[5]["prompt"]
 
 
 def test_cron_refresh_preserves_expanded_sections_and_scroll() -> None:

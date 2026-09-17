@@ -95,6 +95,12 @@ class Settings:
     subscription_flow_alert_channel: str = "C06FADPMGKT"
     mobile_health_alert_channel: str = "C0AJKHFHVHV"
     mobile_health_bot_id: str = "B0AM51CS2H5"
+    alert_dashboard_detector_src: Path = Path(
+        "/home/egor/projects/analytics-tools/metabase-anomaly-detector/src"
+    )
+    alert_dashboard_id: int = 539
+    alert_dashboard_collection: int = 865
+    alert_dashboard_timeout_seconds: int = 3_600
     payment_layer_alert_channel: str = "C06FADPMGKT"
     clickhouse_host: str | None = None
     clickhouse_port: int = 8443
@@ -211,6 +217,12 @@ class Settings:
             "MOBILE_HEALTH_ALERT_CHANNEL", "C0AJKHFHVHV"
         ).strip()
         mobile_health_bot_id = os.environ.get("MOBILE_HEALTH_BOT_ID", "B0AM51CS2H5").strip()
+        alert_dashboard_detector_src = Path(
+            os.environ.get(
+                "ALERT_DASHBOARD_DETECTOR_SRC",
+                "/home/egor/projects/analytics-tools/metabase-anomaly-detector/src",
+            ).strip()
+        )
         payment_layer_alert_channel = os.environ.get(
             "PAYMENT_MONITOR_ALERT_CHANNEL", "C06FADPMGKT"
         ).strip()
@@ -245,6 +257,13 @@ class Settings:
             anomaly_window_hours = float(os.environ.get("ANOMALY_WINDOW_HOURS", "24"))
             anomaly_threshold = float(os.environ.get("ANOMALY_THRESHOLD", "0.10"))
             anomaly_days_before = int(float(os.environ.get("ANOMALY_DAYS_BEFORE", "1")))
+            alert_dashboard_id = int(os.environ.get("ALERT_DASHBOARD_ID", "539"))
+            alert_dashboard_collection = int(
+                os.environ.get("ALERT_DASHBOARD_COLLECTION", "865")
+            )
+            alert_dashboard_timeout_seconds = int(
+                os.environ.get("ALERT_DASHBOARD_TIMEOUT_SECONDS", "3600")
+            )
             clickhouse_port = int(os.environ.get("CLICKHOUSE_PORT", "8443"))
         except ValueError as error:
             raise ConfigurationError(
@@ -355,6 +374,14 @@ class Settings:
             raise ConfigurationError("MOBILE_HEALTH_ALERT_CHANNEL must be a Slack channel ID")
         if not mobile_health_bot_id.startswith("B"):
             raise ConfigurationError("MOBILE_HEALTH_BOT_ID must be a Slack bot ID")
+        if alert_dashboard_id < 1 or alert_dashboard_collection < 1:
+            raise ConfigurationError(
+                "ALERT_DASHBOARD_ID and ALERT_DASHBOARD_COLLECTION must be positive"
+            )
+        if not 300 <= alert_dashboard_timeout_seconds <= 86_400:
+            raise ConfigurationError(
+                "ALERT_DASHBOARD_TIMEOUT_SECONDS must be between 300 and 86400"
+            )
         if not payment_layer_alert_channel.startswith("C"):
             raise ConfigurationError("PAYMENT_MONITOR_ALERT_CHANNEL must be a Slack channel ID")
         if not 1 <= clickhouse_port <= 65_535:
@@ -436,6 +463,10 @@ class Settings:
             subscription_flow_alert_channel=subscription_flow_alert_channel,
             mobile_health_alert_channel=mobile_health_alert_channel,
             mobile_health_bot_id=mobile_health_bot_id,
+            alert_dashboard_detector_src=alert_dashboard_detector_src,
+            alert_dashboard_id=alert_dashboard_id,
+            alert_dashboard_collection=alert_dashboard_collection,
+            alert_dashboard_timeout_seconds=alert_dashboard_timeout_seconds,
             payment_layer_alert_channel=payment_layer_alert_channel,
             clickhouse_host=clickhouse_host,
             clickhouse_port=clickhouse_port,

@@ -10,7 +10,9 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
 
+from sloperator.agents import retry_claude_quota
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
+from sloperator.claude_budget import ClaudeQuotaExceeded, quota_exhausted
 from sloperator.config import Settings
 
 LOGGER = logging.getLogger(__name__)
@@ -19,6 +21,8 @@ TIMEZONE_NAME = "UTC"
 HOUR = 0
 TIMEOUT_SECONDS = 14_400
 PROMPT_SOURCE = "ug-ai-analyst scripts/skill_docs_prompt.md"
+# Printed by the repository sync when it stops on a spent Claude allowance (its EX_TEMPFAIL path).
+QUOTA_SENTINEL = "SKILL_DOCS_QUOTA_EXHAUSTED"
 PROMPT = f"""\
 {AUTOMATED_RESPONSE_STYLE}
 
@@ -66,6 +70,11 @@ async def _run_command(
     output = stdout.decode(errors="replace").strip()
     if process.returncode != 0:
         tail = output[-2_000:] if output else "no output"
+        # The sync stops itself on a spent allowance and reports it verbatim; hand it to the
+        # shared quota wait instead of burning the day's attempt on a failure that only time
+        # fixes. The whole output is searched: the refusal is logged before the exit summary.
+        if QUOTA_SENTINEL in output or quota_exhausted(output):
+            raise ClaudeQuotaExceeded(f"skill docs sync stopped on the Claude usage limit: {tail}")
         raise SkillDocsSyncError(
             f"{' '.join(command[:3])} exited {process.returncode}: {tail}"
         )
@@ -115,7 +124,11 @@ async def run_daily(
             continue
         try:
             LOGGER.info("Starting scheduled skill docs sync")
-            output = await run_once(settings)
+            output = await retry_claude_quota(
+                lambda: run_once(settings),
+                settings,
+                context="Scheduled skill docs sync",
+            )
             if output:
                 LOGGER.info("Skill docs sync output: %s", output[-2_000:])
             LOGGER.info("Skill docs sync completed")

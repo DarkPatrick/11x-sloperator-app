@@ -86,8 +86,13 @@ async def test_spending_stops_are_never_retried(error):
 
 async def test_provider_quota_response_is_detected(tmp_path, monkeypatch):
     settings = Settings(
-        slack_user_id="U123", bot_token="test", app_token="test", agent_workspace=tmp_path
+        slack_user_id="U123",
+        bot_token="test",
+        app_token="test",
+        agent_workspace=tmp_path,
+        database_path=tmp_path / "state.sqlite3",
     )
+    EventStore(settings.database_path).initialize()
     session = AgentSession(
         channel_id="C123",
         thread_ts="1",
@@ -118,8 +123,10 @@ async def test_run_claude_enforces_budget_before_launch(tmp_path, monkeypatch):
         bot_token="test",
         app_token="test",
         agent_workspace=tmp_path,
+        database_path=tmp_path / "state.sqlite3",
         automated_claude_output_budget=10,
     )
+    EventStore(settings.database_path).initialize()
     session = AgentSession(
         channel_id="C123",
         thread_ts="1",

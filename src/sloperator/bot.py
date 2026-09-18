@@ -132,7 +132,7 @@ def create_app(
     anomaly_responder = AnomalyAlertResponder(settings, store, orchestrator)
     mobile_health_responder = MobileHealthResponder(settings, orchestrator)
     web_health_responder = WebHealthResponder(settings, orchestrator)
-    alert_dashboard_responder = AlertDashboardResponder(settings)
+    alert_dashboard_responder = AlertDashboardResponder(settings, store)
     alert_dashboard_tasks: set[asyncio.Task[None]] = set()
     subscription_flow_responder = subscription_flow_responder or SubscriptionFlowResponder(
         settings,

@@ -27,6 +27,7 @@ from typing import Any
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.config import Settings
+from sloperator.store import EventStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -166,11 +167,35 @@ def announcement(published: PublishedDashboard, date: str | None) -> str:
 class AlertDashboardResponder:
     """Wait for a full report run, rebuild the dashboard, and announce it in the channel."""
 
-    def __init__(self, settings: Settings) -> None:
+    TRIGGER_KEY = "alert-dashboard"
+
+    def __init__(self, settings: Settings, store: EventStore | None = None) -> None:
         self.settings = settings
+        self.store = store
         self.workspace = settings.agent_workspace.resolve()
         self.state_path = settings.database_path.parent / "alert-dashboard-state.json"
         self._in_flight: set[str] = set()
+
+    async def _record(self, message_ts: str, status: str, detail: str | None = None) -> None:
+        """Report this run to the admin trigger calendar.
+
+        This trigger launches no agent, so it leaves no `agent_requests` row and would be
+        invisible in the admin UI otherwise. Reporting must never break a rebuild that is
+        otherwise fine, so a bookkeeping failure is logged and swallowed.
+        """
+        if self.store is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self.store.record_pipeline_trigger_run,
+                self.TRIGGER_KEY,
+                self.settings.mobile_health_alert_channel,
+                message_ts,
+                status,
+                detail,
+            )
+        except Exception:                                  # noqa: BLE001 — never fail the run
+            LOGGER.exception("Could not record the alert dashboard run %s", message_ts)
 
     async def handle(self, event: dict[str, Any], client: AsyncWebClient) -> None:
         message_ts = event.get("ts")
@@ -194,11 +219,14 @@ class AlertDashboardResponder:
             if await asyncio.to_thread(self._already_built, run_ts):
                 LOGGER.info("Alert dashboard for run %s was already rebuilt", run_ts)
                 return
+            await self._record(run_ts, "running")
             await self._rebuild_and_announce(client, reports, run_ts)
+            await self._record(run_ts, "completed")
         except asyncio.CancelledError:
             raise
         except Exception as error:
             LOGGER.exception("Alert dashboard rebuild failed for message %s", message_ts)
+            await self._record(message_ts, "failed", str(error)[-1_000:])
             await self._notify_owner(client, str(error))
         finally:
             self._in_flight.discard(message_ts)

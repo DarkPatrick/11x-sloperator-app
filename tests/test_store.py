@@ -324,6 +324,35 @@ def test_slack_trigger_runs_link_requests_to_agent_sessions(tmp_path: Path) -> N
     assert runs[0]["slack_url"] == "https://slack.com/archives/CMOBILE/p1001"
 
 
+def test_slack_trigger_runs_include_web_health_launches(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    assert store.claim_agent_request("CWEB", "200.1:web-health-analysis", "200.1")
+    store.finish_agent_request("CWEB", "200.1:web-health-analysis", "completed")
+
+    runs = store.list_slack_trigger_runs()
+
+    assert [run["trigger"] for run in runs] == ["web-health"]
+
+
+def test_slack_trigger_runs_include_agentless_pipeline_runs(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.record_pipeline_trigger_run("alert-dashboard", "CMON", "300.1", "running")
+    store.record_pipeline_trigger_run("alert-dashboard", "CMON", "300.1", "completed")
+
+    runs = store.list_slack_trigger_runs()
+
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["trigger"] == "alert-dashboard"
+    assert run["status"] == "completed"
+    # No agent ran, so the calendar must not offer a session link for this row.
+    assert run["session_exists"] is False
+    assert run["session_status"] is None
+    assert run["slack_url"] == "https://slack.com/archives/CMON/p3001"
+
+
 def test_store_redacts_vpn_otp_from_event_and_message(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "archive.sqlite3")
     store.initialize()

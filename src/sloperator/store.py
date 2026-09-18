@@ -198,6 +198,17 @@ CREATE TABLE IF NOT EXISTS anomaly_analysis_cooldowns (
     PRIMARY KEY (metric, platform, metric_type)
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS pipeline_trigger_runs (
+    trigger_key TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_ts TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    detail TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (trigger_key, channel_id, message_ts)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS delivered_agent_artifacts (
     channel_id TEXT NOT NULL,
     thread_ts TEXT NOT NULL,
@@ -731,12 +742,93 @@ class EventStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_pipeline_trigger_run(
+        self,
+        trigger_key: str,
+        channel_id: str,
+        message_ts: str,
+        status: str,
+        detail: str | None = None,
+    ) -> None:
+        """Record a run of a trigger that launches no agent.
+
+        The admin trigger calendar is otherwise built from `agent_requests`, so a trigger that
+        does its work itself — the alert-dashboard rebuild runs four deterministic scripts —
+        would never appear there, however many times it fired. It reports here instead, keyed by
+        the Slack message that started the run so a redelivery updates the row rather than
+        adding one.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pipeline_trigger_runs
+                    (trigger_key, channel_id, message_ts, status, detail)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(trigger_key, channel_id, message_ts) DO UPDATE SET
+                    status = excluded.status,
+                    detail = excluded.detail,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (trigger_key, channel_id, message_ts, status, detail),
+            )
+            connection.commit()
+
+    def _pipeline_trigger_runs(self, days: int) -> list[dict[str, Any]]:
+        """The agentless half of the trigger calendar, shaped like the agent-backed half."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT p.trigger_key, p.channel_id,
+                       COALESCE(c.name, p.channel_id) AS channel_name,
+                       p.message_ts, p.status, p.detail, p.created_at, p.updated_at
+                FROM pipeline_trigger_runs AS p
+                LEFT JOIN channels AS c ON c.channel_id = p.channel_id
+                WHERE datetime(p.created_at) >= datetime('now', ?)
+                ORDER BY datetime(p.created_at) DESC
+                """,
+                (f"-{days} days",),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            # The run is its own thread anchor: there is no agent thread to point at.
+            thread_ts = item["message_ts"]
+            result.append({
+                "channel_id": item["channel_id"],
+                "channel_name": item["channel_name"],
+                "message_ts": item["message_ts"],
+                "thread_ts": thread_ts,
+                "status": item["status"],
+                "detail": item["detail"],
+                "created_at": item["created_at"],
+                "updated_at": item["updated_at"],
+                # No agent ran, so the calendar must not offer a session link for this row.
+                "session_status": None,
+                "provider": None,
+                "model": None,
+                "external_session_id": None,
+                "trigger": item["trigger_key"],
+                "session_exists": False,
+                "slack_url": (
+                    f"https://slack.com/archives/{item['channel_id']}/"
+                    f"p{thread_ts.replace('.', '')}"
+                ),
+            })
+        return result
+
     def list_slack_trigger_runs(self, days: int = 28) -> list[dict[str, Any]]:
-        """Return recent event-driven agent launches for the admin trigger calendar."""
+        """Return recent event-driven trigger launches for the admin trigger calendar.
+
+        Two sources: triggers that hand the work to an agent leave a row in `agent_requests`,
+        and triggers that run a pipeline themselves report into `pipeline_trigger_runs`. Both
+        are returned in one list, newest first, in the same shape.
+        """
         suffixes = {
             ":monetisation-analysis": "analytics-anomaly",
             ":subscription-flow-analysis": "subscription-flow",
             ":mobile-health-analysis": "mobile-health",
+            ":web-health-analysis": "web-health",
         }
         with self._connect() as connection:
             connection.row_factory = sqlite3.Row
@@ -755,6 +847,7 @@ class EventStore:
                     r.message_ts LIKE '%:monetisation-analysis'
                     OR r.message_ts LIKE '%:subscription-flow-analysis'
                     OR r.message_ts LIKE '%:mobile-health-analysis'
+                    OR r.message_ts LIKE '%:web-health-analysis'
                   )
                 ORDER BY datetime(r.created_at) DESC
                 """,
@@ -774,6 +867,8 @@ class EventStore:
                 f"p{item['thread_ts'].replace('.', '')}"
             )
             result.append(item)
+        result.extend(self._pipeline_trigger_runs(days))
+        result.sort(key=lambda row: str(row["created_at"]), reverse=True)
         return result
 
     def thread_messages(

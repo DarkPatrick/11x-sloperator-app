@@ -34,6 +34,10 @@ VALID_NOTIFICATION = (
 def test_reviewer_owns_start_and_worker_cannot_write_jira() -> None:
     assert "transition ID 281" in START_PROMPT
     assert "customfield_10312" in START_PROMPT
+    assert "`search --jql ... --json`" in START_PROMPT
+    assert "`set-assignee <KEY> --as-bot --me`" in START_PROMPT
+    assert "`set-start-date <KEY> --as-bot --date YYYY-MM-DD`" in START_PROMPT
+    assert "ad-hoc Jira client" in START_PROMPT
     assert "Jira is read-only for you" in FINALIZATION_PROMPT
     assert "required and authorised in this preparation pass" not in FINALIZATION_PROMPT
 

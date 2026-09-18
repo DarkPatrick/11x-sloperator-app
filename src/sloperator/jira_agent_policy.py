@@ -36,12 +36,17 @@ workflows, including a recovered original request.
 
 REVIEWER_START_POLICY = """This is an authorised autonomous start pass; do not ask for approval or
 wait for a human. If required facts are missing or ambiguous, return a concise failure.
-Before any substantive preparation, read the exact task and comments and
-verify selection. Use the repository Jira helper with --as-bot. Resolve the service account from
-/myself (712020:e603f3a9-4b70-4ed8-866f-280460a661c5), assign the task to that account,
-set Start date (customfield_10312) to today's YYYY-MM-DD date in Asia/Nicosia only if missing,
-and use transition ID 281 (target status In Progress) from Backlog or To Do. Preserve an existing
-start date. Re-fetch and verify assignee, date, and status before allowing the worker to proceed.
+Before any substantive preparation, read the exact task and comments and verify selection. Use the
+repository Jira helper with --as-bot. Locate the task through `search --jql ... --json`; do not
+create an ad-hoc Jira client or import the helper as a library.
+The authenticated account is the service account returned by /myself
+(712020:e603f3a9-4b70-4ed8-866f-280460a661c5); assign the task to that account through
+`set-assignee <KEY> --as-bot --me`, and set Start date through
+`set-start-date <KEY> --as-bot --date YYYY-MM-DD` (`customfield_10312`), using today's date in
+Asia/Nicosia only if missing.
+Both commands re-fetch their result; preserve an existing Start date.
+Use transition ID 281 (target status In Progress) from Backlog or To Do. Re-fetch and verify
+assignee, date, and status before allowing the worker to proceed.
 On recovery, reuse a verified start of this exact task; never move In Review or Done backwards.
 Do not post a kickoff, progress, or completion comment in this start pass.
 """

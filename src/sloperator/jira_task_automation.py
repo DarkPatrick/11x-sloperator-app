@@ -177,18 +177,6 @@ async def read_confluence_comments(page_url: str, workspace: Path) -> list[dict[
     return [item for item in payload.get("comments", []) if isinstance(item, dict)]
 
 
-async def read_confluence_version(page_url: str, workspace: Path) -> int | None:
-    helper = workspace / ".claude" / "confluence" / "confluence_page.py"
-    proc = await asyncio.to_thread(
-        subprocess.run,
-        [str(workspace / ".venv" / "bin" / "python"), str(helper), "--dotenv", ".env", "--as-bot", "fetch", page_url],
-        cwd=workspace, capture_output=True, text=True, timeout=60, check=True,
-    )
-    payload = json.loads(proc.stdout)
-    value = payload.get("version")
-    return int(value) if isinstance(value, int) else None
-
-
 def latest_external_confluence_activity(
     comments: list[dict[str, Any]],
 ) -> dt.datetime | None:
@@ -200,7 +188,7 @@ def latest_external_confluence_activity(
             author_text = " ".join(str(value) for value in author.values())
         else:
             author_text = str(author or "")
-        if "ug-ai-analyst" in author_text.casefold():
+        if "ug-ai-analyst" in author_text.casefold() or SERVICE_ACCOUNT_ID in author_text:
             continue
         raw_timestamp = comment.get("updated") or comment.get("created")
         if not isinstance(raw_timestamp, str):
@@ -380,22 +368,26 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     )
                     page_context = str(link.get("confluence_page_url") or "No Confluence page URL is recorded yet.")
                     page_comments: list[dict[str, Any]] = []
-                    page_version: int | None = None
                     if link.get("confluence_page_url"):
-                        page_version = await read_confluence_version(
-                            str(link["confluence_page_url"]), settings.agent_workspace
-                        )
                         page_comments = await read_confluence_comments(
                             str(link["confluence_page_url"]), settings.agent_workspace
                         )
                     latest_page_activity = latest_external_confluence_activity(page_comments)
                     previous_jira = link.get("last_jira_updated_at")
-                    previous_page = link.get("confluence_page_version")
+                    # Existing tracked pages may have comments but no Confluence cursor.
+                    # Use enrollment/last activity as the baseline in that case.
+                    page_baseline = (
+                        link.get("last_confluence_activity_at")
+                        or link.get("last_activity_at")
+                        or previous_jira
+                    )
                     previous_page_activity = (
-                        dt.datetime.fromisoformat(str(link["last_confluence_activity_at"]))
-                        if link.get("last_confluence_activity_at")
+                        dt.datetime.fromisoformat(str(page_baseline))
+                        if page_baseline
                         else None
                     )
+                    if previous_page_activity is not None and previous_page_activity.tzinfo is None:
+                        previous_page_activity = previous_page_activity.replace(tzinfo=dt.UTC)
                     has_new_page_comment = latest_page_activity is not None and (
                         previous_page_activity is None
                         or latest_page_activity > previous_page_activity
@@ -414,7 +406,6 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     if (
                         previous_jira
                         and task.updated_at <= dt.datetime.fromisoformat(str(previous_jira))
-                        and (page_version is None or page_version == previous_page)
                         and not has_new_page_comment
                         and not returned_to_work
                         and reply_target is None
@@ -465,7 +456,6 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                             if latest_page_activity is not None
                             else None
                         ),
-                        confluence_page_version=page_version,
                     )
         except Exception:
             LOGGER.exception("Jira task automation polling failed")

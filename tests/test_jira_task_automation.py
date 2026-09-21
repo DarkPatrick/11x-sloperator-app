@@ -76,6 +76,14 @@ def test_latest_external_confluence_activity_ignores_service_account() -> None:
         2026, 9, 16, 8, 1, 31, 54000, tzinfo=dt.UTC
     )
 
+    comments.append({
+        "author": {"accountId": "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"},
+        "created": "2026-09-17T08:01:31.054Z",
+    })
+    assert latest_external_confluence_activity(comments) == dt.datetime(
+        2026, 9, 16, 8, 1, 31, 54000, tzinfo=dt.UTC
+    )
+
 
 def test_latest_external_jira_comment_selects_new_human_reply() -> None:
     comments = [

@@ -174,3 +174,53 @@ async def test_planner_activity_resumes_only_for_human_requests(
             assert "Please correct" in calls[-1].args[0]
         assert all("AUTOMATED RESPONSE STYLE" in call.args[0] for call in calls)
     assert automation.is_reserved_experiment_task(task.summary)
+
+
+@pytest.mark.parametrize("author,seconds_after_baseline,expected", [
+    ("human", -1, 0),
+    (automation.SERVICE_ACCOUNT_ID, 1, 0),
+    ("human", 1, 1),
+])
+async def test_confluence_followup_requires_new_human_comment(
+    tmp_path, monkeypatch, author, seconds_after_baseline, expected
+):
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    record_review(store)
+    store.sync_completed_planner_tasks()
+    store.upsert_jira_task_agent_link(
+        "UMN-123", phase="reviewer", confluence_page_url="https://confluence.invalid/page",
+        confluence_page_version=10,
+    )
+    link = store.jira_task_agent_link("UMN-123")
+    baseline = dt.datetime.fromisoformat(link["last_activity_at"]).replace(tzinfo=dt.UTC)
+    task = SimpleNamespace(
+        key="UMN-123", summary="Existing task", description="Existing scope",
+        status="In Review", updated_at=dt.datetime.fromisoformat(link["last_jira_updated_at"]),
+    )
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=task),
+        recent_comments=AsyncMock(return_value=[]),
+        was_returned_to_work=AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
+    monkeypatch.setattr(automation, "read_confluence_comments", AsyncMock(return_value=[{
+        "author": {"accountId": author},
+        "created": (baseline + dt.timedelta(seconds=seconds_after_baseline)).isoformat(),
+    }]))
+    monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))
+    monkeypatch.setattr(automation, "weekly_quota_allows_launch", lambda *args, **kwargs: True)
+    monkeypatch.setattr(automation, "abuse_precheck", AsyncMock(return_value=False))
+    monkeypatch.setattr(automation.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
+    agent = SimpleNamespace(
+        store=store,
+        execute_once=AsyncMock(return_value=SimpleNamespace(text="Done", session_id="owner")),
+    )
+    settings = SimpleNamespace(
+        jira_username="bot", jira_api_token="token", jira_url="https://jira.invalid",
+        agent_workspace=tmp_path,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await automation.poll_active_tasks(settings, agent)
+    assert agent.execute_once.call_count == expected

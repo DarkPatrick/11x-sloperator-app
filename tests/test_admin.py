@@ -423,6 +423,9 @@ def test_admin_contains_per_agent_usage_dashboard() -> None:
     assert "function renderUsage(report)" in ADMIN_HTML
     assert "cache_creation_input_tokens" in ADMIN_HTML
     assert "cache_read_input_tokens" in ADMIN_HTML
+    assert ADMIN_HTML.index("<summary>Задачи Jira</summary>") < ADMIN_HTML.index(
+        "<summary>Проекты Confluence</summary>"
+    )
 
 
 def test_admin_contains_debounced_two_pane_sql_editor() -> None:

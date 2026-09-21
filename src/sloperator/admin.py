@@ -610,6 +610,10 @@ const jiraTasks=(report.jira_tasks||[]).filter(x=>!usageSelected||x.agent_name==
 const jiraRows=jiraTasks.map(x=>`<tr><td><a href="https://mu--se.atlassian.net/browse/${esc(x.task_key)}" target="_blank" rel="noreferrer">${esc(x.task_key)}</a></td>
 <td>${esc(x.agent_name)}</td><td>${tokenCount(x.invocations)}</td><td><b>${tokenCount(x.total_tokens)}</b></td>
 <td>${esc(x.last_started_at)} UTC</td></tr>`).join("");
+const confluenceProjects=(report.confluence_projects||[]).filter(x=>!usageSelected||x.agent_name===usageSelected);
+const confluenceRows=confluenceProjects.map(x=>`<tr><td><a href="${esc(x.page_url)}" target="_blank" rel="noreferrer">${esc(x.title)}</a><div class="meta">#${esc(x.page_id)}</div></td>
+<td>${esc(x.agent_name)}</td><td>${tokenCount(x.invocations)}</td><td><b>${tokenCount(x.total_tokens)}</b></td>
+<td>${esc(x.last_started_at)} UTC</td></tr>`).join("");
 const agentRows=agents.map(x=>`<tr><td><b>${esc(x.agent_name)}</b><div class="meta">${esc(x.provider)} · ${esc(x.model)}</div></td>
 <td>${tokenCount(x.invocations)}</td><td>${tokenCount(x.input_tokens)}</td><td>${tokenCount(x.cache_creation_input_tokens)}</td>
 <td>${tokenCount(x.cache_read_input_tokens)}</td><td>${tokenCount(x.output_tokens)}</td><td><b>${tokenCount(x.total_tokens)}</b></td>
@@ -623,6 +627,9 @@ const recentRows=recent.map(x=>`<tr><td>${esc(x.started_at)} UTC</td><td>${esc(x
 document.getElementById("usage").innerHTML=`<details class="card" open><summary>Задачи Jira</summary><div class="table-wrap"><table>
 <thead><tr><th>Задача</th><th>Агент</th><th>Вызовы</th><th>Токены</th><th>Последний запуск</th></tr></thead>
 <tbody>${jiraRows||'<tr><td colspan="5" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
+<details class="card" open><summary>Проекты Confluence</summary><div class="table-wrap"><table>
+<thead><tr><th>Проект</th><th>Агент</th><th>Вызовы</th><th>Токены</th><th>Последний запуск</th></tr></thead>
+<tbody>${confluenceRows||'<tr><td colspan="5" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
 <details class="card" open><summary>Агрегаты по агентам</summary><div class="table-wrap"><table>
 <thead><tr><th>Агент</th><th>Вызовы</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th><th>Total</th><th>Avg</th><th>Сейчас</th><th>Ошибки</th></tr></thead>
 <tbody>${agentRows||'<tr><td colspan="10" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>

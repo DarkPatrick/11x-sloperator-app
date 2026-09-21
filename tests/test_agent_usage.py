@@ -174,3 +174,40 @@ def test_jira_usage_report_identifies_task_from_persisted_run(tmp_path) -> None:
         "invocations": 1, "total_tokens": 123,
         "last_started_at": report["recent"][0]["started_at"],
     }]
+
+
+def test_confluence_usage_groups_runs_by_project_page(tmp_path) -> None:
+    from sloperator.store import EventStore
+
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    page = "https://alice.mu.se/pages/viewpage.action?pageId=838603095"
+    parent = "https://alice.mu.se/spaces/CRO/pages/103614364/Research+Sandbox"
+    for run_id, task_key, prompt, result, tokens in (
+        ("one", "UMN-13308", f"You own Jira task UMN-13308. {parent}",
+         f"Done: [New versions screen]({page})", 123),
+        ("two", "UMN-13310", f"You own Jira task UMN-13310. {parent} {page}",
+         "Done", 456),
+        ("unlinked", "UMN-99999", f"You own Jira task UMN-99999. {parent}",
+         "Done", 789),
+    ):
+        store.create_scheduled_agent_run(
+            run_id, job_name="jira-task-reviewer", provider="claude", model="opus",
+            external_session_id=None, prompt=prompt,
+        )
+        store.finish_scheduled_agent_run(run_id, status="completed", result_text=result)
+        store.start_agent_usage_invocation(
+            run_id + "-usage", source_run_id=run_id,
+            agent_name="jira-task/reviewer", workflow="jira-task", role="reviewer",
+            source="scheduled", provider="claude", model="opus", external_session_id=None,
+        )
+        store.finish_agent_usage_invocation(
+            run_id + "-usage", status="completed", total_tokens=tokens,
+        )
+
+    projects = store.agent_usage_report()["confluence_projects"]
+    assert len(projects) == 1
+    assert projects[0]["page_id"] == "838603095"
+    assert projects[0]["page_url"] == page
+    assert projects[0]["invocations"] == 2
+    assert projects[0]["total_tokens"] == 579

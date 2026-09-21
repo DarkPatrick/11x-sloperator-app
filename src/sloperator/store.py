@@ -6,12 +6,36 @@ import json
 import os
 import re
 import sqlite3
+from urllib.parse import unquote_plus
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from sloperator.operations_store import install_schema as install_operations_schema
+
+_CONFLUENCE_URL_RE = re.compile(r"https?://alice\.mu\.se/[^\s<>\]\)\"\\]+", re.I)
+_CONFLUENCE_PAGE_ID_RE = re.compile(r"(?:/pages/|pageId=)(\d+)")
+_CONFLUENCE_PARENT_PAGE_IDS = frozenset({
+    "103614364", "768842224", "103614361", "103614359", "206146291",
+})
+
+
+def _project_pages(text: str) -> dict[str, tuple[str, str]]:
+    """Find actual project pages, excluding generic destination pages in prompts."""
+    pages: dict[str, tuple[str, str]] = {}
+    for url_match in _CONFLUENCE_URL_RE.finditer(text):
+        url = url_match.group().rstrip(".,;")
+        id_match = _CONFLUENCE_PAGE_ID_RE.search(url)
+        if id_match is None or id_match.group(1) in _CONFLUENCE_PARENT_PAGE_IDS:
+            continue
+        page_id = id_match.group(1)
+        slug = re.search(rf"/pages/{page_id}/([^/?#]+)", url)
+        title = unquote_plus(slug.group(1)) if slug else f"Страница {page_id}"
+        previous = pages.get(page_id)
+        if previous is None or (previous[1].startswith("Страница ") and slug):
+            pages[page_id] = (f"https://alice.mu.se/pages/viewpage.action?pageId={page_id}", title)
+    return pages
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS metadata (
@@ -537,6 +561,23 @@ class EventStore:
                 """,
                 (window,),
             ).fetchall()
+            project_rows = connection.execute(
+                """
+                SELECT i.agent_name, i.total_tokens, i.started_at,
+                       s.prompt, s.result_text
+                FROM agent_usage_invocations AS i
+                JOIN scheduled_agent_runs AS s ON s.run_id = i.source_run_id
+                WHERE date(i.started_at) >= date('now', ?)
+                """,
+                (window,),
+            ).fetchall()
+            linked_pages = {
+                row["task_key"]: row["confluence_page_url"]
+                for row in connection.execute(
+                    "SELECT task_key, confluence_page_url FROM jira_task_agent_links "
+                    "WHERE confluence_page_url IS NOT NULL"
+                )
+            }
         recent_items = []
         for row in recent:
             item = dict(row)
@@ -557,6 +598,41 @@ class EventStore:
             item["invocations"] += 1
             item["total_tokens"] += row["total_tokens"] or 0
             item["last_started_at"] = max(item["last_started_at"], row["started_at"])
+        project_candidates = []
+        task_page_ids: dict[str, set[str]] = {}
+        page_details: dict[str, tuple[str, str]] = {}
+        for row in project_rows:
+            prompt, result = row["prompt"] or "", row["result_text"] or ""
+            task_match = re.search(r"\bJira task ([A-Z][A-Z0-9]+-\d+)\b", prompt)
+            task_key = task_match.group(1) if task_match else None
+            pages = _project_pages(result + "\n" + prompt)
+            if not pages and task_key in linked_pages:
+                pages = _project_pages(linked_pages[task_key])
+            for page_id, details in pages.items():
+                previous = page_details.get(page_id)
+                if previous is None or previous[1].startswith("Страница "):
+                    page_details[page_id] = details
+            if task_key and len(pages) == 1:
+                task_page_ids.setdefault(task_key, set()).update(pages)
+            project_candidates.append((row, task_key, set(pages)))
+        confluence_projects: dict[tuple[str, str], dict[str, Any]] = {}
+        for row, task_key, page_ids in project_candidates:
+            if not page_ids and task_key:
+                page_ids = task_page_ids.get(task_key, set())
+            if len(page_ids) != 1:
+                continue
+            page_id = next(iter(page_ids))
+            key = (page_id, row["agent_name"])
+            page_url, title = page_details[page_id]
+            item = confluence_projects.setdefault(key, {
+                "page_id": page_id, "page_url": page_url, "title": title,
+                "agent_name": row["agent_name"], "invocations": 0,
+                "total_tokens": 0, "last_started_at": "",
+            })
+            item["title"] = title
+            item["invocations"] += 1
+            item["total_tokens"] += row["total_tokens"] or 0
+            item["last_started_at"] = max(item["last_started_at"], row["started_at"])
         return {
             "days": days,
             "agents": [dict(row) for row in agents],
@@ -564,6 +640,10 @@ class EventStore:
             "recent": recent_items,
             "jira_tasks": sorted(
                 jira_tasks.values(), key=lambda item: item["last_started_at"], reverse=True
+            ),
+            "confluence_projects": sorted(
+                confluence_projects.values(),
+                key=lambda item: item["last_started_at"], reverse=True,
             ),
         }
 

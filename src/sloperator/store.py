@@ -513,21 +513,58 @@ class EventStore:
             ).fetchall()
             recent = connection.execute(
                 """
-                SELECT invocation_id, source_run_id, agent_name, workflow, role, source,
-                       provider, model, external_session_id, status, usage_source,
-                       input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-                       output_tokens, total_tokens, cost_usd, provider_turns, duration_ms,
-                       error, started_at, finished_at
-                FROM agent_usage_invocations
-                ORDER BY datetime(started_at) DESC
+                SELECT i.invocation_id, i.source_run_id, i.agent_name, i.workflow,
+                       i.role, i.source, i.provider, i.model, i.external_session_id,
+                       i.status, i.usage_source, i.input_tokens,
+                       i.cache_creation_input_tokens, i.cache_read_input_tokens,
+                       i.output_tokens, i.total_tokens, i.cost_usd, i.provider_turns,
+                       i.duration_ms, i.error, i.started_at, i.finished_at,
+                       substr(s.prompt, 1, 2048) AS source_prompt
+                FROM agent_usage_invocations AS i
+                LEFT JOIN scheduled_agent_runs AS s ON s.run_id = i.source_run_id
+                ORDER BY datetime(i.started_at) DESC
                 LIMIT 200
                 """
             ).fetchall()
+            jira_rows = connection.execute(
+                """
+                SELECT i.agent_name, i.total_tokens, i.started_at,
+                       substr(s.prompt, 1, 2048) AS prompt
+                FROM agent_usage_invocations AS i
+                JOIN scheduled_agent_runs AS s ON s.run_id = i.source_run_id
+                WHERE i.agent_name LIKE 'jira-task/%'
+                  AND date(i.started_at) >= date('now', ?)
+                """,
+                (window,),
+            ).fetchall()
+        recent_items = []
+        for row in recent:
+            item = dict(row)
+            prompt = item.pop("source_prompt") or ""
+            match = re.search(r"\bJira task ([A-Z][A-Z0-9]+-\d+)\b", prompt)
+            item["task_key"] = match.group(1) if match else None
+            recent_items.append(item)
+        jira_tasks: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in jira_rows:
+            match = re.search(r"\bJira task ([A-Z][A-Z0-9]+-\d+)\b", row["prompt"])
+            if match is None:
+                continue
+            key = (match.group(1), row["agent_name"])
+            item = jira_tasks.setdefault(key, {
+                "task_key": key[0], "agent_name": key[1],
+                "invocations": 0, "total_tokens": 0, "last_started_at": "",
+            })
+            item["invocations"] += 1
+            item["total_tokens"] += row["total_tokens"] or 0
+            item["last_started_at"] = max(item["last_started_at"], row["started_at"])
         return {
             "days": days,
             "agents": [dict(row) for row in agents],
             "daily": [dict(row) for row in daily],
-            "recent": [dict(row) for row in recent],
+            "recent": recent_items,
+            "jira_tasks": sorted(
+                jira_tasks.values(), key=lambda item: item["last_started_at"], reverse=True
+            ),
         }
 
     def upsert_workspace(self, team_id: str, name: str, bot_user_id: str) -> None:

@@ -606,6 +606,10 @@ const selector=document.getElementById("usage-agent");selector.innerHTML='<optio
 `<option value="${esc(name)}" ${name===usageSelected?"selected":""}>${esc(name)}</option>`).join("");
 const daily=(report.daily||[]).filter(x=>!usageSelected||x.agent_name===usageSelected);
 const recent=(report.recent||[]).filter(x=>!usageSelected||x.agent_name===usageSelected);
+const jiraTasks=(report.jira_tasks||[]).filter(x=>!usageSelected||x.agent_name===usageSelected);
+const jiraRows=jiraTasks.map(x=>`<tr><td><a href="https://mu--se.atlassian.net/browse/${esc(x.task_key)}" target="_blank" rel="noreferrer">${esc(x.task_key)}</a></td>
+<td>${esc(x.agent_name)}</td><td>${tokenCount(x.invocations)}</td><td><b>${tokenCount(x.total_tokens)}</b></td>
+<td>${esc(x.last_started_at)} UTC</td></tr>`).join("");
 const agentRows=agents.map(x=>`<tr><td><b>${esc(x.agent_name)}</b><div class="meta">${esc(x.provider)} · ${esc(x.model)}</div></td>
 <td>${tokenCount(x.invocations)}</td><td>${tokenCount(x.input_tokens)}</td><td>${tokenCount(x.cache_creation_input_tokens)}</td>
 <td>${tokenCount(x.cache_read_input_tokens)}</td><td>${tokenCount(x.output_tokens)}</td><td><b>${tokenCount(x.total_tokens)}</b></td>
@@ -613,15 +617,18 @@ const agentRows=agents.map(x=>`<tr><td><b>${esc(x.agent_name)}</b><div class="me
 const dailyRows=daily.slice().reverse().map(x=>`<tr><td>${esc(x.day)}</td><td>${esc(x.agent_name)}</td>
 <td>${tokenCount(x.invocations)}</td><td>${tokenCount(x.input_tokens)}</td><td>${tokenCount(x.cache_read_input_tokens)}</td>
 <td>${tokenCount(x.output_tokens)}</td><td><b>${tokenCount(x.total_tokens)}</b></td></tr>`).join("");
-const recentRows=recent.map(x=>`<tr><td>${esc(x.started_at)} UTC</td><td>${esc(x.agent_name)}</td>
+const recentRows=recent.map(x=>`<tr><td>${esc(x.started_at)} UTC</td><td>${esc(x.agent_name)}${x.task_key?` · <a href="https://mu--se.atlassian.net/browse/${esc(x.task_key)}" target="_blank" rel="noreferrer">${esc(x.task_key)}</a>`:""}</td>
 <td><span class="badge ${esc(x.status)}">${esc(x.status)}</span></td><td>${esc(x.usage_source)}</td>
 <td>${tokenCount(x.total_tokens)}</td><td>${tokenCount(x.duration_ms)} ms</td></tr>`).join("");
-document.getElementById("usage").innerHTML=`<details class="card" open><summary>Агрегаты по агентам</summary><div class="table-wrap"><table>
+document.getElementById("usage").innerHTML=`<details class="card" open><summary>Задачи Jira</summary><div class="table-wrap"><table>
+<thead><tr><th>Задача</th><th>Агент</th><th>Вызовы</th><th>Токены</th><th>Последний запуск</th></tr></thead>
+<tbody>${jiraRows||'<tr><td colspan="5" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
+<details class="card" open><summary>Агрегаты по агентам</summary><div class="table-wrap"><table>
 <thead><tr><th>Агент</th><th>Вызовы</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th><th>Total</th><th>Avg</th><th>Сейчас</th><th>Ошибки</th></tr></thead>
 <tbody>${agentRows||'<tr><td colspan="10" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
 <details class="card" open><summary>Динамика по дням</summary><div class="table-wrap"><table><thead><tr><th>День</th><th>Агент</th><th>Вызовы</th><th>Input</th><th>Cache read</th><th>Output</th><th>Total</th></tr></thead>
 <tbody>${dailyRows||'<tr><td colspan="7" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
-<details class="card"><summary>Последние вызовы</summary><div class="table-wrap"><table><thead><tr><th>Время</th><th>Агент</th><th>Статус</th><th>Источник</th><th>Токены</th><th>Длительность</th></tr></thead>
+<details class="card" open><summary>Последние вызовы</summary><div class="table-wrap"><table><thead><tr><th>Время</th><th>Агент</th><th>Статус</th><th>Источник</th><th>Токены</th><th>Длительность</th></tr></thead>
 <tbody>${recentRows||'<tr><td colspan="6" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>`}
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}

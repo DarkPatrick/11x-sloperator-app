@@ -400,12 +400,24 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                         previous_page_activity is None
                         or latest_page_activity > previous_page_activity
                     )
+                    # Field edits (labels, dates, automation metadata) and page version
+                    # changes do not authorize another review of an already owned task.
+                    # Wait for a human request, a return to work, or an unfinished worker.
+                    if (
+                        link.get("phase") != "worker"
+                        and task.status not in QUEUED_STATUSES
+                        and not returned_to_work
+                        and reply_target is None
+                        and not has_new_page_comment
+                    ):
+                        continue
                     if (
                         previous_jira
                         and task.updated_at <= dt.datetime.fromisoformat(str(previous_jira))
                         and (page_version is None or page_version == previous_page)
                         and not has_new_page_comment
                         and not returned_to_work
+                        and reply_target is None
                     ):
                         continue
                     if await abuse_precheck(settings, task.summary, comments):

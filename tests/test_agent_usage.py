@@ -147,3 +147,30 @@ async def test_claude_invocation_is_persisted_and_aggregated(tmp_path, monkeypat
     assert aggregate["total_tokens"] == aggregate["avg_tokens"] == 460
     assert aggregate["cost_usd"] == 0.75
     assert report["recent"][0]["usage_source"] == "provider_json"
+
+
+def test_jira_usage_report_identifies_task_from_persisted_run(tmp_path) -> None:
+    from sloperator.store import EventStore
+
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    store.create_scheduled_agent_run(
+        "jira-run", job_name="jira-task-reviewer", provider="claude", model="opus",
+        external_session_id=None, prompt="You own Jira task UMN-13308.",
+    )
+    store.start_agent_usage_invocation(
+        "invocation", source_run_id="jira-run", agent_name="jira-task/reviewer",
+        workflow="jira-task", role="reviewer", source="scheduled",
+        provider="claude", model="opus", external_session_id=None,
+    )
+    store.finish_agent_usage_invocation(
+        "invocation", status="completed", usage_source="provider_json", total_tokens=123,
+    )
+
+    report = store.agent_usage_report()
+    assert report["recent"][0]["task_key"] == "UMN-13308"
+    assert report["jira_tasks"] == [{
+        "task_key": "UMN-13308", "agent_name": "jira-task/reviewer",
+        "invocations": 1, "total_tokens": 123,
+        "last_started_at": report["recent"][0]["started_at"],
+    }]

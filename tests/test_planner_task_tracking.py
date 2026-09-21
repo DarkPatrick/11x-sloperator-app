@@ -113,9 +113,17 @@ def test_followup_keeps_description_text():
 
 
 @pytest.mark.parametrize(
-    "returned,changed,expected", [(True, True, 3), (False, True, 1), (False, False, 0)]
+    "returned,human_comment,changed,expected",
+    [
+        (True, False, True, 3),
+        (False, True, True, 1),
+        (False, False, True, 0),
+        (False, False, False, 0),
+    ],
 )
-async def test_planner_activity_resumes_owner(tmp_path, monkeypatch, returned, changed, expected):
+async def test_planner_activity_resumes_only_for_human_requests(
+    tmp_path, monkeypatch, returned, human_comment, changed, expected
+):
     store = EventStore(tmp_path / "state.sqlite3")
     store.initialize()
     record_review(store)
@@ -132,7 +140,11 @@ async def test_planner_activity_resumes_owner(tmp_path, monkeypatch, returned, c
     )
     reader = SimpleNamespace(
         task_snapshot=AsyncMock(return_value=task),
-        recent_comments=AsyncMock(return_value=[{"id": "new", "body": "Please correct"}]),
+        recent_comments=AsyncMock(return_value=[{
+            "id": "new", "body": "Please correct",
+            "author": {"accountId": "human" if human_comment else automation.SERVICE_ACCOUNT_ID},
+            "created": (baseline + dt.timedelta(seconds=1)).isoformat(),
+        }]),
         was_returned_to_work=AsyncMock(return_value=returned),
     )
     monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
@@ -158,6 +170,7 @@ async def test_planner_activity_resumes_owner(tmp_path, monkeypatch, returned, c
     if expected:
         calls = agent.execute_once.call_args_list
         assert calls[-1].kwargs["existing_session_id"] == "original-reviewer"
-        assert "Please correct" in calls[-1].args[0]
+        if human_comment:
+            assert "Please correct" in calls[-1].args[0]
         assert all("AUTOMATED RESPONSE STYLE" in call.args[0] for call in calls)
     assert automation.is_reserved_experiment_task(task.summary)

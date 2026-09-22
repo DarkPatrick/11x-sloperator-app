@@ -21,6 +21,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
 from sloperator.config import Settings
+from sloperator.experiment_agent_tools import agent_instructions
 from sloperator.experiment_design_selector import (
     JiraRestReader,
     SelectionError,
@@ -468,6 +469,7 @@ async def run_preparation(
 ) -> str:
     prepared_run = await agent.execute_once(
         FINALIZATION_PROMPT + "\n\nAuthoritative project page ID: " + project_page_id
+        + "\n" + agent_instructions(project_page_id, started_run.text.strip().split(" | ")[-1])
         + "\nReviewer verified start:\n" + started_run.text,
         settings.experiment_finalizer_timeout_seconds,
         job_name="experiment-finalizer-preparer",
@@ -501,8 +503,13 @@ async def run_review(
 ) -> str:
     if PREPARED_RE.match(prepared_text.strip()) is None:
         raise InvalidFinalizationNotification("Invalid preparation result")
+    review_text = REVIEW_PROMPT.format(prepared_result=prepared_text + "\n" + start_context)
+    page_match = re.search(r"Authoritative project page ID: (\d+)", start_context)
+    task_match = re.search(r"\| (UMN-\d+)$", start_context.strip())
+    if page_match and task_match:
+        review_text += "\n" + agent_instructions(page_match.group(1), task_match.group(1))
     review_run = await agent.execute_once(
-        REVIEW_PROMPT.format(prepared_result=prepared_text + "\n" + start_context),
+        review_text,
         settings.experiment_finalizer_timeout_seconds,
         job_name="experiment-finalizer-reviewer",
         accept_result=is_finalization_notification,

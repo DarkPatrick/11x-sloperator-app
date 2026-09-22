@@ -19,6 +19,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
 from sloperator.config import Settings
+from sloperator.experiment_agent_tools import agent_instructions
 from sloperator.experiment_design_planner import (
     AgentSubmitter,
     next_run_at,
@@ -90,6 +91,9 @@ Execution:
 
 
 def preparation_prompt(candidate: DesignCandidate) -> str:
+    context_read = agent_instructions(
+        candidate.project_page_id or "", candidate.task_key, candidate.pitch_key, candidate.epic_key
+    )
     return f"""{PREPARATION_PROMPT}
 
 Authoritative scheduler selection context:
@@ -98,6 +102,8 @@ Authoritative scheduler selection context:
 - paired Pitch task: `{candidate.pitch_key}`
 - epic: `{candidate.epic_key}`
 - project page ID: `{candidate.project_page_id}`
+
+{context_read}
 
 Work only on this exact task, pair, epic, and matching project-page iteration. If any current Jira
 fact contradicts the selection, make no writes and return `{FAILURE_PREFIX} selection changed`.
@@ -142,6 +148,8 @@ populated the project page for Analytics task `{task_key}` in epic `{epic_key}`.
 Confluence page ID is `{project_page_id}`. Independently review only that page, task, and iteration;
 do not search, enumerate, or fetch other Confluence pages. If it does not match the task, stop with
 a concise failure instead of searching for a replacement. Correct every issue on the bound page.
+
+{agent_instructions(project_page_id, task_key, epic_key)}
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 

@@ -29,6 +29,7 @@ SELECTED = DesignCandidate(
     pitch_key="UMN-12311",
     task_created_at="2026-08-01T10:00:30+00:00",
     pitch_reviewed_at="2026-08-31T10:00:00+00:00",
+    project_page_id="838613487",
 )
 
 
@@ -68,7 +69,7 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
 
 
 def test_review_prompt_requires_independent_correction_and_final_actions() -> None:
-    prompt = review_prompt("UMN-12312", "UMN-12310")
+    prompt = review_prompt("UMN-12312", "UMN-12310", "838613487")
     assert "AUTOMATED ATLASSIAN IDENTITY" in prompt
     assert "pass `--as-bot` on every command" in prompt
     assert "Never fall back to personal" in prompt
@@ -84,6 +85,8 @@ def test_review_prompt_requires_independent_correction_and_final_actions() -> No
     assert "open and run the linked sources" in prompt
     assert "reselected from the remaining queue" in prompt
     assert "UMN-12312" in prompt
+    assert "838613487" in prompt
+    assert "do not search, enumerate, or fetch other Confluence pages" in prompt
     assert "add one short English comment" in prompt
     assert "transition ID `181`" in prompt
     assert "`duedate`" in prompt
@@ -135,6 +138,33 @@ async def test_no_candidate_finishes_without_slack_or_second_agent() -> None:
     assert agent.execute_once.await_count == 0
     selector.assert_awaited_once_with(settings)
     client.chat_postMessage.assert_not_awaited()
+
+
+async def test_missing_project_page_stops_before_starting_agents(monkeypatch) -> None:
+    from dataclasses import replace
+
+    from sloperator.experiment_design_selector import SelectionError
+
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    agent = SimpleNamespace(execute_once=AsyncMock(), attach_session=AsyncMock())
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test",
+        experiment_design_channel="CDESIGN",
+    )
+    selector = AsyncMock(return_value=replace(SELECTED, project_page_id=None))
+    resolver = AsyncMock(
+        side_effect=SelectionError("Jira epic UMN-12310 has no Confluence project-page link")
+    )
+    monkeypatch.setattr(
+        "sloperator.experiment_design_planner.resolve_selected_project_page", resolver
+    )
+
+    with pytest.raises(SelectionError, match="no Confluence project-page link"):
+        await run_once(client, agent, settings, selector)
+
+    agent.execute_once.assert_not_awaited()
+    client.chat_postMessage.assert_awaited_once()
+    assert "UMN-12312" in client.chat_postMessage.await_args.kwargs["markdown_text"]
     agent.attach_session.assert_not_awaited()
 
 
@@ -187,6 +217,8 @@ async def test_preparation_then_independent_review_publishes_once(monkeypatch) -
     assert second.kwargs["job_name"] == "experiment-design-reviewer"
     assert "UMN-12312" in second.args[0]
     assert "UMN-12311" in first.args[0]
+    assert "838613487" in first.args[0]
+    assert "838613487" in second.args[0]
     assert selector.await_count == 1
     validator.assert_awaited_once_with(settings, claimed_task_key=SELECTED.task_key)
     client.chat_postMessage.assert_awaited_once_with(

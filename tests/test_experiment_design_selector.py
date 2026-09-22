@@ -6,7 +6,34 @@ from typing import Any
 
 import pytest
 
-from sloperator.experiment_design_selector import SelectionError, select_candidate
+from sloperator.experiment_design_selector import (
+    SelectionError,
+    resolve_project_page_id,
+    select_candidate,
+)
+
+
+async def test_project_page_requires_one_link_on_epic() -> None:
+    from unittest.mock import AsyncMock
+
+    jira = AsyncMock()
+    jira.epic_page_links.return_value = [
+        "https://alice.mu.se/pages/viewpage.action?pageId=838613487",
+        "https://alice.mu.se/spaces/CRO/pages/838613487/project",
+    ]
+    assert await resolve_project_page_id(jira, "UMN-13405") == "838613487"
+    jira.epic_page_links.assert_awaited_once_with("UMN-13405")
+
+    jira.epic_page_links.return_value = []
+    with pytest.raises(SelectionError, match="no Confluence project-page link"):
+        await resolve_project_page_id(jira, "UMN-13405")
+
+    jira.epic_page_links.return_value = [
+        "https://alice.mu.se/pages/viewpage.action?pageId=838613487",
+        "https://alice.mu.se/pages/viewpage.action?pageId=805320409",
+    ]
+    with pytest.raises(SelectionError, match="multiple Confluence pages"):
+        await resolve_project_page_id(jira, "UMN-13405")
 
 
 def raw_issue(

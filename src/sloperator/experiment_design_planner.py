@@ -25,6 +25,7 @@ from sloperator.experiment_design_selector import (
     DesignCandidate,
     JiraRestReader,
     SelectionError,
+    resolve_project_page_id,
     select_candidate,
 )
 from sloperator.jira_agent_policy import (
@@ -40,7 +41,11 @@ PREPARED_RE = re.compile(r"DESIGN_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN-\d
 FAILURE_PREFIX = "Experiment design automation failed:"
 TASK_LINK_RE = re.compile(r"mu--se\.atlassian\.net/browse/(?P<task>UMN-\d+)")
 
-SELECTION_RULES = ISSUE_SELECTION_POLICY + "\nSelected task kind: `Расчет сверху и план тестирования`; paired task: `Проектирование и Питч`.\n"
+SELECTION_RULES = (
+    ISSUE_SELECTION_POLICY
+    + "\nSelected task kind: `Расчет сверху и план тестирования`; "
+    "paired task: `Проектирование и Питч`.\n"
+)
 
 PREPARATION_PROMPT = f"""\
 [claude]
@@ -76,7 +81,9 @@ Execution:
    bot assignee, and Start date; do not change Jira. If the verified start is missing, stop with
    `{FAILURE_PREFIX} Jira start verification failed`.
 {WORKER_JIRA_POLICY}
-2. For the selected calculation task, resolve the correct project page and the matching iteration.
+2. Work only with the project page ID supplied below and its matching iteration. Do not search,
+   enumerate, fetch, or publish any other Confluence page. If the page does not match the selected
+   epic and calculation task, stop with a concise failure instead of searching for a replacement.
    Use the skill's strict formats to fully calculate, build, and populate both `Reach & Impact` and
    `Experiment design`. Follow the skill's monetisation-first defaults, mature-cohort rules, exact
    metric naming, saved-Redash-query requirements, table builders, and rendered-structure checks.
@@ -99,6 +106,7 @@ Authoritative scheduler selection context:
 - calculation task: `{candidate.task_key}`
 - paired Pitch task: `{candidate.pitch_key}`
 - epic: `{candidate.epic_key}`
+- project page ID: `{candidate.project_page_id}`
 
 Work only on this exact task, pair, epic, and matching project-page iteration. If any current Jira
 fact contradicts this selection, make no writes and return `{FAILURE_PREFIX} selection changed`.
@@ -134,7 +142,7 @@ def started_candidate(text: str) -> DesignCandidate | None:
     return DesignCandidate(match[1], match[2], match[3], "", "")
 
 
-def review_prompt(task_key: str, epic_key: str) -> str:
+def review_prompt(task_key: str, epic_key: str, project_page_id: str) -> str:
     """Build the independent second-pass prompt for one prepared task."""
     return f"""\
 [claude]
@@ -142,8 +150,10 @@ This is the authorised independent review pass for an autonomously prepared UG e
 During this autonomous pass you cannot communicate with a human: do not ask questions, wait for
 approval, or offer choices.
 Another agent has already populated the project page for calculation task `{task_key}` in epic
-`{epic_key}`. Review that exact task and iteration, correct every issue you find, and complete the
-whole workflow autonomously.
+`{epic_key}`. Its authoritative Confluence page ID is `{project_page_id}`. Review only this page,
+task, and iteration; do not search, enumerate, or fetch other Confluence pages. If it is not the
+matching project page, stop with a concise failure instead of searching for a replacement. Correct
+every issue you find on that page and complete the whole workflow autonomously.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 
@@ -182,9 +192,10 @@ After the page is correct and verified:
 1. Use the repository Jira helper to add one short English comment to `{task_key}` saying that
    I calculated and published Reach & Impact and Experiment design,
    with the project-page link. Re-fetch the issue and verify the comment.
-2. Transition `{task_key}` using transition ID `181` (target status `In Review`) and verify the resulting
-   status. The verified Jira field ID for `Due date` is `duedate`; set it to today's date in `YYYY-MM-DD`
-   format. Re-fetch the issue and verify the final status and due date. If any write or verification fails,
+2. Transition `{task_key}` using transition ID `181` (target status `In Review`) and verify
+   the resulting status. The verified Jira field ID for `Due date` is `duedate`; set it to
+   today's date in `YYYY-MM-DD` format. Re-fetch the issue and verify the final status and
+   due date. If any write or verification fails,
    return `{FAILURE_PREFIX} Jira review update failed`.
 3. Resolve Slack user ids from authoritative Slack profiles for the epic assignee and, when set,
    the calculation-task assignee. Deduplicate the mentions. Never guess Slack ids. If a Jira
@@ -368,11 +379,12 @@ async def run_review(
     settings: Settings,
     task_key: str,
     epic_key: str,
+    project_page_id: str,
     reviewer_session_id: str | None = None,
 ) -> str:
     """Run and publish the independent review pass."""
     run = await agent.execute_once(
-        review_prompt(task_key, epic_key),
+        review_prompt(task_key, epic_key, project_page_id),
         settings.experiment_design_timeout_seconds,
         job_name="experiment-design-reviewer",
         accept_result=review_result_validator(task_key),
@@ -393,15 +405,30 @@ async def run_once(
     if selected is None:
         LOGGER.info("No eligible experiment-design task; finishing silently")
         return None
+    if selected.project_page_id is None:
+        try:
+            selected = replace(
+                selected,
+                project_page_id=await resolve_selected_project_page(settings, selected),
+            )
+        except SelectionError as error:
+            await publish_failure(
+                client, settings, f"{FAILURE_PREFIX} {selected.task_key}: {error}"
+            )
+            raise
     start_run = await agent.execute_once(
         start_prompt(selected), settings.experiment_design_timeout_seconds,
         job_name="experiment-design-reviewer",
-        accept_result=lambda text: started_candidate(text) is not None or text.strip().startswith(FAILURE_PREFIX),
+        accept_result=lambda text: (
+            started_candidate(text) is not None or text.strip().startswith(FAILURE_PREFIX)
+        ),
     )
     started = started_candidate(start_run.text)
     if started is None:
         raise InvalidDesignResult(start_run.text)
-    if (started.task_key, started.epic_key, started.pitch_key) != (selected.task_key, selected.epic_key, selected.pitch_key):
+    if (started.task_key, started.epic_key, started.pitch_key) != (
+        selected.task_key, selected.epic_key, selected.pitch_key
+    ):
         raise InvalidDesignResult("Reviewer start does not match deterministic selection")
     return await run_preparation(client, agent, settings, selected, start_run.session_id)
 
@@ -434,7 +461,19 @@ async def run_preparation(
         selected.task_key, selected.epic_key, selected.pitch_key
     ):
         raise InvalidDesignResult("Claimed Jira task or pairing changed before review")
-    return await run_review(client, agent, settings, *prepared, reviewer_session_id=reviewer_session_id)
+    if selected.project_page_id is None:
+        raise InvalidDesignResult("Selected project page is missing before review")
+    return await run_review(
+        client, agent, settings, *prepared, selected.project_page_id,
+        reviewer_session_id=reviewer_session_id,
+    )
+
+
+async def resolve_selected_project_page(settings: Settings, selected: DesignCandidate) -> str:
+    if not settings.jira_username or not settings.jira_api_token:
+        raise SelectionError("Jira credentials are unavailable to project-page resolver")
+    jira = JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
+    return await resolve_project_page_id(jira, selected.epic_key)
 
 
 async def select_from_jira(

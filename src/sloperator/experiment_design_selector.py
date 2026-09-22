@@ -8,6 +8,7 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from aiohttp import BasicAuth, ClientSession, ClientTimeout
@@ -43,6 +44,7 @@ class DesignCandidate:
     pitch_key: str
     task_created_at: str
     pitch_reviewed_at: str
+    project_page_id: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, sort_keys=True)
@@ -138,6 +140,78 @@ class JiraRestReader:
             start_at += len(batch)
             if not batch or start_at >= int(page.get("total", start_at)):
                 return histories
+
+    async def epic_page_links(self, epic_key: str) -> list[str]:
+        """Read links explicitly attached to an epic, without searching Confluence."""
+        issue = await self._get(
+            f"/rest/api/3/issue/{epic_key}", {"fields": "description"}
+        )
+        fields = issue.get("fields")
+        if not isinstance(fields, dict):
+            raise SelectionError(f"Jira epic {epic_key} has no fields object")
+        links = list(_strings_in(fields.get("description")))
+        async with (
+            ClientSession(auth=self.auth, timeout=self.timeout) as session,
+            session.get(f"{self.base_url}/rest/api/3/issue/{epic_key}/remotelink") as response,
+        ):
+            if response.status >= 400:
+                raise SelectionError(
+                    f"Jira epic {epic_key} remote links failed with HTTP {response.status}"
+                )
+            try:
+                remote_links = await response.json()
+            except (ValueError, TypeError) as error:
+                raise SelectionError(f"Jira epic {epic_key} remote links are invalid") from error
+        if not isinstance(remote_links, list):
+            raise SelectionError(f"Jira epic {epic_key} remote links are invalid")
+        for item in remote_links:
+            if isinstance(item, dict):
+                obj = item.get("object")
+                if isinstance(obj, dict):
+                    links.extend(_strings_in(obj.get("url")))
+        return links
+
+
+def _strings_in(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _strings_in(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _strings_in(child)
+
+
+def _confluence_page_ids(value: str) -> set[str]:
+    result: set[str] = set()
+    for match in re.finditer(r"https://[^\s<>\]\[\"']+", value):
+        url = urlparse(match.group().rstrip(".,);"))
+        if url.hostname != "alice.mu.se":
+            continue
+        if url.path == "/pages/viewpage.action":
+            result.update(id_ for id_ in parse_qs(url.query).get("pageId", []) if id_.isdigit())
+        elif page := re.search(r"/pages/(\d+)(?:/|$)", url.path):
+            result.add(page.group(1))
+    return result
+
+
+async def resolve_project_page_id(jira: JiraRestReader, epic_key: str) -> str:
+    """Require one explicit Confluence project-page link on the selected Jira epic."""
+    ids: set[str] = set()
+    for link in await jira.epic_page_links(epic_key):
+        ids.update(_confluence_page_ids(link))
+    if not ids:
+        raise SelectionError(
+            f"Jira epic {epic_key} has no Confluence project-page link. "
+            "Attach the project page to the epic before running experiment design."
+        )
+    if len(ids) != 1:
+        raise SelectionError(
+            f"Jira epic {epic_key} links to multiple Confluence pages. "
+            "Keep one project-page link on the epic before running experiment design."
+        )
+    return next(iter(ids))
 
 
 def _normalize(value: str) -> str:

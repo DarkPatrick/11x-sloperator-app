@@ -4,8 +4,10 @@ from sloperator.claude_usage import ClaudeUsage
 from sloperator.jira_task_automation import (
     confluence_destination,
     latest_external_confluence_activity,
+    latest_external_confluence_comment,
     latest_external_jira_comment,
     reviewer_prompt,
+    should_handle_confluence_comment,
     should_handle_jira_comment,
     weekly_quota_allows_launch,
     worker_prompt,
@@ -86,6 +88,23 @@ def test_latest_external_confluence_activity_ignores_service_account() -> None:
     )
 
 
+def test_latest_external_confluence_comment_uses_unprocessed_human_activity() -> None:
+    comments = [
+        {"id": "1", "author": "Egor Semin", "text": "Please fix this",
+         "created": "2026-09-16T08:01:31Z"},
+        {"id": "2", "author": "ug-ai-analyst", "text": "Fixed",
+         "created": "2026-09-16T08:03:00Z"},
+        {"id": "3", "author": "Artyom Smirnov", "text": "@Egor please check",
+         "created": "2026-09-16T08:04:00Z"},
+        {"id": "4", "author": {"accountId": "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"},
+         "text": "Done", "created": "2026-09-16T08:05:00Z"},
+    ]
+    baseline = dt.datetime(2026, 9, 16, 8, 2, tzinfo=dt.UTC)
+    assert latest_external_confluence_comment(comments, since=baseline) == comments[2]
+    assert latest_external_confluence_comment(
+        comments, since=dt.datetime(2026, 9, 16, 8, 5, tzinfo=dt.UTC)
+    ) is None
+
 def test_latest_external_jira_comment_selects_new_human_reply() -> None:
     comments = [
         {
@@ -131,6 +150,95 @@ async def test_jira_comment_decision_requires_explicit_reply_verdict() -> None:
     assert await should_handle_jira_comment(agent, task, comment, [comment])
     agent.execute_once.return_value = SimpleNamespace(text="REPLY with explanation")
     assert not await should_handle_jira_comment(agent, task, comment, [comment])
+
+
+async def test_confluence_comment_decision_requires_explicit_reply_verdict() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    task = SimpleNamespace(key="UMN-13435", summary="Analytics specification")
+    comment = {"id": "838611732", "author": "Artyom Smirnov",
+               "text": "@Egor Semin проверь"}
+    agent = SimpleNamespace(execute_once=AsyncMock(
+        return_value=SimpleNamespace(text="IGNORE")
+    ))
+
+    assert not await should_handle_confluence_comment(
+        agent, task, "https://alice.mu.se/pages/viewpage.action?pageId=838602702",
+        comment, [comment],
+    )
+    prompt = agent.execute_once.call_args.args[0]
+    assert "AUTOMATED RESPONSE STYLE" in prompt
+    assert "A comment addressed to another person" in prompt
+    assert "838611732" in prompt
+    assert agent.execute_once.call_args.kwargs["job_name"] == (
+        "confluence-comment-reply-decision"
+    )
+    agent.execute_once.return_value = SimpleNamespace(text="REPLY")
+    assert await should_handle_confluence_comment(
+        agent, task, "https://alice.mu.se/pages/viewpage.action?pageId=838602702",
+        comment, [comment],
+    )
+    agent.execute_once.return_value = SimpleNamespace(text="REPLY with explanation")
+    assert not await should_handle_confluence_comment(
+        agent, task, "https://alice.mu.se/pages/viewpage.action?pageId=838602702",
+        comment, [comment],
+    )
+
+
+async def test_unrelated_confluence_comment_does_not_start_reviewer(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    import pytest
+
+    from sloperator import jira_task_automation as automation
+
+    link = {
+        "task_key": "UMN-13435", "phase": "reviewer",
+        "confluence_page_url": "https://alice.mu.se/pages/viewpage.action?pageId=838614955",
+        "last_jira_updated_at": "2026-09-22T07:00:00+00:00",
+        "last_confluence_activity_at": "2026-09-22T07:00:00+00:00",
+    }
+    task = SimpleNamespace(
+        key="UMN-13435", summary="Analytics specification", description="",
+        status="In Review", updated_at=dt.datetime(2026, 9, 22, 7, 0, tzinfo=dt.UTC),
+    )
+    comment = {
+        "id": "838611732", "author": "Artyom Smirnov",
+        "text": "@Egor Semin проверь", "created": "2026-09-22T08:00:00Z",
+    }
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=task),
+        recent_comments=AsyncMock(return_value=[]),
+        was_returned_to_work=AsyncMock(return_value=False),
+    )
+    store = Mock()
+    store.active_jira_task_agent_links.return_value = [link]
+    store.jira_task_agent_link.return_value = link
+    store.sync_completed_planner_tasks.return_value = 0
+    agent = SimpleNamespace(store=store, execute_once=AsyncMock())
+    settings = SimpleNamespace(jira_username="bot", jira_api_token="test",
+                               jira_url="https://jira.invalid", agent_workspace=None)
+    monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
+    monkeypatch.setattr(automation, "read_confluence_comments",
+                        AsyncMock(return_value=[comment]))
+    monkeypatch.setattr(automation, "should_handle_confluence_comment",
+                        AsyncMock(return_value=False))
+    monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))
+    monkeypatch.setattr(automation, "weekly_quota_allows_launch", lambda *a, **kw: True)
+    monkeypatch.setattr(automation.asyncio, "sleep",
+                        AsyncMock(side_effect=asyncio.CancelledError))
+
+    with pytest.raises(asyncio.CancelledError):
+        await automation.poll_active_tasks(settings, agent)
+
+    agent.execute_once.assert_not_called()
+    store.upsert_jira_task_agent_link.assert_called_once_with(
+        "UMN-13435", phase="reviewer",
+        last_confluence_activity_at="2026-09-22T08:00:00+00:00",
+    )
 
 
 async def test_reviewer_start_requires_explicit_verified_success() -> None:

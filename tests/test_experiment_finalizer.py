@@ -98,6 +98,9 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "An exact threshold value passes" in FINALIZATION_PROMPT
     assert "at least one configured segment" in FINALIZATION_PROMPT
     assert "exact Jira Results/Итоги task" in FINALIZATION_PROMPT
+    assert "map this experiment to its launch task" in FINALIZATION_PROMPT
+    assert "Do not use an older Done Results task" in FINALIZATION_PROMPT
+    assert "generic Results heading" in FINALIZATION_PROMPT
     assert "already In Progress, In Review, Done" in FINALIZATION_PROMPT
     assert "before any\n   calculator invocation" in FINALIZATION_PROMPT
     assert "strict, fail-closed pending-trials gate" in FINALIZATION_PROMPT

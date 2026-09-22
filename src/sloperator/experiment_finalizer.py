@@ -60,14 +60,21 @@ Selection rules:
    must not be calculated during this run.
 4. Keep only experiments that have at least one configured segment in the admin.
 5. Locate each experiment's project page and exclude it if the final Results/Итоги section for
-   this experiment/iteration is already populated. Do not mistake a template, empty placeholder,
-   design table, or results for another iteration for completed итогов.
+   this experiment/iteration is already populated. Match the experiment id or its verified
+   iteration to the specific results block. A generic Results heading, bandit analysis covering
+   several runs, and results for an earlier experiment under the same project do not establish
+   that this experiment's final results are complete. Do not mistake a template, empty
+   placeholder, design table, or results for another iteration for completed итогов.
 6. Locate the exact Jira Results/Итоги task for the matching experiment and iteration before any
    calculator invocation or calculation-row inspection. Exclude the experiment when that task is
    already In Progress, In Review, Done, or any other non-queued status; only a task in Backlog or
    To Do may enter the candidate pool. If the exact task or its status cannot be established, exclude
-   the candidate and continue to the next experiment. Re-check this status immediately before any
-   write as well.
+   the candidate and continue to the next experiment. When an epic contains multiple Results tasks,
+   first map this experiment to its launch task using an explicit experiment-id link in the launch
+   notification, task, or comment; then use the Results task from the same Jira iteration/cohort.
+   Do not use an older Done Results task merely because it shares the epic or project title.
+   A newer To Do task alone is not proof of a match either. Re-check the matched task's status
+   immediately before any write.
 7. The experiments remaining after rules 1-6 form the preliminary candidate pool. Order the whole
    pool by actual end timestamp, then by experiment id as a deterministic tie-breaker. If the pool
    is empty, stop immediately: do not invoke the calculator, do not inspect fallback experiments

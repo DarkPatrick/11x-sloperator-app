@@ -6,6 +6,7 @@ from sloperator.jira_task_automation import (
     latest_external_confluence_activity,
     latest_external_jira_comment,
     reviewer_prompt,
+    should_handle_jira_comment,
     weekly_quota_allows_launch,
     worker_prompt,
 )
@@ -107,6 +108,29 @@ def test_latest_external_jira_comment_selects_new_human_reply() -> None:
         latest_external_jira_comment(comments, since="2026-09-17T08:44:00+00:00")
         is None
     )
+
+
+async def test_jira_comment_decision_requires_explicit_reply_verdict() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    task = SimpleNamespace(key="UMN-13435", summary="Analytics specification")
+    comment = {"id": "354007", "body": "@Egor Semin проверь"}
+    agent = SimpleNamespace(execute_once=AsyncMock(
+        return_value=SimpleNamespace(text="IGNORE")
+    ))
+
+    assert not await should_handle_jira_comment(agent, task, comment, [comment])
+    prompt = agent.execute_once.call_args.args[0]
+    assert "AUTOMATED RESPONSE STYLE" in prompt
+    assert "A comment explicitly addressed to another person" in prompt
+    assert "354007" in prompt
+    assert agent.execute_once.call_args.kwargs["job_name"] == "jira-comment-reply-decision"
+
+    agent.execute_once.return_value = SimpleNamespace(text="REPLY")
+    assert await should_handle_jira_comment(agent, task, comment, [comment])
+    agent.execute_once.return_value = SimpleNamespace(text="REPLY with explanation")
+    assert not await should_handle_jira_comment(agent, task, comment, [comment])
 
 
 async def test_reviewer_start_requires_explicit_verified_success() -> None:

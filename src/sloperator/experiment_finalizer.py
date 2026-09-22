@@ -227,6 +227,13 @@ This is the authorised reviewer start pass for one UG experiment finalisation.
 Select exactly one experiment using all of these gates before any Jira or Confluence write:
 {SELECTION_RULES}
 
+Verified identity for the current banner backlog (re-check live status and every other gate):
+the [launch notification](https://muse-group.enterprise.slack.com/archives/C02TE2S5YQL/p1789732463872359)
+links experiment 7940 to Jira launch task UMN-13458. Its "Iteration 18 Sep" cohort contains
+Results task UMN-13460. UMN-12550 is the older Done Results task under the same epic; its
+status does not determine eligibility for experiment 7940. This binding establishes task
+identity only, not data maturity or permission to publish results.
+
 Fresh calculation procedure used to establish candidate maturity:
 3. Use the `ug-experiment-calculator` skill and the installed repository `.venv` library directly;
    do not use the calculator HTTP API in this job. First run the repository freshness preflight and

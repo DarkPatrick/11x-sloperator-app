@@ -101,6 +101,8 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "map this experiment to its launch task" in FINALIZATION_PROMPT
     assert "Do not use an older Done Results task" in FINALIZATION_PROMPT
     assert "generic Results heading" in FINALIZATION_PROMPT
+    assert "links experiment 7940 to Jira launch task UMN-13458" in START_PROMPT
+    assert "Results task UMN-13460" in START_PROMPT
     assert "already In Progress, In Review, Done" in FINALIZATION_PROMPT
     assert "before any\n   calculator invocation" in FINALIZATION_PROMPT
     assert "strict, fail-closed pending-trials gate" in FINALIZATION_PROMPT

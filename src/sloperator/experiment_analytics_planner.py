@@ -19,7 +19,11 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
 from sloperator.config import Settings
-from sloperator.experiment_design_planner import AgentSubmitter, next_run_at
+from sloperator.experiment_design_planner import (
+    AgentSubmitter,
+    next_run_at,
+    resolve_selected_project_page,
+)
 from sloperator.experiment_design_selector import (
     ANALYTICS_TITLE,
     DesignCandidate,
@@ -71,7 +75,9 @@ Execution:
    bot assignee, and Start date; do not change Jira. If the verified start is missing, stop with
    `{FAILURE_PREFIX} Jira start verification failed`.
 {WORKER_JIRA_POLICY}
-2. For the selected Analytics task, resolve the correct project page and matching iteration. Build
+2. Work only with the project page ID supplied below and its matching iteration. Do not search,
+   enumerate, fetch, or publish any other Confluence page. If it does not match the selected epic
+   and Analytics task, stop with a concise failure instead of searching for a replacement. Build
    and populate the complete analytics specification through `ug-analytics-spec-writer`, using its
    required structure, naming, source validation, implementation details, and verification gates.
 3. You are the preparation pass only. Do not comment on Jira, send Slack, or move the task beyond
@@ -91,6 +97,7 @@ Authoritative scheduler selection context:
 - Analytics task: `{candidate.task_key}`
 - paired Pitch task: `{candidate.pitch_key}`
 - epic: `{candidate.epic_key}`
+- project page ID: `{candidate.project_page_id}`
 
 Work only on this exact task, pair, epic, and matching project-page iteration. If any current Jira
 fact contradicts the selection, make no writes and return `{FAILURE_PREFIX} selection changed`.
@@ -126,13 +133,15 @@ def started_candidate(text: str) -> DesignCandidate | None:
     return DesignCandidate(match[1], match[2], match[3], "", "")
 
 
-def review_prompt(task_key: str, epic_key: str) -> str:
+def review_prompt(task_key: str, epic_key: str, project_page_id: str) -> str:
     return f"""\
 [claude]
 This is the authorised independent review pass for an autonomously prepared UG analytics
 specification. During this autonomous pass you cannot communicate with a human. Another agent has
-populated the project page for Analytics task `{task_key}` in epic `{epic_key}`. Independently
-review that exact task and iteration, correct every issue, and complete the workflow autonomously.
+populated the project page for Analytics task `{task_key}` in epic `{epic_key}`. Its authoritative
+Confluence page ID is `{project_page_id}`. Independently review only that page, task, and iteration;
+do not search, enumerate, or fetch other Confluence pages. If it does not match the task, stop with
+a concise failure instead of searching for a replacement. Correct every issue on the bound page.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 
@@ -316,10 +325,11 @@ async def run_review(
     settings: Settings,
     task_key: str,
     epic_key: str,
+    project_page_id: str,
     reviewer_session_id: str | None = None,
 ) -> str:
     run = await agent.execute_once(
-        review_prompt(task_key, epic_key),
+        review_prompt(task_key, epic_key, project_page_id),
         settings.experiment_analytics_timeout_seconds,
         job_name="experiment-analytics-reviewer",
         accept_result=review_result_validator(task_key),
@@ -339,6 +349,17 @@ async def run_once(
     if selected is None:
         LOGGER.info("No eligible experiment-analytics task; finishing silently")
         return None
+    if selected.project_page_id is None:
+        try:
+            selected = replace(
+                selected,
+                project_page_id=await resolve_selected_project_page(settings, selected),
+            )
+        except SelectionError as error:
+            await publish_failure(
+                client, settings, f"{FAILURE_PREFIX} {selected.task_key}: {error}"
+            )
+            raise
     start_run = await agent.execute_once(
         start_prompt(selected), settings.experiment_analytics_timeout_seconds,
         job_name="experiment-analytics-reviewer",
@@ -380,7 +401,12 @@ async def run_preparation(
         selected.task_key, selected.epic_key, selected.pitch_key
     ):
         raise InvalidAnalyticsResult("Claimed Jira task or pairing changed before review")
-    return await run_review(client, agent, settings, *prepared, reviewer_session_id=reviewer_session_id)
+    if selected.project_page_id is None:
+        raise InvalidAnalyticsResult("Selected project page is missing before review")
+    return await run_review(
+        client, agent, settings, *prepared, selected.project_page_id,
+        reviewer_session_id=reviewer_session_id,
+    )
 
 
 async def select_from_jira(

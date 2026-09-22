@@ -23,17 +23,19 @@ CANDIDATE = DesignCandidate(
     pitch_key="UMN-13001",
     task_created_at="2026-09-03T10:00:02+00:00",
     pitch_reviewed_at="2026-09-04T09:00:00+00:00",
+    project_page_id="838613487",
 )
 
 
 def test_prompts_use_analytics_skill_service_accounts_and_owner_session() -> None:
-    prompt = review_prompt(CANDIDATE.task_key, CANDIDATE.epic_key)
+    prompt = review_prompt(CANDIDATE.task_key, CANDIDATE.epic_key, CANDIDATE.project_page_id)
     assert "ug-analytics-spec-writer" in PREPARATION_PROMPT
     assert "AUTOMATED RESPONSE STYLE" in PREPARATION_PROMPT
     assert "AUTOMATED ATLASSIAN IDENTITY" in PREPARATION_PROMPT
     assert "`Аналитика`" in PREPARATION_PROMPT
     assert "responsible author" in prompt
     assert "Never describe yourself as merely a reviewer" in prompt
+    assert "838613487" in prompt
 
 
 async def test_two_pass_pipeline_uses_analytics_jobs_and_attaches_reviewer(monkeypatch) -> None:
@@ -78,6 +80,30 @@ async def test_two_pass_pipeline_uses_analytics_jobs_and_attaches_reviewer(monke
     assert agent.attach_session.await_args.args[2].session_id == "review-session"
 
 
+async def test_missing_project_page_stops_analytics_before_start(monkeypatch) -> None:
+    from dataclasses import replace
+
+    from sloperator.experiment_design_selector import SelectionError
+
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    agent = SimpleNamespace(execute_once=AsyncMock())
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test",
+        experiment_analytics_channel="CANALYTICS",
+    )
+    selector = AsyncMock(return_value=replace(CANDIDATE, project_page_id=None))
+    resolver = AsyncMock(side_effect=SelectionError("Jira epic UMN-13000 has no project-page link"))
+    monkeypatch.setattr(
+        "sloperator.experiment_analytics_planner.resolve_selected_project_page", resolver
+    )
+
+    with pytest.raises(SelectionError, match="no project-page link"):
+        await run_once(client, agent, settings, selector)
+
+    agent.execute_once.assert_not_awaited()
+    client.chat_postMessage.assert_awaited_once()
+
+
 def test_review_notification_rejects_wrong_task() -> None:
     with pytest.raises(InvalidAnalyticsResult):
         normalize_review_notification(
@@ -120,7 +146,7 @@ def test_reviewer_starts_and_worker_has_read_only_jira() -> None:
 
 
 def test_reviewer_prompt_owns_jira_review_metadata_after_comment() -> None:
-    prompt = review_prompt("UMN-13024", "UMN-12345")
+    prompt = review_prompt("UMN-13024", "UMN-12345", "838613487")
     assert "Only after the comment is successfully added and verified" in prompt
     assert "target status `In Review`" in prompt
     assert "transition ID `181`" in prompt
@@ -149,7 +175,9 @@ def test_all_agent_phases_use_issue_checks_and_scheduler_context(kind: str) -> N
     prompts = [
         planner.start_prompt(CANDIDATE),
         planner.preparation_prompt(CANDIDATE),
-        planner.review_prompt(CANDIDATE.task_key, CANDIDATE.epic_key),
+        planner.review_prompt(
+            CANDIDATE.task_key, CANDIDATE.epic_key, CANDIDATE.project_page_id
+        ),
     ]
     for prompt in prompts:
         assert ISSUE_SELECTION_POLICY in prompt

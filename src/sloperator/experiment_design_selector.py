@@ -171,6 +171,17 @@ class JiraRestReader:
                     links.extend(_strings_in(obj.get("url")))
         return links
 
+    async def issue_parent_key(self, issue_key: str) -> str:
+        issue = await self._get(
+            f"/rest/api/3/issue/{issue_key}", {"fields": "parent"}
+        )
+        fields = issue.get("fields")
+        parent = fields.get("parent") if isinstance(fields, dict) else None
+        key = parent.get("key") if isinstance(parent, dict) else None
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Z][A-Z0-9]*-\d+", key):
+            raise SelectionError(f"Jira task {issue_key} has no unambiguous parent epic")
+        return key
+
 
 def _strings_in(value: Any):
     if isinstance(value, str):
@@ -183,7 +194,7 @@ def _strings_in(value: Any):
             yield from _strings_in(child)
 
 
-def _confluence_page_ids(value: str) -> set[str]:
+def confluence_page_ids(value: str) -> set[str]:
     result: set[str] = set()
     for match in re.finditer(r"https://[^\s<>\]\[\"']+", value):
         url = urlparse(match.group().rstrip(".,);"))
@@ -200,7 +211,7 @@ async def resolve_project_page_id(jira: JiraRestReader, epic_key: str) -> str:
     """Require one explicit Confluence project-page link on the selected Jira epic."""
     ids: set[str] = set()
     for link in await jira.epic_page_links(epic_key):
-        ids.update(_confluence_page_ids(link))
+        ids.update(confluence_page_ids(link))
     if not ids:
         raise SelectionError(
             f"Jira epic {epic_key} has no Confluence project-page link. "

@@ -21,6 +21,12 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
 )
 from sloperator.config import Settings
+from sloperator.experiment_design_selector import (
+    JiraRestReader,
+    SelectionError,
+    confluence_page_ids,
+    resolve_project_page_id,
+)
 from sloperator.jira_agent_policy import (
     REVIEWER_OWNERSHIP_POLICY,
     REVIEWER_START_POLICY,
@@ -127,6 +133,8 @@ an already selected and started task: In Progress on that exact task is expected
 it ineligible. Do not walk the pool or select another experiment. Revalidate its monetisation,
 age, segment, iteration, and fresh maturity evidence; fail if any gate changed. Reuse this run's
 verified fresh calculation; recalculate only if freshness cannot be established.
+Fetch only the authoritative project page ID supplied below. Do not search, enumerate, fetch, or
+publish another Confluence page. If it does not match the experiment and task, fail explicitly.
 
 Execution for the selected experiment:
 1. Work only on the exact experiment, page, iteration, and Results task supplied by the reviewer.
@@ -226,6 +234,12 @@ This is the authorised reviewer start pass for one UG experiment finalisation.
 
 Select exactly one experiment using all of these gates before any Jira or Confluence write:
 {SELECTION_RULES}
+Before the project-page check in rule 5, identify the exact Results task and its parent epic using
+rule 6. Require exactly one Confluence project-page link in that epic's description or remote links.
+Fetch only that page; do not search or enumerate Confluence spaces or fetch another page. If a
+candidate has a Results task but its epic has no unique project-page link, fail with the task and
+epic keys and ask for the link to be attached before starting the task. If the linked page does not
+match the experiment and iteration, fail rather than searching for a replacement.
 
 Verified identity for the current banner backlog (re-check live status and every other gate):
 the [launch notification](https://muse-group.enterprise.slack.com/archives/C02TE2S5YQL/p1789732463872359)
@@ -271,6 +285,8 @@ This is the authorised independent review pass for one prepared UG experiment fi
 
 Review only the exact experiment, project page, and iteration supplied below. Re-fetch the page and
 verify Results, Insights, Decision, and Next steps are complete, valid, and belong to that iteration.
+Do not search, enumerate, fetch, or publish any other Confluence page. If the supplied page is not
+the matching project page, fail instead of searching for a replacement.
 Use the repository Jira helper with `--as-bot` for every Jira command. Resolve the service account from
 `/myself` (`712020:e603f3a9-4b70-4ed8-866f-280460a661c5`). Re-fetch the exact Results task's current
 status and available transitions before any status change:
@@ -411,7 +427,36 @@ async def run_once(
         return await publish_run(client, agent, settings, replace(start_run, text=NO_OP_NOTIFICATION))
     if STARTED_RE.fullmatch(start_run.text.strip()) is None:
         raise InvalidFinalizationNotification(start_run.text)
-    return await run_preparation(client, agent, settings, start_run)
+    try:
+        project_page_id = await validate_started_page(settings, start_run.text)
+    except SelectionError as error:
+        await client.chat_postMessage(
+            channel=settings.experiment_finalizer_channel,
+            markdown_text=f"Experiment finalisation failed: {error}",
+            unfurl_links=False,
+            unfurl_media=False,
+        )
+        raise
+    return await run_preparation(client, agent, settings, start_run, project_page_id)
+
+
+async def validate_started_page(settings: Settings, start_text: str) -> str:
+    """Verify the selected page against the Results task's parent epic before preparation."""
+    started = STARTED_RE.fullmatch(start_text.strip())
+    if started is None:
+        raise SelectionError("Finalisation start has no experiment, page, and Results task")
+    if not settings.jira_username or not settings.jira_api_token:
+        raise SelectionError("Jira credentials are unavailable to project-page resolver")
+    task_key = started.group(4)
+    jira = JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
+    epic_key = await jira.issue_parent_key(task_key)
+    expected_id = await resolve_project_page_id(jira, epic_key)
+    if confluence_page_ids(started.group(2)) != {expected_id}:
+        raise SelectionError(
+            f"Results task {task_key} selected a page other than the one linked to "
+            f"Jira epic {epic_key}"
+        )
+    return expected_id
 
 
 async def run_preparation(
@@ -419,9 +464,11 @@ async def run_preparation(
     agent: AgentSubmitter,
     settings: Settings,
     started_run: HeadlessAgentRun,
+    project_page_id: str,
 ) -> str:
     prepared_run = await agent.execute_once(
-        FINALIZATION_PROMPT + "\n\nReviewer verified start:\n" + started_run.text,
+        FINALIZATION_PROMPT + "\n\nAuthoritative project page ID: " + project_page_id
+        + "\nReviewer verified start:\n" + started_run.text,
         settings.experiment_finalizer_timeout_seconds,
         job_name="experiment-finalizer-preparer",
         accept_result=is_preparation_result,
@@ -439,7 +486,8 @@ async def run_preparation(
         raise InvalidFinalizationNotification("Preparation does not match reviewer selection")
     return await run_review(
         client, agent, settings, prepared_text,
-        reviewer_session_id=started_run.session_id, start_context=started_run.text,
+        reviewer_session_id=started_run.session_id,
+        start_context=f"Authoritative project page ID: {project_page_id}\n{started_run.text}",
     )
 
 

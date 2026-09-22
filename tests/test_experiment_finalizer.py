@@ -21,6 +21,7 @@ from sloperator.experiment_finalizer import (
     next_run_at,
     normalize_finalization_notification,
     run_once,
+    validate_started_page,
 )
 
 VALID_NOTIFICATION = (
@@ -29,6 +30,7 @@ VALID_NOTIFICATION = (
     "Iteration 3. Results calculated and published.\n\n"
     "• Conclusion\n"
 )
+PAGE_URL = "https://alice.mu.se/pages/viewpage.action?pageId=838613487"
 
 
 def test_reviewer_owns_start_and_worker_cannot_write_jira() -> None:
@@ -138,7 +140,11 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "one sentence, no bullets" in FINALIZATION_PROMPT
 
 
-async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
+async def test_run_once_posts_once_and_attaches_resumable_session(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sloperator.experiment_finalizer.validate_started_page",
+        AsyncMock(return_value="838613487"),
+    )
     client = SimpleNamespace(
         chat_postMessage=AsyncMock(return_value={"channel": "DOWNER", "ts": "100.1"}),
     )
@@ -146,12 +152,12 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
         provider="claude",
         model="opus",
         session_id="session-1",
-        text="FINALIZATION_PREPARED: 7607 | https://alice.example/project | Iteration 3",
+        text=f"FINALIZATION_PREPARED: 7607 | {PAGE_URL} | Iteration 3",
     )
     review_run = HeadlessAgentRun(provider="claude", model="opus", session_id="session-2", text=VALID_NOTIFICATION)
     agent = SimpleNamespace(
         execute_once=AsyncMock(side_effect=[HeadlessAgentRun("claude", "opus", "session-2",
-            "FINALIZATION_STARTED: 7607 | https://alice.example/project | Iteration 3 | UMN-13000"),
+            f"FINALIZATION_STARTED: 7607 | {PAGE_URL} | Iteration 3 | UMN-13000"),
             prep_run, review_run]),
         attach_session=AsyncMock(),
     )
@@ -186,9 +192,13 @@ async def test_run_once_posts_once_and_attaches_resumable_session() -> None:
     assert attached_run.session_id == review_run.session_id
 
 
-async def test_worker_private_handoff_reaches_reviewer() -> None:
+async def test_worker_private_handoff_reaches_reviewer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sloperator.experiment_finalizer.validate_started_page",
+        AsyncMock(return_value="838613487"),
+    )
     prepared_text = (
-        "FINALIZATION_PREPARED: 7607 | https://alice.example/project | Iteration 3\n\n"
+        f"FINALIZATION_PREPARED: 7607 | {PAGE_URL} | Iteration 3\n\n"
         "Private evidence handoff for the reviewer."
     )
     client = SimpleNamespace(
@@ -201,7 +211,7 @@ async def test_worker_private_handoff_reaches_reviewer() -> None:
                     "claude",
                     "opus",
                     "reviewer-session",
-                    "FINALIZATION_STARTED: 7607 | https://alice.example/project | "
+                    f"FINALIZATION_STARTED: 7607 | {PAGE_URL} | "
                     "Iteration 3 | UMN-13000",
                 ),
                 HeadlessAgentRun("claude", "opus", "worker-session", prepared_text),
@@ -223,6 +233,49 @@ async def test_worker_private_handoff_reaches_reviewer() -> None:
     review_call = agent.execute_once.await_args_list[2]
     assert prepared_text in review_call.args[0]
     assert review_call.kwargs["existing_session_id"] == "reviewer-session"
+
+
+async def test_finalizer_rejects_page_not_linked_to_results_epic(monkeypatch) -> None:
+    from sloperator.experiment_design_selector import SelectionError
+
+    jira = SimpleNamespace(
+        issue_parent_key=AsyncMock(return_value="UMN-13001"),
+        epic_page_links=AsyncMock(return_value=[PAGE_URL]),
+    )
+    monkeypatch.setattr("sloperator.experiment_finalizer.JiraRestReader", lambda *_: jira)
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="test", app_token="test",
+        jira_username="jira-user", jira_api_token="jira-token",
+    )
+    selected = (
+        "FINALIZATION_STARTED: 7607 | "
+        "https://alice.mu.se/pages/viewpage.action?pageId=805320409 | "
+        "Iteration 3 | UMN-13000"
+    )
+    with pytest.raises(SelectionError, match="other than the one linked"):
+        await validate_started_page(settings, selected)
+    jira.issue_parent_key.assert_awaited_once_with("UMN-13000")
+
+
+async def test_finalizer_stops_before_worker_when_epic_page_is_missing(monkeypatch) -> None:
+    from sloperator.experiment_design_selector import SelectionError
+
+    monkeypatch.setattr(
+        "sloperator.experiment_finalizer.validate_started_page",
+        AsyncMock(side_effect=SelectionError("Jira epic UMN-13001 has no project-page link")),
+    )
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(return_value=HeadlessAgentRun(
+            "claude", "opus", "reviewer-session",
+            f"FINALIZATION_STARTED: 7607 | {PAGE_URL} | Iteration 3 | UMN-13000",
+        )),
+    )
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
+    with pytest.raises(SelectionError, match="no project-page link"):
+        await run_once(client, agent, settings)
+    assert agent.execute_once.await_count == 1
+    client.chat_postMessage.assert_awaited_once()
 
 
 def test_notification_normalizer_removes_operational_preamble() -> None:

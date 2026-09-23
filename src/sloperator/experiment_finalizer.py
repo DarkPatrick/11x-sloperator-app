@@ -236,11 +236,16 @@ This is the authorised reviewer start pass for one UG experiment finalisation.
 Select exactly one experiment using all of these gates before any Jira or Confluence write:
 {SELECTION_RULES}
 Before the project-page check in rule 5, identify the exact Results task and its parent epic using
-rule 6. Require exactly one Confluence project-page link in that epic's description or remote links.
-Fetch only that page; do not search or enumerate Confluence spaces or fetch another page. If a
-candidate has a Results task but its epic has no unique project-page link, fail with the task and
-epic keys and ask for the link to be attached before starting the task. If the linked page does not
-match the experiment and iteration, fail rather than searching for a replacement.
+rule 6. Resolve its project page from the experiment admin object's `project` value and
+independently verify it against the Results task's parent epic. For the Jira check, request
+`/rest/api/3/issue/<EPIC-KEY>/remotelink` explicitly: the Jira UI's `Confluence content` /
+`mentioned in` block is a remote link and is not returned by the normal issue fields, issue links,
+description, or comments. Accept the unique Confluence `object.url` whose application type is
+`com.atlassian.confluence`; its `globalId` `pageId` is an equivalent fallback. The experiment and
+Jira sources must identify the same page when both are present. Fetch only that page; do not search
+or enumerate Confluence spaces or fetch another page. If a candidate has a Results task but neither
+source provides a unique project page, fail with the experiment id, task key, and epic key. If the
+page does not match the experiment and iteration, fail rather than searching for a replacement.
 
 Verified identity for the current banner backlog (re-check live status and every other gate):
 the [launch notification](https://muse-group.enterprise.slack.com/archives/C02TE2S5YQL/p1789732463872359)
@@ -345,6 +350,12 @@ STARTED_RE = re.compile(
     r"FINALIZATION_STARTED: (\d+) \| (https://[^\s|]+) \| Iteration (\d+) \| (UMN-\d+)"
 )
 
+MISSING_PAGE_FAILURE_RE = re.compile(
+    r"experiment\s+(\d+).*?Results task\s+(UMN-\d+).*?epic\s+(UMN-\d+).*?"
+    r"(?:has no|without (?:a|the)) Confluence project(?:-| )page link",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def is_start_result(text: str) -> bool:
     return bool(STARTED_RE.fullmatch(text.strip())) or text.strip().startswith(
@@ -424,8 +435,12 @@ async def run_once(
         job_name="experiment-finalizer-reviewer",
         accept_result=is_start_result,
     )
+    recovered_start = await recover_missing_project_page(settings, agent, start_run)
+    if recovered_start is not None:
+        start_run = recovered_start
     if start_run.text.strip().startswith(NO_OP_PREFIX):
-        return await publish_run(client, agent, settings, replace(start_run, text=NO_OP_NOTIFICATION))
+        no_op_run = replace(start_run, text=NO_OP_NOTIFICATION)
+        return await publish_run(client, agent, settings, no_op_run)
     if STARTED_RE.fullmatch(start_run.text.strip()) is None:
         raise InvalidFinalizationNotification(start_run.text)
     try:
@@ -439,6 +454,54 @@ async def run_once(
         )
         raise
     return await run_preparation(client, agent, settings, start_run, project_page_id)
+
+
+async def recover_missing_project_page(
+    settings: Settings,
+    agent: AgentSubmitter,
+    failed_run: HeadlessAgentRun,
+) -> HeadlessAgentRun | None:
+    """Resume a reviewer when Jira's UI-only Confluence link was overlooked."""
+    match = MISSING_PAGE_FAILURE_RE.search(failed_run.text)
+    if match is None or not settings.jira_username or not settings.jira_api_token:
+        return None
+    experiment_id, task_key, reported_epic_key = match.groups()
+    jira = JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
+    actual_epic_key = await jira.issue_parent_key(task_key)
+    if actual_epic_key != reported_epic_key:
+        raise SelectionError(
+            f"Results task {task_key} belongs to {actual_epic_key}, not reported epic "
+            f"{reported_epic_key}"
+        )
+    project_page_id = await resolve_project_page_id(jira, actual_epic_key)
+    project_page_url = (
+        f"https://alice.mu.se/pages/viewpage.action?pageId={project_page_id}"
+    )
+    recovery_prompt = f"""[claude]
+This is the authorised continuation of the same experiment-finalisation reviewer pass.
+{AUTOMATED_RESPONSE_STYLE}
+{AUTOMATED_ATLASSIAN_IDENTITY}
+{REVIEWER_OWNERSHIP_POLICY}
+
+Sloperator independently read Jira REST `/rest/api/3/issue/{actual_epic_key}/remotelink` and
+verified the parent of Results task {task_key}. Jira's `Confluence content` / `mentioned in` remote
+link identifies this authoritative project page:
+{project_page_url}
+
+Resume only experiment {experiment_id}, the previously selected iteration, and Results task
+{task_key}. Verify that this page matches that experiment and iteration and re-check every remaining
+eligibility gate. If it matches, start the exact task under the reviewer start policy and return
+exactly `FINALIZATION_STARTED: {experiment_id} | {project_page_url} | Iteration <n> | {task_key}`.
+Do not switch candidates or search for another Confluence page. On a real mismatch or another
+failure, return exactly `Experiment finalisation failed: <reason>`.
+"""
+    return await agent.execute_once(
+        recovery_prompt,
+        settings.experiment_finalizer_timeout_seconds,
+        job_name="experiment-finalizer-reviewer",
+        accept_result=is_start_result,
+        existing_session_id=failed_run.session_id,
+    )
 
 
 async def validate_started_page(settings: Settings, start_text: str) -> str:

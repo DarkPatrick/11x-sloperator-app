@@ -7,10 +7,56 @@ from typing import Any
 import pytest
 
 from sloperator.experiment_design_selector import (
+    JiraRestReader,
     SelectionError,
     resolve_project_page_id,
     select_candidate,
 )
+
+
+async def test_epic_page_links_reads_confluence_page_id_from_remote_global_id(
+    monkeypatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    jira = JiraRestReader("https://jira.example", "user", "token")
+    jira._get = AsyncMock(return_value={"fields": {"description": None}})  # type: ignore[method-assign]
+
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def json(self):
+            return [{
+                "globalId": "appId=abc&pageId=822915848",
+                "application": {"type": "com.atlassian.confluence"},
+                "relationship": "mentioned in",
+                "object": {"title": "Project page"},
+            }]
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def get(self, _url):
+            return Response()
+
+    monkeypatch.setattr(
+        "sloperator.experiment_design_selector.ClientSession",
+        lambda **_kwargs: Session(),
+    )
+
+    assert await jira.epic_page_links("UMN-12542") == [
+        "https://alice.mu.se/pages/viewpage.action?pageId=822915848"
+    ]
 
 
 async def test_project_page_requires_one_link_on_epic() -> None:

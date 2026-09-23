@@ -169,6 +169,18 @@ class JiraRestReader:
                 obj = item.get("object")
                 if isinstance(obj, dict):
                     links.extend(_strings_in(obj.get("url")))
+                application = item.get("application")
+                application_type = (
+                    application.get("type") if isinstance(application, dict) else None
+                )
+                global_id = item.get("globalId")
+                if application_type == "com.atlassian.confluence" and isinstance(global_id, str):
+                    page_ids = parse_qs(global_id).get("pageId", [])
+                    links.extend(
+                        f"https://alice.mu.se/pages/viewpage.action?pageId={page_id}"
+                        for page_id in page_ids
+                        if page_id.isdigit()
+                    )
         return links
 
     async def issue_parent_key(self, issue_key: str) -> str:

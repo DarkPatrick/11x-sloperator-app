@@ -20,6 +20,7 @@ from sloperator.experiment_finalizer import (
     is_preparation_result,
     next_run_at,
     normalize_finalization_notification,
+    recover_missing_project_page,
     run_once,
     validate_started_page,
 )
@@ -255,6 +256,40 @@ async def test_finalizer_rejects_page_not_linked_to_results_epic(monkeypatch) ->
     with pytest.raises(SelectionError, match="other than the one linked"):
         await validate_started_page(settings, selected)
     jira.issue_parent_key.assert_awaited_once_with("UMN-13000")
+
+
+async def test_recovers_overlooked_jira_mentioned_in_project_page(monkeypatch) -> None:
+    jira = SimpleNamespace(
+        issue_parent_key=AsyncMock(return_value="UMN-12542"),
+        epic_page_links=AsyncMock(return_value=[
+            "https://alice.mu.se/pages/viewpage.action?pageId=822915848"
+        ]),
+    )
+    monkeypatch.setattr("sloperator.experiment_finalizer.JiraRestReader", lambda *_: jira)
+    recovered = HeadlessAgentRun(
+        "claude", "opus", "reviewer-session",
+        "FINALIZATION_STARTED: 7940 | "
+        "https://alice.mu.se/pages/viewpage.action?pageId=822915848 | "
+        "Iteration 2 | UMN-13460",
+    )
+    agent = SimpleNamespace(execute_once=AsyncMock(return_value=recovered))
+    failed = HeadlessAgentRun(
+        "claude", "opus", "reviewer-session",
+        "Experiment finalisation failed: experiment 7940's Results task UMN-13460 passed every "
+        "other gate, but its epic UMN-12542 has no Confluence project-page link.",
+    )
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="test", app_token="test",
+        jira_username="jira-user", jira_api_token="jira-token",
+    )
+
+    assert await recover_missing_project_page(settings, agent, failed) == recovered
+    jira.issue_parent_key.assert_awaited_once_with("UMN-13460")
+    jira.epic_page_links.assert_awaited_once_with("UMN-12542")
+    call = agent.execute_once.await_args
+    assert "pageId=822915848" in call.args[0]
+    assert AUTOMATED_RESPONSE_STYLE in call.args[0]
+    assert call.kwargs["existing_session_id"] == "reviewer-session"
 
 
 async def test_finalizer_stops_before_worker_when_epic_page_is_missing(monkeypatch) -> None:

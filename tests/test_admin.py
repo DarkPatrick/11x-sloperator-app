@@ -312,6 +312,12 @@ def test_admin_supports_headless_agent_runs() -> None:
     assert 's.headless?"Prompt and result":"Thread messages"' in ADMIN_HTML
 
 
+def test_admin_surfaces_state_loading_errors() -> None:
+    assert 'id="load-error"' in ADMIN_HTML
+    assert "Не удалось загрузить данные админки" in ADMIN_HTML
+    assert "refresh();setInterval(refresh,5000)" in ADMIN_HTML
+
+
 def test_admin_lists_both_experiment_design_agent_prompts() -> None:
     job_name = "experiment-design-planner (sloperator.service)"
     prompts = _cron_agent_prompt_definitions([
@@ -330,6 +336,7 @@ def test_admin_lists_both_experiment_design_agent_prompts() -> None:
     assert {prompt["key"] for prompt in prompts} == {job_name}
     assert "stops before launching an agent" in prompts[0]["prompt"]
     assert "{{ calculation task key }}" in prompts[1]["prompt"]
+    assert "{{ project page id }}" in prompts[1]["prompt"]
     assert "add one short English comment" in prompts[1]["prompt"]
     assert "Do not send Slack messages yourself" in prompts[1]["prompt"]
 
@@ -351,6 +358,7 @@ def test_admin_lists_both_experiment_analytics_agent_prompts() -> None:
     ]
     assert "ug-analytics-spec-writer" in prompts[0]["prompt"]
     assert "{{ Analytics task key }}" in prompts[1]["prompt"]
+    assert "{{ project page id }}" in prompts[1]["prompt"]
 
 
 def test_admin_merges_published_scheduled_run_with_its_slack_session() -> None:

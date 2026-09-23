@@ -110,6 +110,8 @@ html[data-theme="light"] .running{background:#d7f4e5;color:#08783f}
 html[data-theme="light"] .failed{background:#fee4e2;color:#b42318}
 .tabs{display:flex;gap:8px;margin:24px 0}.tabs button{font-weight:650;padding:9px 16px}
 .tabs button.active{background:var(--blue);border-color:var(--blue);color:#0c1a2d}
+.load-error{margin:0 0 16px;padding:12px 14px;border:1px solid var(--red);border-radius:8px;
+background:color-mix(in srgb,var(--red) 12%,var(--card));color:var(--text)}
 .panel{display:none}.panel.active{display:block}
 button{border:1px solid var(--line);background:var(--button);color:var(--text);border-radius:7px;
 padding:7px 11px;cursor:pointer}button:hover{border-color:var(--blue)}button.danger{color:var(--red)}
@@ -218,6 +220,7 @@ height:auto}.sql-pane:first-child{border-right:0;border-bottom:1px solid var(--l
 <button id="tab-codex" onclick="setTab('codex')">Codex</button>
 <button id="tab-sql" onclick="setTab('sql')">SQL editor</button>
 </nav>
+<div id="load-error" class="load-error" role="alert" hidden></div>
 <section id="panel-agents" class="panel"><h2>Agent sessions</h2>
 <div id="sessions" class="grid"></div></section>
 <section id="panel-cron" class="panel"><h2>Cron runs</h2><div class="cron-toolbar row spread">
@@ -661,9 +664,12 @@ if(nextTriggerSignature!==triggerSignature){renderTriggerHistory(d.slack_trigger
 triggerSignature=nextTriggerSignature}
 const nextUsageSignature=JSON.stringify(d.agent_usage);if(nextUsageSignature!==usageSignature){
 renderUsage(d.agent_usage);usageSignature=nextUsageSignature}}
+async function refresh(){const errorBox=document.getElementById("load-error");try{await load();
+errorBox.hidden=true;errorBox.textContent=""}catch(error){errorBox.textContent=
+`Не удалось загрузить данные админки: ${error.message||error}`;errorBox.hidden=false}}
 applyTheme(preferredTheme());initSqlEditor();setTab(location.hash.slice(1));
 addEventListener("hashchange",()=>setTab(location.hash.slice(1)));
-load();setInterval(load,5000);
+refresh();setInterval(refresh,5000);
 </script></body></html>"""
 
 
@@ -825,7 +831,9 @@ def _cron_agent_prompt_definitions(jobs: list[dict[str, Any]]) -> list[dict[str,
                             "verify and correct the selected design, then complete Jira and Slack"
                         ),
                         "prompt": review_prompt(
-                            "{{ calculation task key }}", "{{ epic key }}"
+                            "{{ calculation task key }}",
+                            "{{ epic key }}",
+                            "{{ project page id }}",
                         ),
                     },
                 )
@@ -853,7 +861,9 @@ def _cron_agent_prompt_definitions(jobs: list[dict[str, Any]]) -> list[dict[str,
                             "specification, then complete Jira and Slack"
                         ),
                         "prompt": analytics_review_prompt(
-                            "{{ Analytics task key }}", "{{ epic key }}"
+                            "{{ Analytics task key }}",
+                            "{{ epic key }}",
+                            "{{ project page id }}",
                         ),
                     },
                 )

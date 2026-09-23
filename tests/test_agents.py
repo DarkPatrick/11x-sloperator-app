@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -29,6 +30,7 @@ from sloperator.agents import (
     fetch_thread_context,
     has_required_deliverable,
     is_authentication_failure,
+    is_claude_hook_response,
     is_infrastructure_failure,
     is_reply_path_guard_correction,
     optional_reply_instruction,
@@ -948,11 +950,42 @@ async def test_slack_turn_recovers_from_reply_path_guard_correction(
     assert run_claude.await_count == 2
     assert run_claude.await_args.args[2] == PATH_GUARD_RECOVERY_PROMPT
     assert run_claude.await_args.kwargs["force_resume"] is True
+    assert run_claude.await_args.kwargs["environment_overrides"] == {
+        "UG_SKIP_PREFLIGHT": "1"
+    }
     post_message.assert_awaited_once_with(
         channel="C123",
         thread_ts="100.1",
         markdown_text="Полный исправленный ответ",
     )
+
+
+def test_claude_hook_response_uses_transcript_protocol_not_hook_wording(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    transcript = tmp_path / "session-1.jsonl"
+    records = [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Draft"}]}},
+        {"type": "user", "message": {"content": "Stop hook feedback:\nA new hook protocol."}},
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Read"}]},
+        },
+        {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": "checked"}]},
+        },
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Hook-owned response"}]},
+        },
+    ]
+    transcript.write_text("\n".join(json.dumps(item) for item in records) + "\n")
+    monkeypatch.setattr("sloperator.agents.transcript_directory", lambda workspace: tmp_path)
+
+    assert is_claude_hook_response(tmp_path, "session-1", "Hook-owned response")
+    assert not is_claude_hook_response(tmp_path, "session-1", "Draft")
 
 
 @pytest.mark.parametrize("job_name", [
@@ -1116,6 +1149,49 @@ async def test_completion_rejection_resumes_author_before_publication(monkeypatc
     assert worker.await_args.kwargs["force_resume"] is True
     client.chat_postMessage.assert_awaited_once_with(
         channel="C123", thread_ts="100.1", markdown_text="Проверил: изменений нет.",
+    )
+
+
+async def test_hook_owned_interim_response_recovers_once_without_rerunning_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worker = AsyncMock(side_effect=[
+        AgentRunResult(session_id="same-session", text="⏳ Проверяю результат…"),
+        AgentRunResult(session_id="same-session", text="Готово — метрики совпадают."),
+    ])
+    monkeypatch.setattr("sloperator.agents.run_claude", worker)
+    monkeypatch.setattr("sloperator.agents.is_claude_hook_response", lambda *args: True)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="test",
+        app_token="test",
+        agent_workspace=tmp_path,
+        agent_timeout_seconds=900,
+    )
+    gate = SimpleNamespace(render=AsyncMock(side_effect=[
+        AgentExecutionError("Incomplete"), "Готово — метрики совпадают.",
+    ]))
+    agent = AgentOrchestrator(settings, store, communication=gate)
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+
+    await agent.submit(
+        client,
+        channel_id="C123",
+        message_ts="100.1",
+        thread_ts="100.1",
+        text="Исправь метрики",
+        show_status=False,
+    )
+    await agent.drain()
+
+    assert worker.await_count == 2
+    assert worker.await_args.args[0].agent_timeout_seconds == 300
+    assert worker.await_args.kwargs["environment_overrides"] == {"UG_SKIP_PREFLIGHT": "1"}
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="C123", thread_ts="100.1", markdown_text="Готово — метрики совпадают.",
     )
 
 

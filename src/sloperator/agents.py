@@ -11,6 +11,7 @@ import re
 import signal
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -128,6 +129,7 @@ must not mention internal review rounds, approvals, critics, orchestration, or t
 """
 TIME_LIMIT_NOTICE = "⚠️ Агент исчерпал лимит работы; ниже — всё, что удалось собрать."
 TIMEOUT_RECOVERY_SECONDS = 300
+HOOK_RECOVERY_SECONDS = 300
 TIMEOUT_RECOVERY_PROMPT = f"""\
 The previous turn exhausted its work-time limit. Do not continue the investigation, run queries,
 use tools, inspect files, package artifacts, start reviews, or improve the analysis. The original
@@ -210,6 +212,70 @@ def is_reply_path_guard_correction(text: str) -> bool:
         line for line in lines if not line.startswith((":compass:", ":books:", "🧭", "📚"))
     ]
     return len(non_meta_lines) <= len(correction_lines) + 1
+
+
+def _claude_transcript_text(record: object) -> str:
+    """Extract plain text from one Claude transcript message."""
+    if not isinstance(record, dict):
+        return ""
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(block.get("text") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ).strip()
+
+
+def is_claude_hook_response(workspace: Path, session_id: str, result_text: str) -> bool:
+    """Identify a CLI result authored in response to any Claude hook.
+
+    Hook wording is repository-owned and evolves independently of Sloperator, so matching the
+    transcript's protocol marker is more durable than maintaining a list of hook phrases. Claude
+    writes the hook feedback as a user record immediately before the assistant response it caused.
+    """
+    path = transcript_directory(workspace) / f"{session_id}.jsonl"
+    if not path.is_file() or not result_text.strip():
+        return False
+    recent: deque[dict[str, Any]] = deque(maxlen=80)
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(record, dict) and record.get("type") in {"user", "assistant"}:
+                    recent.append(record)
+    except OSError:
+        return False
+
+    expected = result_text.strip()
+    for index in range(len(recent) - 1, -1, -1):
+        record = recent[index]
+        if record.get("type") != "assistant" or _claude_transcript_text(record) != expected:
+            continue
+        for previous in reversed(tuple(recent)[:index]):
+            if previous.get("type") != "user":
+                continue
+            previous_text = _claude_transcript_text(previous)
+            if previous_text:
+                return "hook feedback:" in previous_text.casefold()
+        return False
+    return False
+
+
+def hook_recovery_environment(environment_overrides: Mapping[str, str] | None) -> dict[str, str]:
+    """Prevent a completed hook from recursively intercepting its recovery response."""
+    recovered = dict(environment_overrides or {})
+    recovered["UG_SKIP_PREFLIGHT"] = "1"
+    return recovered
 
 
 CLAUDE_INITIAL_INSTRUCTION = INITIAL_INSTRUCTION.replace("AGENTS.md", "CLAUDE.md")
@@ -2374,15 +2440,18 @@ class AgentOrchestrator:
                                     run_claude,
                                     replace(
                                         self.settings,
-                                        agent_timeout_seconds=(
-                                            timeout_seconds or self.settings.agent_timeout_seconds
+                                        agent_timeout_seconds=min(
+                                            timeout_seconds or self.settings.agent_timeout_seconds,
+                                            HOOK_RECOVERY_SECONDS,
                                         ),
                                     ),
                                     session,
                                     PATH_GUARD_RECOVERY_PROMPT,
                                     control,
                                     force_resume=True,
-                                    environment_overrides=environment_overrides,
+                                    environment_overrides=hook_recovery_environment(
+                                        environment_overrides
+                                    ),
                                     usage_context=usage_context,
                                 ),
                                 context=f"Slack thread {thread_ts} path-guard recovery",
@@ -2393,10 +2462,17 @@ class AgentOrchestrator:
                                 "instead of the complete Slack response"
                             )
                         if require_artifact and not has_required_deliverable(result.text):
+                            hook_response = await asyncio.to_thread(
+                                is_claude_hook_response,
+                                self.settings.agent_workspace,
+                                result.session_id,
+                                result.text,
+                            )
                             LOGGER.warning(
                                 "Claude result for thread %s missed the required artifact "
-                                "contract; requesting the prepared final deliverable",
+                                "contract; requesting the prepared final deliverable%s",
                                 thread_ts,
+                                " after hook completion" if hook_response else "",
                             )
                             session = replace(
                                 session,
@@ -2409,14 +2485,25 @@ class AgentOrchestrator:
                                     replace(
                                         self.settings,
                                         agent_timeout_seconds=(
-                                            timeout_seconds or self.settings.agent_timeout_seconds
+                                            min(
+                                                timeout_seconds
+                                                or self.settings.agent_timeout_seconds,
+                                                HOOK_RECOVERY_SECONDS,
+                                            )
+                                            if hook_response
+                                            else timeout_seconds
+                                            or self.settings.agent_timeout_seconds
                                         ),
                                     ),
                                     session,
                                     FINAL_ARTIFACT_RECOVERY_PROMPT,
                                     control,
                                     force_resume=True,
-                                    environment_overrides=environment_overrides,
+                                    environment_overrides=(
+                                        hook_recovery_environment(environment_overrides)
+                                        if hook_response
+                                        else environment_overrides
+                                    ),
                                     usage_context=usage_context,
                                 ),
                                 context=f"Slack thread {thread_ts} final deliverable recovery",
@@ -2541,9 +2628,20 @@ class AgentOrchestrator:
                             except AgentExecutionError:
                                 if recovery == 2:
                                     raise
+                                hook_response = (
+                                    session.provider == "claude"
+                                    and await asyncio.to_thread(
+                                        is_claude_hook_response,
+                                        self.settings.agent_workspace,
+                                        result.session_id,
+                                        result.text,
+                                    )
+                                )
                                 LOGGER.warning(
-                                    "Returning unaccepted Slack response to worker in %s (%d/2)",
-                                    thread_ts, recovery + 1,
+                                    "Returning unaccepted Slack response to worker in %s (%d/2)%s",
+                                    thread_ts,
+                                    recovery + 1,
+                                    " after hook completion" if hook_response else "",
                                 )
                                 session = replace(
                                     session, external_session_id=result.session_id,
@@ -2558,7 +2656,14 @@ class AgentOrchestrator:
                                 recovery_settings = replace(
                                     self.settings,
                                     agent_timeout_seconds=(
-                                        timeout_seconds or self.settings.agent_timeout_seconds
+                                        min(
+                                            timeout_seconds
+                                            or self.settings.agent_timeout_seconds,
+                                            HOOK_RECOVERY_SECONDS,
+                                        )
+                                        if hook_response
+                                        else timeout_seconds
+                                        or self.settings.agent_timeout_seconds
                                     ),
                                 )
                                 self._active_runs[key] = control
@@ -2568,7 +2673,11 @@ class AgentOrchestrator:
                                             partial(
                                                 run_claude, recovery_settings, session, recovery_prompt,
                                                 control, force_resume=True,
-                                                environment_overrides=environment_overrides,
+                                                environment_overrides=(
+                                                    hook_recovery_environment(environment_overrides)
+                                                    if hook_response
+                                                    else environment_overrides
+                                                ),
                                                 usage_context=usage_context,
                                             ),
                                             context=f"Slack thread {thread_ts} completion recovery",

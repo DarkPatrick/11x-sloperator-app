@@ -117,6 +117,49 @@ async def test_provider_quota_response_is_detected(tmp_path, monkeypatch):
         await run_claude(settings, session, "Investigate", ActiveAgentRun("claude"))
 
 
+async def test_quota_retry_resumes_transcript_created_by_failed_first_attempt(
+    tmp_path, monkeypatch
+):
+    settings = Settings(
+        slack_user_id="U123",
+        bot_token="test",
+        app_token="test",
+        agent_workspace=tmp_path,
+        database_path=tmp_path / "state.sqlite3",
+    )
+    store = EventStore(settings.database_path)
+    store.initialize()
+    transcript_root = tmp_path / "transcripts"
+    commands = []
+
+    async def provider(command, **_kwargs):
+        commands.append(command)
+        option = "--session-id" if "--session-id" in command else "--resume"
+        session_id = command[command.index(option) + 1]
+        if len(commands) == 1:
+            (transcript_root / f"{session_id}.jsonl").parent.mkdir(parents=True, exist_ok=True)
+            (transcript_root / f"{session_id}.jsonl").write_text(
+                json.dumps({"type": "assistant", "error": "rate_limit"}) + "\n"
+            )
+            return 1, json.dumps({"is_error": True, "result": "You've hit your session limit"}), ""
+        return 0, json.dumps({"result": "Recovered", "session_id": session_id}), ""
+
+    monkeypatch.setattr("sloperator.agents.transcript_directory", lambda _: transcript_root)
+    monkeypatch.setattr("sloperator.agents._run_process", provider)
+    wait = AsyncMock()
+    monkeypatch.setattr("sloperator.agents.wait_for_claude_quota_reset", wait)
+    orchestrator = AgentOrchestrator(settings, store)
+
+    result = await orchestrator.execute_once("Investigate", 60)
+
+    assert result.text == "Recovered"
+    assert "--session-id" in commands[0]
+    assert "--resume" in commands[1]
+    assert "--session-id" not in commands[1]
+    assert commands[1][commands[1].index("--resume") + 1] == result.session_id
+    wait.assert_awaited_once()
+
+
 async def test_run_claude_enforces_budget_before_launch(tmp_path, monkeypatch):
     settings = Settings(
         slack_user_id="U123",

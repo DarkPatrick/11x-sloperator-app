@@ -960,6 +960,12 @@ async def _run_claude(
         and session.status not in {"failed", "cancelled"}
     )
     session_id = session.external_session_id or str(uuid.uuid4())
+    transcript_path = transcript_directory(settings.agent_workspace) / f"{session_id}.jsonl"
+    if new_session and transcript_path.is_file():
+        # Claude persists the transcript before reporting a quota error. A retry after the
+        # allowance resets must therefore resume that session instead of trying to create the
+        # same ID again, which the CLI rejects as "already in use".
+        new_session = False
     command = [
         str(settings.claude_cli),
         "-p",

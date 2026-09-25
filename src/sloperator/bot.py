@@ -351,6 +351,12 @@ def create_app(
                     ),
                 )
 
+    @app.event("reaction_added")
+    @app.event("reaction_removed")
+    async def handle_reaction(event: Mapping[str, Any]) -> None:
+        """Acknowledge subscribed reaction events after archive middleware persists them."""
+        LOGGER.debug("Acknowledged Slack %s event", event.get("type"))
+
     return app
 
 

@@ -1,5 +1,8 @@
+from unittest.mock import MagicMock
+
 from sloperator.archive import conversation_kind, event_channel_id
 from sloperator.bot import (
+    create_app,
     is_trusted_channel_thread,
     is_vpn_command,
     normalize_command,
@@ -8,6 +11,7 @@ from sloperator.bot import (
     vpn_otp_from_command,
 )
 from sloperator.config import Settings
+from sloperator.store import EventStore
 
 
 def test_normalize_command_removes_mention_and_whitespace() -> None:
@@ -170,3 +174,22 @@ def test_settings_without_explicit_conversation_users_fall_back_to_owner() -> No
     }
 
     assert is_trusted_channel_thread(event, settings)
+
+
+async def test_reaction_events_are_acknowledged_without_starting_work(tmp_path) -> None:
+    settings = Settings("UOWNER", "xoxb-test", "xapp-test")
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    orchestrator = MagicMock()
+    app = create_app(settings, store, orchestrator, MagicMock())
+
+    reaction_handlers = app._async_listeners[2:4]
+    assert len(reaction_handlers) == 2
+    for listener, event_type in zip(
+        reaction_handlers,
+        ("reaction_removed", "reaction_added"),
+        strict=True,
+    ):
+        await listener.ack_function(event={"type": event_type})
+
+    orchestrator.submit.assert_not_called()

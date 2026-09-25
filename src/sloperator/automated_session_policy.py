@@ -29,6 +29,11 @@ AUTOMATED SESSION REPOSITORY BOUNDARY (STRICT, applies for this session's entire
 
 AUTOMATED_RESPONSE_STYLE = """\
 AUTOMATED RESPONSE STYLE (AUTHOR-OWNED FINAL ANSWER, STRICT):
+- When the answer will be published to Slack, first read and apply both
+  `context/rules/communication-style.md` and `context/slack-emoji-reactions.md` from the
+  ug-ai-analyst workspace. These are the canonical Slack wording and reaction policies; this
+  abbreviated prompt does not replace them. Sloperator owns the actual Slack API calls, so return
+  the requested answer text and do not invent reaction-control markers.
 - Your answer is published in your own words. The completion gate cannot rewrite it. Supply
   the complete Slack-ready answer and artifact marker; do not narrate internal work, review rounds,
   agent orchestration, skills, local paths, or refer to a message that has not been published.

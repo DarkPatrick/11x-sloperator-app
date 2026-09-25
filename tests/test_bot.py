@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from sloperator.archive import conversation_kind, event_channel_id
 from sloperator.bot import (
@@ -190,6 +190,54 @@ async def test_reaction_events_are_acknowledged_without_starting_work(tmp_path) 
         ("reaction_removed", "reaction_added"),
         strict=True,
     ):
-        await listener.ack_function(event={"type": event_type})
+        await listener.ack_function(event={"type": event_type}, client=AsyncMock())
 
     orchestrator.submit.assert_not_called()
+
+
+async def test_thinking_reaction_on_bot_answer_queues_recheck(tmp_path) -> None:
+    settings = Settings("UOWNER", "xoxb-test", "xapp-test")
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    store.message_context = MagicMock(return_value={"thread_ts": "100.1"})  # type: ignore[method-assign]
+    store.has_agent_thread = MagicMock(return_value=True)  # type: ignore[method-assign]
+    orchestrator = MagicMock()
+    orchestrator.submit = AsyncMock()
+    app = create_app(settings, store, orchestrator, MagicMock())
+    client = AsyncMock()
+    client.auth_test.return_value = {"user_id": "UBOT"}
+    reaction_added = app._async_listeners[3]
+
+    await reaction_added.ack_function(
+        event={
+            "type": "reaction_added",
+            "user": "UOWNER",
+            "reaction": "thinking_face",
+            "item_user": "UBOT",
+            "event_ts": "100.3",
+            "item": {"type": "message", "channel": "D123", "ts": "100.2"},
+        },
+        client=client,
+    )
+
+    orchestrator.submit.assert_awaited_once()
+    kwargs = orchestrator.submit.await_args.kwargs
+    assert kwargs["thread_ts"] == "100.1"
+    assert kwargs["message_ts"] == "100.3"
+    assert kwargs["react_to_message"] is False
+
+
+async def test_non_thinking_reaction_does_not_start_work(tmp_path) -> None:
+    settings = Settings("UOWNER", "xoxb-test", "xapp-test")
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    orchestrator = MagicMock()
+    orchestrator.submit = AsyncMock()
+    app = create_app(settings, store, orchestrator, MagicMock())
+
+    await app._async_listeners[3].ack_function(
+        event={"type": "reaction_added", "user": "UOWNER", "reaction": "eyes"},
+        client=AsyncMock(),
+    )
+
+    orchestrator.submit.assert_not_awaited()

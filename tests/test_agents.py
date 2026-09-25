@@ -40,6 +40,7 @@ from sloperator.agents import (
     split_slack_message,
     thread_key,
 )
+from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.config import Settings
 from sloperator.store import EventStore
 
@@ -47,6 +48,32 @@ from sloperator.store import EventStore
 def test_claude_initial_instruction_references_claude_md() -> None:
     assert "CLAUDE.md" in CLAUDE_INITIAL_INSTRUCTION
     assert "AGENTS.md" not in CLAUDE_INITIAL_INSTRUCTION
+
+
+def test_automated_slack_style_requires_canonical_communication_docs() -> None:
+    assert "context/rules/communication-style.md" in AUTOMATED_RESPONSE_STYLE
+    assert "context/slack-emoji-reactions.md" in AUTOMATED_RESPONSE_STYLE
+
+
+async def test_request_reactions_use_slack_lifecycle_api(
+    settings: Settings, tmp_path: Path
+) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    orchestrator = AgentOrchestrator(settings, store)
+    client = AsyncMock()
+
+    assert await orchestrator._set_request_reaction(client, "D123", "100.1", "eyes")
+    assert await orchestrator._set_request_reaction(
+        client, "D123", "100.1", "eyes", remove=True
+    )
+
+    client.reactions_add.assert_awaited_once_with(
+        channel="D123", timestamp="100.1", name="eyes"
+    )
+    client.reactions_remove.assert_awaited_once_with(
+        channel="D123", timestamp="100.1", name="eyes"
+    )
 
 
 def test_reply_path_guard_correction_detection() -> None:

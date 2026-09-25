@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from slack_bolt.async_app import AsyncApp
+from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import AgentOrchestrator, SubmitResult, thread_key
@@ -144,6 +145,7 @@ def create_app(
     )
     experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
     vpn_threads: set[tuple[str, str]] = set()
+    bot_user_id: str | None = None
 
     @app.event("app_mention")
     @app.event("message")
@@ -353,9 +355,64 @@ def create_app(
 
     @app.event("reaction_added")
     @app.event("reaction_removed")
-    async def handle_reaction(event: Mapping[str, Any]) -> None:
-        """Acknowledge subscribed reaction events after archive middleware persists them."""
-        LOGGER.debug("Acknowledged Slack %s event", event.get("type"))
+    async def handle_reaction(
+        event: Mapping[str, Any],
+        client: AsyncWebClient,
+    ) -> None:
+        """Use a human :thinking_face: on a bot answer as a request to re-check it."""
+        nonlocal bot_user_id
+        if event.get("type") != "reaction_added":
+            return
+        if event.get("user") not in settings.conversation_user_ids:
+            return
+        if event.get("reaction") != "thinking_face":
+            return
+        item = event.get("item")
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            return
+        channel_id = item.get("channel")
+        message_ts = item.get("ts")
+        event_ts = event.get("event_ts")
+        if not all(isinstance(value, str) for value in (channel_id, message_ts, event_ts)):
+            return
+        if bot_user_id is None:
+            try:
+                auth = await client.auth_test()
+                auth_user_id = auth.get("user_id")
+                bot_user_id = auth_user_id if isinstance(auth_user_id, str) else ""
+            except SlackApiError:
+                LOGGER.warning("Could not identify the bot for a Slack reaction event")
+                return
+        if event.get("item_user") != bot_user_id:
+            return
+        assert isinstance(channel_id, str)
+        assert isinstance(message_ts, str)
+        assert isinstance(event_ts, str)
+        message = await asyncio.to_thread(store.message_context, channel_id, message_ts)
+        if message is None:
+            LOGGER.debug(
+                "Ignoring reaction on an unarchived Slack message %s/%s",
+                channel_id,
+                message_ts,
+            )
+            return
+        thread_ts = str(message["thread_ts"] or message_ts)
+        if not await asyncio.to_thread(store.has_agent_thread, channel_id, thread_ts):
+            return
+        await orchestrator.submit(
+            client,
+            channel_id=channel_id,
+            message_ts=event_ts,
+            thread_ts=thread_ts,
+            text=(
+                "A human reacted :thinking_face: to your Slack answer. Re-check the conclusion "
+                "against the available evidence. If it is wrong or incomplete, correct it briefly; "
+                "if it still holds, explain the one decisive fact and ask what looks off."
+            ),
+            show_status=False,
+            react_to_message=False,
+            agent_name="slack/reaction-recheck",
+        )
 
     return app
 

@@ -817,6 +817,20 @@ class EventStore:
             ).fetchone()
         return row is not None
 
+    def message_context(self, channel_id: str, message_ts: str) -> dict[str, Any] | None:
+        """Return routing metadata for one archived Slack message."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT message_ts, thread_ts, user_id, bot_id
+                FROM messages
+                WHERE channel_id = ? AND message_ts = ? AND deleted = 0
+                """,
+                (channel_id, message_ts),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def contains_channel(self, channel_id: str) -> bool:
         """Return whether a conversation is already present in the map."""
         with self._connect() as connection:

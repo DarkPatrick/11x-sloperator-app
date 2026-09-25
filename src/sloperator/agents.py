@@ -128,6 +128,13 @@ final Slack answer now, followed by the existing archive marker on its own final
 must not mention internal review rounds, approvals, critics, orchestration, or this correction.
 """
 TIME_LIMIT_NOTICE = "⚠️ Агент исчерпал лимит работы; ниже — всё, что удалось собрать."
+REQUEST_REACTION_BY_STATUS = {
+    "completed": "white_check_mark",
+    "failed": "x",
+    "rejected": "x",
+    "cancelled": "x",
+    "interrupted": "warning",
+}
 TIMEOUT_RECOVERY_SECONDS = 300
 HOOK_RECOVERY_SECONDS = 300
 TIMEOUT_RECOVERY_PROMPT = f"""\
@@ -1376,6 +1383,7 @@ class AgentOrchestrator:
         optional_reply: bool = False,
         require_artifact: bool = False,
         automated: bool = False,
+        react_to_message: bool = True,
         agent_name: str | None = None,
         reuse_key: str | None = None,
         reuse_mention_line: str | None = None,
@@ -1433,6 +1441,7 @@ class AgentOrchestrator:
             "optional_reply": optional_reply,
             "require_artifact": require_artifact,
             "automated": automated,
+            "react_to_message": react_to_message,
             "agent_name": agent_name,
             "reuse_key": reuse_key,
             "reuse_mention_line": reuse_mention_line,
@@ -1497,6 +1506,7 @@ class AgentOrchestrator:
                 optional_reply=optional_reply,
                 require_artifact=require_artifact,
                 automated=automated,
+                react_to_message=react_to_message,
                 agent_name=agent_name,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
@@ -1531,6 +1541,7 @@ class AgentOrchestrator:
                     optional_reply=bool(options.get("optional_reply", False)),
                     require_artifact=bool(options.get("require_artifact", False)),
                     automated=bool(options.get("automated", False)),
+                    react_to_message=bool(options.get("react_to_message", True)),
                     agent_name=(
                         str(options["agent_name"]) if options.get("agent_name") else None
                     ),
@@ -2166,6 +2177,36 @@ class AgentOrchestrator:
         except SlackApiError:
             LOGGER.warning("Could not set Slack agent status for thread %s", thread_ts)
 
+    async def _set_request_reaction(
+        self,
+        client: AsyncWebClient,
+        channel_id: str,
+        message_ts: str,
+        reaction: str,
+        *,
+        remove: bool = False,
+    ) -> bool:
+        """Set a lifecycle reaction without allowing Slack API errors to fail the work."""
+        try:
+            method = getattr(client, "reactions_remove" if remove else "reactions_add", None)
+            if method is None:
+                return False
+            await method(channel=channel_id, timestamp=message_ts, name=reaction)
+            return True
+        except SlackApiError as error:
+            error_code = error.response.get("error", "Slack API error")
+            harmless = {"no_reaction"} if remove else {"already_reacted"}
+            if error_code not in harmless:
+                LOGGER.warning(
+                    "Could not %s Slack reaction :%s: on %s/%s: %s",
+                    "remove" if remove else "add",
+                    reaction,
+                    channel_id,
+                    message_ts,
+                    error_code,
+                )
+            return error_code in harmless
+
     async def _reply(
         self,
         client: AsyncWebClient,
@@ -2193,7 +2234,7 @@ class AgentOrchestrator:
         for chunk in split_slack_message(response):
             payload = slack_message_payload(chunk)
             if disable_link_previews:
-                await client.chat_postMessage(
+                posted = await client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
                     **payload,
@@ -2201,10 +2242,24 @@ class AgentOrchestrator:
                     unfurl_media=False,
                 )
             else:
-                await client.chat_postMessage(
+                posted = await client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
                     **payload,
+                )
+            posted_ts = posted.get("ts") if isinstance(posted, Mapping) else None
+            if isinstance(posted_ts, str):
+                await asyncio.to_thread(
+                    self.store.upsert_history_messages,
+                    channel_id,
+                    [
+                        {
+                            "ts": posted_ts,
+                            "thread_ts": thread_ts,
+                            "text": chunk,
+                            "bot_id": "sloperator",
+                        }
+                    ],
                 )
         if artifact is not None:
             fingerprint = await asyncio.to_thread(artifact_fingerprint, artifact)
@@ -2249,12 +2304,14 @@ class AgentOrchestrator:
         optional_reply: bool,
         require_artifact: bool,
         automated: bool,
+        react_to_message: bool = True,
         agent_name: str | None = None,
         files: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         key = (channel_id, thread_ts)
         lock = self._locks.setdefault(key, asyncio.Lock())
         request_status = "failed"
+        request_reaction_started = False
         await asyncio.to_thread(
             self.store.set_durable_agent_run_status,
             channel_id,
@@ -2345,6 +2402,12 @@ class AgentOrchestrator:
                         )
                         request_status = "rejected"
                         return
+
+                assert session is not None
+                if react_to_message:
+                    request_reaction_started = await self._set_request_reaction(
+                        client, channel_id, message_ts, "eyes"
+                    )
 
                 await asyncio.to_thread(
                     self.store.start_agent_turn,
@@ -2793,6 +2856,14 @@ class AgentOrchestrator:
         finally:
             if show_status:
                 await self._set_status(client, channel_id, thread_ts, "")
+            if request_reaction_started:
+                await self._set_request_reaction(
+                    client, channel_id, message_ts, "eyes", remove=True
+                )
+                if terminal_reaction := REQUEST_REACTION_BY_STATUS.get(request_status):
+                    await self._set_request_reaction(
+                        client, channel_id, message_ts, terminal_reaction
+                    )
             await asyncio.to_thread(
                 self.store.finish_agent_request,
                 channel_id,

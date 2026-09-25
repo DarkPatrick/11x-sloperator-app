@@ -58,8 +58,9 @@ def test_reviewer_can_recover_missing_start_without_duplicate_publication() -> N
 def test_finalizer_may_bypass_only_unchanged_legacy_publish_gate_findings() -> None:
     assert "The new block must pass every blocking check" in FINALIZATION_PROMPT
     assert "byte-for-byte present in the baseline" in FINALIZATION_PROMPT
-    assert "UG_PUBLISH_GATE_DISABLED=1" in FINALIZATION_PROMPT
-    assert "it never permits a defect in this run's block" in FINALIZATION_PROMPT
+    assert "UG_PUBLISH_GATE_BASELINE=<pre-edit-storage-file>" in FINALIZATION_PROMPT
+    assert "Never use\n   `UG_PUBLISH_GATE_DISABLED`" in FINALIZATION_PROMPT
+    assert "never permits a defect in this run's block" in FINALIZATION_PROMPT
 
 
 def test_next_run_uses_cyprus_wall_clock_and_dst() -> None:

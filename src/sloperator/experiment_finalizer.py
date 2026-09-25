@@ -173,12 +173,13 @@ Execution for the selected experiment:
    iterations. Confluence content must be English.
    Save the fetched pre-edit storage body as the publication baseline and run the repository
    Confluence publish gate on the exact Results/Insights/Decision/Next steps block being added or
-   changed. The new block must pass every blocking check. Attempt the normal full-page
-   `update-storage` first. If, and only if, that command is denied solely because the full-page gate
-   finds defects that are byte-for-byte present in the baseline and outside every added or modified
-   region, repeat that one update with `UG_PUBLISH_GATE_DISABLED=1`. This narrow exception permits
-   publication past legacy defects; it never permits a defect in this run's block, changed
-   surrounding content, invalid XML, a missing baseline, or removal of unrelated content.
+   changed. The new block must pass every blocking check. If, and only if, every full-page blocking
+   finding is byte-for-byte present in the baseline and outside every added or modified region,
+   prefix the `update-storage` command with
+   `UG_PUBLISH_GATE_BASELINE=<pre-edit-storage-file>`. The hook then exempts only the matching
+   baseline findings and still blocks every newly introduced defect. Never use
+   `UG_PUBLISH_GATE_DISABLED`. This narrow exception never permits a defect in this run's block,
+   changed surrounding content, invalid XML, a missing baseline, or removal of unrelated content.
 4. Fetch the project page again after the write. Verify that the correct experiment id/iteration
    contains non-empty Results, Insights, Decision, and Next steps, that storage XML is valid, and
    that no unrelated block disappeared. If verification fails, report failure and do not announce

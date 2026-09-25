@@ -2247,7 +2247,10 @@ class AgentOrchestrator:
                     thread_ts=thread_ts,
                     **payload,
                 )
-            posted_ts = posted.get("ts") if isinstance(posted, Mapping) else None
+            posted_data = getattr(posted, "data", None)
+            if not isinstance(posted_data, Mapping):
+                posted_data = posted if isinstance(posted, Mapping) else {}
+            posted_ts = posted_data.get("ts")
             if isinstance(posted_ts, str):
                 await asyncio.to_thread(
                     self.store.upsert_history_messages,

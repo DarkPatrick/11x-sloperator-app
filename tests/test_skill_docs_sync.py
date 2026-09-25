@@ -32,6 +32,8 @@ async def test_run_once_updates_main_then_runs_sync(tmp_path, monkeypatch) -> No
     python = tmp_path / ".venv" / "bin" / "python"
     scripts.mkdir()
     python.parent.mkdir(parents=True)
+    preflight = scripts / "freshness_preflight.sh"
+    preflight.touch()
     (scripts / "skill_docs_sync.py").touch()
     python.touch()
     command = AsyncMock(side_effect=["Already up to date.", "nothing to do"])
@@ -47,13 +49,7 @@ async def test_run_once_updates_main_then_runs_sync(tmp_path, monkeypatch) -> No
 
     assert await run_once(settings) == "nothing to do"
     assert command.await_count == 2
-    assert command.await_args_list[0].args[0] == (
-        "git",
-        "pull",
-        "--ff-only",
-        "origin",
-        "main",
-    )
+    assert command.await_args_list[0].args[0] == (str(preflight),)
     sync_call = command.await_args_list[1]
     assert sync_call.args[0] == (str(python), str(scripts / "skill_docs_sync.py"), "sync")
     assert sync_call.kwargs["env"]["CLAUDE_BIN"] == str(tmp_path / "claude")

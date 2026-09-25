@@ -84,15 +84,18 @@ async def _run_command(
 async def run_once(settings: Settings) -> str:
     """Fast-forward ug-ai-analyst and publish documentation for stale skills."""
     workspace = settings.agent_workspace.resolve()
+    preflight = workspace / "scripts" / "freshness_preflight.sh"
     sync_script = workspace / "scripts" / "skill_docs_sync.py"
     python = workspace / ".venv" / "bin" / "python"
+    if not preflight.is_file():
+        raise SkillDocsSyncError(f"Repository freshness preflight is missing in {workspace}")
     if not sync_script.is_file():
         raise SkillDocsSyncError(f"Skill docs sync script is missing in {workspace}")
     if not python.is_file():
         raise SkillDocsSyncError(f"Repository virtualenv Python is missing in {workspace}")
 
     await _run_command(
-        ("git", "pull", "--ff-only", "origin", "main"),
+        (str(preflight),),
         cwd=workspace,
     )
     env = {

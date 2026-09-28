@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from sloperator.automation_error_audit import AUDIT_PROMPT, HOUR, TIMEZONE
 from sloperator.config import Settings
-from sloperator.daily_activity_digest import DIGEST_PROMPT
+from sloperator.daily_activity_digest import DIGEST_PROMPT, FINALIZATION_FORECAST_PROMPT
 from sloperator.daily_activity_digest import HOUR as DIGEST_HOUR
 from sloperator.daily_activity_digest import TIMEZONE as DIGEST_TIMEZONE
 from sloperator.experiment_analytics_planner import PREPARATION_PROMPT as ANALYTICS_PROMPT
@@ -109,7 +109,7 @@ EMBEDDED_SCHEDULED_JOBS = (
     ),
     EmbeddedScheduledJob(
         job_name="daily-activity-digest",
-        run_job_names=("daily-activity-digest",),
+        run_job_names=("daily-activity-digest", "daily-activity-finalization-forecast"),
         display_name="daily-activity-digest (sloperator.service)",
         schedule=lambda _settings: (
             f"weekdays Mon-Fri {DIGEST_HOUR:02d}:00 {DIGEST_TIMEZONE}"
@@ -119,12 +119,14 @@ EMBEDDED_SCHEDULED_JOBS = (
         started_message="Starting scheduled daily activity digest",
         completed_message="Daily activity digest completed",
         failed_message="Could not complete the daily activity digest",
-        prompt_source="sloperator.daily_activity_digest.DIGEST_PROMPT",
+        prompt_source=(
+            "sloperator.daily_activity_digest.DIGEST_PROMPT + FINALIZATION_FORECAST_PROMPT"
+        ),
         condition=(
             "Weekday message to #owl-ugmonetization; deterministic fallback when the agent "
             "cannot run"
         ),
-        prompt=DIGEST_PROMPT,
+        prompt=DIGEST_PROMPT + "\n\n" + FINALIZATION_FORECAST_PROMPT,
     ),
     EmbeddedScheduledJob(
         job_name="automation-error-audit",

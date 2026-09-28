@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -16,11 +17,19 @@ from zoneinfo import ZoneInfo
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import HeadlessAgentRun
-from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
+from sloperator.automated_session_policy import (
+    AUTOMATED_ATLASSIAN_IDENTITY,
+    AUTOMATED_RESPONSE_STYLE,
+    AUTOMATED_SESSION_REPOSITORY_POLICY,
+)
 from sloperator.claude_usage import ClaudeUsage, read_usage
 from sloperator.config import Settings
 from sloperator.experiment_analytics_planner import select_from_jira as select_analytics
 from sloperator.experiment_design_planner import select_from_jira as select_design
+from sloperator.experiment_finalizer import (
+    SELECTION_RULES as FINALIZATION_SELECTION_RULES,
+)
+from sloperator.experiment_finalizer import next_run_at as next_finalization_run_at
 from sloperator.jira_task_automation import (
     JiraTaskReader,
     is_reserved_experiment_task,
@@ -31,6 +40,7 @@ TIMEZONE = "Asia/Nicosia"
 HOUR = 19
 TIMEOUT_SECONDS = 180
 JOB_NAME = "daily-activity-digest"
+FINALIZATION_FORECAST_JOB_NAME = "daily-activity-finalization-forecast"
 CHANNEL_ID = "C018MJNU999"
 DIGEST_SESSION_USED_LIMIT = 80
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -62,6 +72,41 @@ expose technical error details. Return only the Slack-ready message.
 {AUTOMATED_RESPONSE_STYLE}
 """
 
+FINALIZATION_FORECAST_PROMPT = f"""\
+[claude:claude-opus-5-5]
+This is an authorised automated forecast for tomorrow's UG monetisation experiment-finalisation
+run. Apply the production selector below, but do not claim or transition a Jira task, edit Jira or
+Confluence, publish results, or send Slack messages. This pass may run the standard calculator and
+refresh only its normal calculation tables so that pending-trials evidence is current.
+
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_ATLASSIAN_IDENTITY}
+
+{AUTOMATED_RESPONSE_STYLE}
+
+{FINALIZATION_SELECTION_RULES}
+
+Forecast rules:
+1. Evaluate immutable time gates at the supplied next scheduled run time, not merely at the
+   current time. Re-check all other sources live.
+2. Build and sort the complete preliminary pool by actual end timestamp and experiment id exactly
+   as the production selector does.
+3. Walk it oldest-first and obtain fresh pending-trials data. Treat a candidate as likely for the
+   next run when every applicable row is already strictly below 5%, or when fresh evidence makes
+   crossing that threshold by the supplied run time reasonably likely. Do not skip an older likely
+   candidate for a newer one. This is a forecast, not a task claim.
+4. Return at most one candidate. On success return exactly one line:
+   `FINALIZATION_FORECAST: {{"id":"<id>","task":"UMN-<n>","title":"<Jira summary>"}}`
+   If no candidate is likely, return exactly `FINALIZATION_FORECAST_NONE`.
+   If authoritative selection or calculation cannot be completed, return exactly one line starting
+   `FINALIZATION_FORECAST_FAILED:` followed by a concise reason. Return no audit or other text.
+"""
+
+FINALIZATION_FORECAST_PREFIX = "FINALIZATION_FORECAST: "
+FINALIZATION_FORECAST_NONE = "FINALIZATION_FORECAST_NONE"
+FINALIZATION_FORECAST_FAILED = "FINALIZATION_FORECAST_FAILED:"
+
 
 @dataclass(frozen=True, slots=True)
 class DigestItem:
@@ -80,6 +125,7 @@ class DigestFacts:
     active: tuple[DigestItem, ...] = ()
     continuation_title: str = "Продолжу завтра"
     quota_note: str | None = None
+    queue_notes: tuple[str, ...] = ()
 
 
 class AgentSubmitter(Protocol):
@@ -239,6 +285,135 @@ def _general_queue(tasks: list[Any]) -> list[Any]:
 def digest_quota_allows_launch(usage: ClaudeUsage) -> bool:
     """Use only the five-hour allowance for this small digest formatting pass."""
     return usage.session_used_percent < DIGEST_SESSION_USED_LIMIT
+
+
+def _finalization_forecast_marker(text: str) -> str | None:
+    markers = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() == FINALIZATION_FORECAST_NONE
+        or line.strip().startswith(
+            (FINALIZATION_FORECAST_PREFIX, FINALIZATION_FORECAST_FAILED)
+        )
+    ]
+    return markers[0] if len(markers) == 1 else None
+
+
+def _parse_finalization_forecast(text: str, settings: Settings) -> DigestItem | None:
+    stripped = _finalization_forecast_marker(text)
+    if stripped is None:
+        raise ValueError("Finalization forecast returned no unambiguous marker")
+    if stripped == FINALIZATION_FORECAST_NONE:
+        return None
+    if stripped.startswith(FINALIZATION_FORECAST_FAILED):
+        raise ValueError(stripped)
+    if not stripped.startswith(FINALIZATION_FORECAST_PREFIX):
+        raise ValueError("Finalization forecast returned an invalid marker")
+    try:
+        payload = json.loads(stripped.removeprefix(FINALIZATION_FORECAST_PREFIX))
+    except json.JSONDecodeError as error:
+        raise ValueError("Finalization forecast returned invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise ValueError("Finalization forecast payload is not an object")
+    experiment_id = str(payload.get("id", "")).strip()
+    task_key = str(payload.get("task", "")).strip().upper()
+    task_title = " ".join(str(payload.get("title", "")).split())
+    if not experiment_id.isdigit() or TASK_RE.fullmatch(task_key) is None or not task_title:
+        raise ValueError("Finalization forecast payload is incomplete")
+    return DigestItem(
+        task_key,
+        task_title,
+        f"{settings.jira_url.rstrip('/')}/browse/{task_key}",
+        f"итоги эксперимента {experiment_id}; по текущей оценке возьму в работу завтра",
+    )
+
+
+def _is_finalization_forecast(text: str) -> bool:
+    stripped = _finalization_forecast_marker(text)
+    if stripped is None:
+        return False
+    if stripped == FINALIZATION_FORECAST_NONE or stripped.startswith(
+        FINALIZATION_FORECAST_FAILED
+    ):
+        return True
+    if not stripped.startswith(FINALIZATION_FORECAST_PREFIX):
+        return False
+    try:
+        payload = json.loads(stripped.removeprefix(FINALIZATION_FORECAST_PREFIX))
+    except json.JSONDecodeError:
+        return False
+    return (
+        isinstance(payload, dict)
+        and str(payload.get("id", "")).isdigit()
+        and TASK_RE.fullmatch(str(payload.get("task", "")).upper()) is not None
+        and bool(str(payload.get("title", "")).strip())
+    )
+
+
+async def forecast_finalization(
+    settings: Settings,
+    agent: AgentSubmitter,
+    *,
+    now: dt.datetime,
+) -> DigestItem | None:
+    """Forecast the one Results task most likely to pass tomorrow's production selector."""
+    target = next_finalization_run_at(
+        now,
+        settings.experiment_finalizer_timezone,
+        settings.experiment_finalizer_hour,
+    )
+    run = await agent.execute_once(
+        FINALIZATION_FORECAST_PROMPT
+        + "\n\nAuthoritative next scheduled run time: "
+        + target.isoformat(),
+        settings.experiment_finalizer_timeout_seconds,
+        job_name=FINALIZATION_FORECAST_JOB_NAME,
+        workspace=settings.agent_workspace,
+        accept_result=_is_finalization_forecast,
+        max_interim_results=0,
+    )
+    return _parse_finalization_forecast(run.text, settings)
+
+
+async def _add_finalization_forecast(
+    facts: DigestFacts,
+    settings: Settings,
+    agent: AgentSubmitter,
+    *,
+    now: dt.datetime,
+) -> DigestFacts:
+    try:
+        item = await forecast_finalization(settings, agent, now=now)
+    except Exception:
+        LOGGER.exception("Daily digest could not forecast the next finalization task")
+        return replace(
+            facts,
+            queue_notes=(
+                *facts.queue_notes,
+                "Очередь итогов не удалось надёжно проверить; повторю проверку по расписанию.",
+            ),
+        )
+    if item is None:
+        return replace(
+            facts,
+            queue_notes=(
+                *facts.queue_notes,
+                "По текущей оценке завтра нет задачи по итогам, проходящей все фильтры.",
+            ),
+        )
+    experiment_id_match = re.search(r"\d+", item.note)
+    if experiment_id_match is None:  # pragma: no cover - guarded by forecast parsing
+        raise ValueError("Finalization forecast item has no experiment id")
+    item = replace(
+        item,
+        note=(
+            f"итоги эксперимента {experiment_id_match.group()}; "
+            f"по текущей оценке возьму в работу {_next_weekday_label(now)}"
+        ),
+    )
+    if item.task_key in {entry.task_key for entry in (*facts.completed, *facts.pending)}:
+        return facts
+    return replace(facts, pending=(*facts.pending, item))
 
 
 def _slack_thread_url(channel_id: str, thread_ts: str) -> str:
@@ -491,6 +666,7 @@ async def collect_facts(
 
     pending: list[DigestItem] = []
     pending_keys: set[str] = set()
+    queue_notes: list[str] = []
     today_keys = {task_key for run in today_runs for task_key in _run_task_keys(run)}
 
     async def add_pending(task_key: str, note: str) -> None:
@@ -550,12 +726,18 @@ async def collect_facts(
                 )
         except Exception:
             LOGGER.warning("Daily digest could not read the general Jira queue")
+            queue_notes.append(
+                "Общую Jira-очередь не удалось надёжно проверить; повторю проверку по расписанию."
+            )
 
     for selector, label in ((select_design, "дизайн"), (select_analytics, "аналитика")):
         try:
             selected = await selector(settings)
         except Exception:
             LOGGER.warning("Daily digest could not select the next %s task", label)
+            queue_notes.append(
+                f"Очередь «{label}» не удалось надёжно проверить; повторю проверку по расписанию."
+            )
             continue
         if selected is not None:
             await add_pending(
@@ -585,6 +767,7 @@ async def collect_facts(
         active=tuple(active),
         continuation_title=_continuation_title(current),
         quota_note=quota_note,
+        queue_notes=tuple(queue_notes),
     ), usage
 
 
@@ -614,11 +797,13 @@ def render_fallback(facts: DigestFacts) -> str:
     lines.extend(("", f"*{facts.continuation_title}*"))
     if facts.quota_note:
         lines.append(f"- {facts.quota_note}")
+    for note in facts.queue_notes:
+        lines.append(f"- {note}")
     if facts.pending:
         for item in facts.pending:
             title = f"[{item.title}]({item.jira_url})" if item.jira_url else item.title
             lines.append(f"- {title} — {item.note}.")
-    elif not facts.quota_note:
+    elif not facts.quota_note and not facts.queue_notes:
         lines.append("- Застрявших задач и очереди сейчас нет.")
     return "\n".join(lines)
 
@@ -639,6 +824,19 @@ def is_valid_agent_digest(text: str, draft: str) -> bool:
     required_urls = set(URL_RE.findall(draft))
     if not required_urls.issubset(set(URL_RE.findall(stripped))):
         return False
+    if not set(TASK_RE.findall(draft)).issubset(set(TASK_RE.findall(stripped))):
+        return False
+    forecast_ids = set(re.findall(r"итоги эксперимента (\d+)", draft, re.IGNORECASE))
+    if not forecast_ids.issubset(
+        set(re.findall(r"итоги эксперимента (\d+)", stripped, re.IGNORECASE))
+    ):
+        return False
+    if "не удалось надёжно проверить" in draft and "не удалось" not in stripped:
+        return False
+    if "нет задачи по итогам, проходящей все фильтры" in draft and not all(
+        phrase in stripped for phrase in ("нет", "задач", "итог")
+    ):
+        return False
     without_links = re.sub(r"\[[^]]+\]\(https://[^)]+\)", "", stripped)
     return URL_RE.search(without_links) is None
 
@@ -653,9 +851,18 @@ async def build_digest(
     """Build the digest and return whether the agent formatter was used."""
     current = now or dt.datetime.now(dt.UTC)
     facts, usage = await collect_facts(settings, store, now=current)
-    draft = render_fallback(facts)
     if usage is None or not digest_quota_allows_launch(usage):
-        return draft, False
+        facts = replace(
+            facts,
+            queue_notes=(
+                *facts.queue_notes,
+                "Очередь итогов не проверена из-за лимита запуска; "
+                "повторю проверку по расписанию.",
+            ),
+        )
+        return render_fallback(facts), False
+    facts = await _add_finalization_forecast(facts, settings, agent, now=current)
+    draft = render_fallback(facts)
     return await _format_draft(settings, agent, draft)
 
 
@@ -698,7 +905,17 @@ async def run_once(
         placeholder = "Собираю информацию..."
         response = await client.chat_postMessage(channel=channel_id, text=placeholder)
         thread_ts = str(response["ts"])
-        draft = render_fallback(replace(facts, quota_note=None))
+        draft = render_fallback(
+            replace(
+                facts,
+                quota_note=None,
+                queue_notes=(
+                    *facts.queue_notes,
+                    "Очередь итогов не проверена из-за лимита запуска; "
+                    "повторю проверку по расписанию.",
+                ),
+            )
+        )
         prompt = f"{DIGEST_PROMPT}\n\nAuthoritative draft:\n{draft}"
         await agent.submit(
             client,
@@ -717,6 +934,7 @@ async def run_once(
             quota_admission_check_weekly=False,
         )
         return placeholder, False
+    facts = await _add_finalization_forecast(facts, settings, agent, now=current)
     message, used_agent = await _format_draft(settings, agent, render_fallback(facts))
     await client.chat_postMessage(
         channel=channel_id,

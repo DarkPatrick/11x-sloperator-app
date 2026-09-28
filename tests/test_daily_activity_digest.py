@@ -14,6 +14,8 @@ from sloperator.config import Settings
 from sloperator.daily_activity_digest import (
     CHANNEL_ID,
     DIGEST_PROMPT,
+    FINALIZATION_FORECAST_JOB_NAME,
+    FINALIZATION_FORECAST_PROMPT,
     DigestFacts,
     DigestItem,
     _activity_refs,
@@ -21,10 +23,12 @@ from sloperator.daily_activity_digest import (
     _experiment_config_ids,
     _general_queue,
     _merge_completed_session,
+    _parse_finalization_forecast,
     _run_task_keys,
     _slack_session_item,
     build_digest,
     digest_quota_allows_launch,
+    forecast_finalization,
     is_valid_agent_digest,
     next_run_at,
     render_fallback,
@@ -103,6 +107,49 @@ def test_agent_validation_requires_all_embedded_links() -> None:
     assert not is_valid_agent_digest(draft.replace("[подготовлен документ]", "документ "), draft)
     assert not is_valid_agent_digest(draft.replace("https://alice.mu.se/pages/123", ""), draft)
     assert not is_valid_agent_digest(draft + "\n- Продолжим завтра.", draft)
+
+
+def test_finalization_forecast_is_one_linked_jira_task(tmp_path) -> None:
+    item = _parse_finalization_forecast(
+        'Internal checks complete.\nFINALIZATION_FORECAST: {"id":"7982",'
+        '"task":"UMN-14000","title":"Итоги - Experiment 7982"}',
+        settings(tmp_path),
+    )
+
+    assert item is not None
+    assert item.task_key == "UMN-14000"
+    assert item.jira_url.endswith("/browse/UMN-14000")
+    assert "эксперимента 7982" in item.note
+
+    with pytest.raises(ValueError, match="unambiguous"):
+        _parse_finalization_forecast(
+            'FINALIZATION_FORECAST: {"id":"7982","task":"UMN-14000","title":"First"}\n'
+            'FINALIZATION_FORECAST: {"id":"7983","task":"UMN-14001","title":"Second"}',
+            settings(tmp_path),
+        )
+
+
+@pytest.mark.asyncio
+async def test_finalization_forecast_uses_next_scheduled_run(tmp_path) -> None:
+    agent = AsyncMock()
+    agent.execute_once.return_value = HeadlessAgentRun(
+        "claude",
+        "claude-opus-5-5",
+        "forecast-session",
+        'FINALIZATION_FORECAST: {"id":"7982","task":"UMN-14000",'
+        '"title":"Итоги - Experiment 7982"}',
+    )
+    now = dt.datetime(2026, 9, 28, 16, 0, tzinfo=dt.UTC)
+
+    item = await forecast_finalization(settings(tmp_path), agent, now=now)
+
+    assert item is not None
+    call = agent.execute_once.await_args
+    assert FINALIZATION_FORECAST_PROMPT in call.args[0]
+    assert "2026-09-29T12:00:00+03:00" in call.args[0]
+    assert call.kwargs["job_name"] == FINALIZATION_FORECAST_JOB_NAME
+    assert call.kwargs["workspace"] == settings(tmp_path).agent_workspace
+    assert call.kwargs["max_interim_results"] == 0
 
 
 def test_run_task_key_ignores_incidental_links_from_context() -> None:
@@ -273,6 +320,10 @@ async def test_agent_failure_uses_fallback(monkeypatch, tmp_path) -> None:
         "sloperator.daily_activity_digest.collect_facts",
         AsyncMock(return_value=(facts(), ClaudeUsage(0, 0, "", "Oct 2, 10:00PM"))),
     )
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest._add_finalization_forecast",
+        AsyncMock(return_value=facts()),
+    )
     agent = AsyncMock()
     agent.execute_once.side_effect = RuntimeError("provider unavailable")
 
@@ -288,6 +339,10 @@ async def test_successful_agent_digest_is_sent_to_channel(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "sloperator.daily_activity_digest.collect_facts",
         AsyncMock(return_value=(facts(), ClaudeUsage(0, 0, "", "Oct 2, 10:00PM"))),
+    )
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest._add_finalization_forecast",
+        AsyncMock(return_value=facts()),
     )
     agent = AsyncMock()
     agent.execute_once.return_value = HeadlessAgentRun(

@@ -32,7 +32,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TASK_RE = re.compile(r"\bUMN-\d+\b")
 URL_RE = re.compile(r"https://[^\s)>]+")
 CONFLUENCE_RE = re.compile(r"https://alice\.mu\.se/[^\s)>]+")
-FINAL_STATUSES = {"done", "готово", "in review", "на ревью", "review"}
+FINAL_STATUSES = {
+    "done",
+    "готово",
+    "in review",
+    "на ревью",
+    "review",
+    "в процессе проверки",
+}
 
 
 DIGEST_PROMPT = f"""\
@@ -42,7 +49,9 @@ or add facts. Rewrite the supplied draft in concise natural Russian while preser
 order, URL, time estimate, and uncertainty exactly. Return exactly two titled sections with short
 bullets. Every Jira URL must remain embedded in its task title and every Confluence URL in the
 descriptive phrase such as "подготовлен документ"; never print a bare URL or a separate link label.
-Do not expose technical error details. Return only the Slack-ready message.
+Write about your own future actions only in the first person singular: "продолжу", "возьму",
+"повторю". Never use "мы", "продолжим", "сделаем", "проверим", or another plural form. Do not
+expose technical error details. Return only the Slack-ready message.
 
 {AUTOMATED_RESPONSE_STYLE}
 """
@@ -119,6 +128,30 @@ def _task_keys(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(TASK_RE.findall(text)))
 
 
+def _run_task_keys(run: dict[str, Any]) -> tuple[str, ...]:
+    """Extract only the task owned by a run, not incidental task links in its context."""
+    job = str(run.get("channel_name", ""))
+    text = _run_text(run)
+    patterns: tuple[str, ...]
+    if job.startswith("jira-task-"):
+        patterns = (r"\bJira task (UMN-\d+)\b",)
+    elif job.startswith("experiment-design-"):
+        patterns = (r"\bcalculation task `?(UMN-\d+)`?",)
+    elif job.startswith("experiment-analytics-"):
+        patterns = (r"\bAnalytics task `?(UMN-\d+)`?",)
+    elif job.startswith("experiment-finalizer-"):
+        patterns = (
+            r"\bJira task `?(UMN-\d+)`?",
+            r"FINALIZATION_STARTED:[^\n]+\|\s*(UMN-\d+)\b",
+        )
+    else:
+        patterns = ()
+    for pattern in patterns:
+        if match := re.search(pattern, text, re.IGNORECASE):
+            return (match.group(1).upper(),)
+    return ()
+
+
 def _document_url(text: str) -> str | None:
     match = CONFLUENCE_RE.search(text)
     return match.group(0).rstrip(".,") if match else None
@@ -167,6 +200,8 @@ async def collect_facts(
     timezone = ZoneInfo(TIMEZONE)
     today = current.astimezone(timezone).date()
     runs = await asyncio.to_thread(store.list_scheduled_agent_runs, 500)
+    # A previous digest contains task links by design; it is output, not activity evidence.
+    runs = [run for run in runs if run.get("channel_name") != JOB_NAME]
     today_runs = [run for run in runs if _run_day(run, timezone) == today]
     reader: JiraTaskReader | None = None
     if settings.jira_username and settings.jira_api_token:
@@ -189,8 +224,7 @@ async def collect_facts(
     completed: list[DigestItem] = []
     completed_keys: set[str] = set()
     for run in reversed(today_runs):
-        text = _run_text(run)
-        for task_key in _task_keys(text):
+        for task_key in _run_task_keys(run):
             if task_key in completed_keys:
                 continue
             task = await snapshot(task_key)
@@ -211,7 +245,7 @@ async def collect_facts(
 
     pending: list[DigestItem] = []
     pending_keys: set[str] = set()
-    today_keys = {task_key for run in today_runs for task_key in _task_keys(_run_text(run))}
+    today_keys = {task_key for run in today_runs for task_key in _run_task_keys(run)}
 
     async def add_pending(task_key: str, note: str) -> None:
         if task_key in completed_keys or task_key in pending_keys:
@@ -235,20 +269,23 @@ async def collect_facts(
         task = await snapshot(task_key)
         if str(getattr(task, "status", "")).casefold() in FINAL_STATUSES:
             continue
-        await add_pending(task_key, "уже в работе; продолжение на ближайшей проверке")
+        await add_pending(task_key, "уже в работе; продолжу на ближайшей проверке")
 
     failed_keys: list[str] = []
     for run in today_runs:
         if run.get("status") in {"failed", "interrupted"}:
-            failed_keys.extend(_task_keys(_run_text(run)))
+            failed_keys.extend(_run_task_keys(run))
     for task_key in dict.fromkeys(failed_keys):
-        await add_pending(task_key, "запуск завершился ошибкой; повтор — на следующем запуске")
+        await add_pending(task_key, "запуск завершился ошибкой; повторю на следующем запуске")
 
     if reader is not None:
         try:
             queued = await reader.queued_tasks()
             for index, task in enumerate(queued, 1):
-                await add_pending(task.key, f"№{index} в общей очереди; ближайшая часовая проверка")
+                await add_pending(
+                    task.key,
+                    f"№{index} в общей очереди; возьму на ближайшей часовой проверке",
+                )
         except Exception:
             LOGGER.warning("Daily digest could not read the general Jira queue")
 
@@ -261,7 +298,7 @@ async def collect_facts(
         if selected is not None:
             await add_pending(
                 selected.task_key,
-                f"первая в очереди «{label}»; следующий запуск {_next_weekday_label(current)}",
+                f"первая в очереди «{label}»; возьму в работу {_next_weekday_label(current)}",
             )
 
     usage: ClaudeUsage | None = None
@@ -270,12 +307,12 @@ async def collect_facts(
         usage = await read_usage(settings.claude_cli, model=settings.claude_model)
         if not weekly_quota_allows_launch(usage, now=current):
             quota_note = (
-                "Лимита для полного запуска сейчас недостаточно; очередь продолжится "
+                "Лимита для полного запуска сейчас недостаточно; продолжу очередь "
                 "после восстановления лимита."
             )
     except Exception:
         quota_note = (
-            "Проверка лимита или сервис ИИ недоступны; очередь сохранена и продолжится "
+            "Проверка лимита или сервис ИИ недоступны; очередь сохранена, продолжу "
             "после восстановления."
         )
 
@@ -309,6 +346,12 @@ def is_valid_agent_digest(text: str, draft: str) -> bool:
     """Reject formatting output that loses facts/links or leaks bare URLs."""
     stripped = text.strip()
     if "Сделано сегодня" not in stripped or "Не завершено" not in stripped:  # noqa: RUF001
+        return False
+    plural_forms = re.compile(
+        r"\b(?:мы|продолжим|сделаем|проверим|возьмём|вернёмся)\b",
+        re.IGNORECASE,
+    )
+    if plural_forms.search(stripped):
         return False
     required_urls = set(URL_RE.findall(draft))
     if not required_urls.issubset(set(URL_RE.findall(stripped))):

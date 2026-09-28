@@ -14,6 +14,7 @@ from sloperator.daily_activity_digest import (
     DIGEST_PROMPT,
     DigestFacts,
     DigestItem,
+    _run_task_keys,
     build_digest,
     is_valid_agent_digest,
     next_run_at,
@@ -47,7 +48,7 @@ def facts() -> DigestFacts:
                 "UMN-2",
                 "Аналитика оплаты",
                 "https://mu--se.atlassian.net/browse/UMN-2",
-                "первая в очереди; следующий запуск завтра",
+                "первая в очереди; возьму в работу завтра",
             ),
         ),
     )
@@ -79,6 +80,23 @@ def test_agent_validation_requires_all_embedded_links() -> None:
     assert is_valid_agent_digest(draft, draft)
     assert not is_valid_agent_digest(draft.replace("[подготовлен документ]", "документ "), draft)
     assert not is_valid_agent_digest(draft.replace("https://alice.mu.se/pages/123", ""), draft)
+    assert not is_valid_agent_digest(draft + "\n- Продолжим завтра.", draft)
+
+
+def test_run_task_key_ignores_incidental_links_from_context() -> None:
+    run = {
+        "channel_name": "jira-task-worker",
+        "messages": [
+            {
+                "text": (
+                    "Context mentions UMN-13460. You are the worker for Jira task UMN-13560. "
+                    "Another example is UMN-12000."
+                )
+            }
+        ],
+    }
+
+    assert _run_task_keys(run) == ("UMN-13560",)
 
 
 @pytest.mark.asyncio

@@ -352,6 +352,10 @@ class AgentInfrastructureError(AgentExecutionError):
     """Raised for a dependency outage that must not be retried by the agent."""
 
 
+class AgentSessionNotFoundError(AgentExecutionError):
+    """Raised when a provider can no longer resume its persisted session."""
+
+
 class AgentTimeoutError(AgentExecutionError):
     """Raised when an agent turn reaches its configured work-time limit."""
 
@@ -378,7 +382,12 @@ async def retry_agent_service_errors[AgentResult](
     for retry_number, delay in enumerate(delays, start=1):
         try:
             return await operation()
-        except (AgentTimeoutError, AgentAuthenticationError, AgentInfrastructureError):
+        except (
+            AgentTimeoutError,
+            AgentAuthenticationError,
+            AgentInfrastructureError,
+            AgentSessionNotFoundError,
+        ):
             raise
         except AgentExecutionError as error:
             LOGGER.warning(
@@ -1075,6 +1084,10 @@ async def _run_claude(
     diagnostic = f"{stdout}\n{stderr}"
     if is_authentication_failure(diagnostic):
         raise AgentAuthenticationError("claude", _tail(diagnostic))
+    if not new_session and "no conversation found with session id" in diagnostic.casefold():
+        raise AgentSessionNotFoundError(
+            f"Claude session {session_id} no longer exists"
+        )
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as error:
@@ -1215,22 +1228,59 @@ async def run_claude(
     before = await asyncio.to_thread(
         transcript_usage, transcript_directory(settings.agent_workspace), session_id
     )
-    return await _recorded_agent_call(
-        settings,
-        session,
-        _usage_context(session, usage_context),
-        lambda: _run_claude(
+    context = _usage_context(session, usage_context)
+
+    async def invoke(current: AgentSession, *, resume: bool) -> AgentRunResult:
+        return await _recorded_agent_call(
             settings,
+            current,
+            context,
+            lambda: _run_claude(
+                settings,
+                current,
+                prompt,
+                control,
+                force_resume=resume,
+                environment_overrides=environment_overrides,
+                initial_instruction=initial_instruction,
+                command_options=command_options,
+            ),
+            transcript_before=before if current is session else None,
+        )
+
+    try:
+        return await invoke(session, resume=force_resume)
+    except AgentSessionNotFoundError:
+        replacement_id = str(uuid.uuid4())
+        replacement = replace(
             session,
-            prompt,
-            control,
-            force_resume=force_resume,
-            environment_overrides=environment_overrides,
-            initial_instruction=initial_instruction,
-            command_options=command_options,
-        ),
-        transcript_before=before,
-    )
+            external_session_id=replacement_id,
+            status="queued",
+            turn_count=0,
+        )
+        store = EventStore(settings.database_path)
+        if session.channel_id == "scheduled":
+            await asyncio.to_thread(
+                store.set_scheduled_agent_external_session_id,
+                session.thread_ts,
+                replacement_id,
+            )
+        else:
+            await asyncio.to_thread(
+                store.set_agent_external_session_id,
+                session.channel_id,
+                session.thread_ts,
+                replacement_id,
+            )
+        LOGGER.warning(
+            "Claude session %s disappeared; continuing %s in replacement session %s",
+            session_id,
+            f"scheduled run {session.thread_ts}"
+            if session.channel_id == "scheduled"
+            else f"Slack thread {session.thread_ts}",
+            replacement_id,
+        )
+        return await invoke(replacement, resume=False)
 
 
 async def _run_codex(

@@ -23,6 +23,7 @@ from sloperator.agents import (
     AgentInfrastructureError,
     AgentOrchestrator,
     AgentRunResult,
+    AgentSessionNotFoundError,
     AgentTimeoutError,
     SlackCommunicationLayer,
     authentication_failure_notice,
@@ -36,6 +37,7 @@ from sloperator.agents import (
     optional_reply_instruction,
     parse_agent_request,
     retry_agent_service_errors,
+    run_claude,
     slack_identity_instruction,
     split_slack_message,
     thread_key,
@@ -48,6 +50,63 @@ from sloperator.store import EventStore
 def test_claude_initial_instruction_references_claude_md() -> None:
     assert "CLAUDE.md" in CLAUDE_INITIAL_INSTRUCTION
     assert "AGENTS.md" not in CLAUDE_INITIAL_INSTRUCTION
+
+
+async def test_missing_claude_session_is_replaced_without_service_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+
+    async def provider(command, **_kwargs):
+        commands.append(command)
+        if "--resume" in command:
+            return 1, "", "No conversation found with session ID: vanished-session"
+        session_id = command[command.index("--session-id") + 1]
+        return 0, json.dumps({"result": "Recovered result", "session_id": session_id}), ""
+
+    monkeypatch.setattr("sloperator.agents._run_process", provider)
+    database = tmp_path / "events.sqlite3"
+    store = EventStore(database)
+    store.initialize()
+    store.create_agent_session(
+        "C123", "100.1", "claude", "claude-opus-5-5", "vanished-session"
+    )
+    store.cancel_agent_turn("C123", "100.1")
+    session = store.get_agent_session("C123", "100.1")
+    assert session is not None
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+        database_path=database,
+    )
+
+    result = await run_claude(
+        settings,
+        session,
+        "Original request",
+        ActiveAgentRun("claude"),
+        force_resume=True,
+    )
+
+    assert len(commands) == 2
+    assert commands[0][commands[0].index("--resume") + 1] == "vanished-session"
+    assert "--session-id" in commands[1]
+    replacement_id = commands[1][commands[1].index("--session-id") + 1]
+    assert replacement_id != "vanished-session"
+    assert result.session_id == replacement_id
+    assert store.get_agent_session("C123", "100.1").external_session_id == replacement_id
+
+
+async def test_missing_session_error_bypasses_generic_retries() -> None:
+    operation = AsyncMock(side_effect=AgentSessionNotFoundError("gone"))
+
+    with pytest.raises(AgentSessionNotFoundError):
+        await retry_agent_service_errors(operation, context="test", delays=(0, 0))
+
+    operation.assert_awaited_once()
 
 
 def test_automated_slack_style_requires_canonical_communication_docs() -> None:

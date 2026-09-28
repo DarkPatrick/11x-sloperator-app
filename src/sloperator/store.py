@@ -1064,6 +1064,22 @@ class EventStore:
                 (run_id, job_name, provider, model, external_session_id, prompt),
             )
 
+    def set_scheduled_agent_external_session_id(
+        self,
+        run_id: str,
+        external_session_id: str,
+    ) -> None:
+        """Persist a replacement provider session before resuming scheduled work."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE scheduled_agent_runs
+                SET external_session_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = ?
+                """,
+                (external_session_id, run_id),
+            )
+
     def upsert_jira_task_agent_link(
         self,
         task_key: str,

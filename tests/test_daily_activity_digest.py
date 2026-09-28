@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
@@ -11,11 +12,19 @@ from sloperator.agents import HeadlessAgentRun
 from sloperator.claude_usage import ClaudeUsage
 from sloperator.config import Settings
 from sloperator.daily_activity_digest import (
+    CHANNEL_ID,
     DIGEST_PROMPT,
     DigestFacts,
     DigestItem,
+    _activity_refs,
+    _continuation_title,
+    _experiment_config_ids,
+    _general_queue,
+    _merge_completed_session,
     _run_task_keys,
+    _slack_session_item,
     build_digest,
+    digest_quota_allows_launch,
     is_valid_agent_digest,
     next_run_at,
     render_fallback,
@@ -62,6 +71,19 @@ def test_next_run_is_weekday_and_preserves_cyprus_wall_clock() -> None:
     assert result == dt.datetime(2026, 10, 5, 19, tzinfo=ZoneInfo("Asia/Nicosia"))
 
 
+def test_friday_digest_continues_next_week() -> None:
+    friday = dt.datetime(2026, 10, 2, 16, tzinfo=dt.UTC)
+    thursday = friday - dt.timedelta(days=1)
+
+    assert _continuation_title(friday) == "Продолжу на следующей неделе"
+    assert _continuation_title(thursday) == "Продолжу завтра"
+
+
+def test_digest_uses_80_percent_session_limit_and_ignores_weekly_limit() -> None:
+    assert digest_quota_allows_launch(ClaudeUsage(79, 100, "", "Oct 2, 10:00PM"))
+    assert not digest_quota_allows_launch(ClaudeUsage(80, 0, "", "Oct 2, 10:00PM"))
+
+
 def test_fallback_embeds_links_in_meaningful_text() -> None:
     message = render_fallback(facts())
 
@@ -99,12 +121,112 @@ def test_run_task_key_ignores_incidental_links_from_context() -> None:
     assert _run_task_keys(run) == ("UMN-13560",)
 
 
+def test_experiment_config_ids_come_from_authoritative_selection() -> None:
+    run = {
+        "channel_name": "experiment-config-check",
+        "status": "completed",
+        "messages": [
+            {
+                "text": (
+                    "Experiments to review:\n"
+                    "- id=8045; name=First\n"
+                    "- id=8054; name=Second\n\n"
+                    "For every experiment inspect the configuration. Example id=9999."
+                )
+            },
+            {"text": "Validated experiment 8045 and experiment 8054."},
+        ],
+    }
+
+    assert _experiment_config_ids(run) == ("8045", "8054")
+
+
+def test_completed_slack_session_links_followup_as_one_analysis() -> None:
+    shaped = _slack_session_item(
+        {
+            "channel_id": "C123",
+            "channel_name": "ug-monetization-metrics-monitoring",
+            "thread_ts": "1790580639.245759",
+            "status": "idle",
+            "turn_count": 2,
+            "agent_name": "mobile-health/slack",
+        }
+    )
+
+    assert shaped is not None
+    bucket, item = shaped
+    assert bucket == "completed"
+    assert item.note == "выполнил разбор и дополнил его по запросу"  # noqa: RUF001
+    assert item.jira_url == (
+        "https://mu--se.slack.com/archives/C123/p1790580639245759"
+        "?thread_ts=1790580639.245759&cid=C123"
+    )
+
+
+def test_running_slack_session_is_active() -> None:
+    shaped = _slack_session_item(
+        {
+            "channel_id": "C456",
+            "channel_name": "ug-analytics-monitoring",
+            "thread_ts": "1790602046.066299",
+            "status": "running",
+            "turn_count": 0,
+            "agent_name": "anomaly-alerts/slack",
+        }
+    )
+
+    assert shaped is not None
+    bucket, item = shaped
+    assert bucket == "active"
+    assert item.title == "Разбор аномалий в #ug-analytics-monitoring"
+    assert item.note == "сейчас выполняю разбор"
+
+
+def test_general_queue_excludes_tasks_owned_by_specialized_crons() -> None:
+    tasks = [
+        SimpleNamespace(key="UMN-1", summary="Собрать справочник тарифов"),
+        SimpleNamespace(key="UMN-2", summary="Итоги - paywall experiment"),
+        SimpleNamespace(key="UMN-3", summary="Расчет сверху и план тестирования"),
+        SimpleNamespace(key="UMN-4", summary="Аналитика - checkout"),
+    ]
+
+    assert [task.key for task in _general_queue(tasks)] == ["UMN-1"]
+
+
+def test_worker_and_slack_reviewer_result_merge_by_confluence_page() -> None:
+    completed = [
+        DigestItem(
+            "UMN-13067",
+            "Итоги эксперимента",
+            "https://mu--se.atlassian.net/browse/UMN-13067",
+            "подготовлен документ",
+            "https://alice.mu.se/pages/viewpage.action?pageId=835327251",
+        )
+    ]
+    session = DigestItem(
+        "slack:C123:123.456",
+        "Обновление страницы с итогами эксперимента",  # noqa: RUF001
+        "https://mu--se.slack.com/archives/C123/p123456?thread_ts=123.456&cid=C123",
+        "обновил страницу с итогами",  # noqa: RUF001
+    )
+    refs = _activity_refs(
+        "<https://alice.mu.se/spaces/CRO/pages/835327251/experiment|Итоги>"
+    )
+
+    assert _merge_completed_session(completed, session, refs)
+    assert len(completed) == 1
+    assert completed[0].slack_urls == (session.jira_url,)
+    rendered = render_fallback(DigestFacts(tuple(completed), ()))
+    assert rendered.count("Итоги эксперимента") == 1
+    assert "[результат в Slack](https://mu--se.slack.com/archives/C123/" in rendered
+
+
 @pytest.mark.asyncio
 async def test_low_quota_uses_fallback_without_agent(monkeypatch, tmp_path) -> None:
     current_facts = replace(facts(), quota_note="Лимита для полного запуска недостаточно.")
     monkeypatch.setattr(
         "sloperator.daily_activity_digest.collect_facts",
-        AsyncMock(return_value=(current_facts, ClaudeUsage(60, 10, "", "Oct 2, 10:00PM"))),
+        AsyncMock(return_value=(current_facts, ClaudeUsage(80, 10, "", "Oct 2, 10:00PM"))),
     )
     agent = AsyncMock()
 
@@ -113,6 +235,36 @@ async def test_low_quota_uses_fallback_without_agent(monkeypatch, tmp_path) -> N
     assert not used_agent
     assert "Лимита" in message
     agent.execute_once.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_low_quota_creates_deferred_slack_agent_thread(monkeypatch, tmp_path) -> None:
+    current_facts = replace(facts(), quota_note="temporary quota note")
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.collect_facts",
+        AsyncMock(return_value=(current_facts, ClaudeUsage(80, 10, "", "Oct 2, 10:00PM"))),
+    )
+    agent = AsyncMock()
+    client = AsyncMock()
+    client.chat_postMessage.return_value = {"channel": CHANNEL_ID, "ts": "100.1"}
+
+    message, used_agent = await run_once(client, agent, settings(tmp_path), AsyncMock())
+
+    assert message == "Собираю информацию..."
+    assert not used_agent
+    client.chat_postMessage.assert_awaited_once_with(
+        channel=CHANNEL_ID,
+        text="Собираю информацию...",
+    )
+    submit = agent.submit.await_args.kwargs
+    assert submit["channel_id"] == CHANNEL_ID
+    assert submit["message_ts"] == "100.1"
+    assert submit["thread_ts"] == "100.1"
+    assert submit["wait_for_quota_admission"] is True
+    assert submit["quota_admission_session_used_limit"] == 80
+    assert submit["quota_admission_check_weekly"] is False
+    assert submit["agent_name"] == "daily-activity-digest/slack"
+    assert "temporary quota note" not in submit["text"]
 
 
 @pytest.mark.asyncio
@@ -131,7 +283,7 @@ async def test_agent_failure_uses_fallback(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_successful_agent_digest_is_sent_to_owner(monkeypatch, tmp_path) -> None:
+async def test_successful_agent_digest_is_sent_to_channel(monkeypatch, tmp_path) -> None:
     draft = render_fallback(facts())
     monkeypatch.setattr(
         "sloperator.daily_activity_digest.collect_facts",
@@ -142,7 +294,6 @@ async def test_successful_agent_digest_is_sent_to_owner(monkeypatch, tmp_path) -
         "claude", "claude-opus-5-5", "session", draft
     )
     client = AsyncMock()
-    client.conversations_open.return_value = {"channel": {"id": "D123"}}
 
     message, used_agent = await run_once(client, agent, settings(tmp_path), AsyncMock())
 
@@ -150,5 +301,5 @@ async def test_successful_agent_digest_is_sent_to_owner(monkeypatch, tmp_path) -
     assert message == draft
     assert DIGEST_PROMPT in agent.execute_once.await_args.args[0]
     assert "AUTOMATED RESPONSE STYLE" in agent.execute_once.await_args.args[0]
-    client.conversations_open.assert_awaited_once_with(users="UOWNER")
-    assert client.chat_postMessage.await_args.kwargs["channel"] == "D123"
+    client.conversations_open.assert_not_awaited()
+    assert client.chat_postMessage.await_args.kwargs["channel"] == CHANNEL_ID

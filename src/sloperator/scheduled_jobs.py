@@ -120,7 +120,10 @@ EMBEDDED_SCHEDULED_JOBS = (
         completed_message="Daily activity digest completed",
         failed_message="Could not complete the daily activity digest",
         prompt_source="sloperator.daily_activity_digest.DIGEST_PROMPT",
-        condition="Weekday owner DM; deterministic fallback when the agent cannot run",
+        condition=(
+            "Weekday message to #owl-ugmonetization; deterministic fallback when the agent "
+            "cannot run"
+        ),
         prompt=DIGEST_PROMPT,
     ),
     EmbeddedScheduledJob(

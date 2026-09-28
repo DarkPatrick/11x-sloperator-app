@@ -8,7 +8,7 @@ import logging
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -21,13 +21,18 @@ from sloperator.claude_usage import ClaudeUsage, read_usage
 from sloperator.config import Settings
 from sloperator.experiment_analytics_planner import select_from_jira as select_analytics
 from sloperator.experiment_design_planner import select_from_jira as select_design
-from sloperator.jira_task_automation import JiraTaskReader, weekly_quota_allows_launch
+from sloperator.jira_task_automation import (
+    JiraTaskReader,
+    is_reserved_experiment_task,
+)
 
 LOGGER = logging.getLogger(__name__)
 TIMEZONE = "Asia/Nicosia"
 HOUR = 19
 TIMEOUT_SECONDS = 180
 JOB_NAME = "daily-activity-digest"
+CHANNEL_ID = "C018MJNU999"
+DIGEST_SESSION_USED_LIMIT = 80
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TASK_RE = re.compile(r"\bUMN-\d+\b")
 URL_RE = re.compile(r"https://[^\s)>]+")
@@ -46,9 +51,10 @@ DIGEST_PROMPT = f"""\
 [claude:claude-opus-5-5]
 This is a formatting-only automated Slack digest. Do not investigate, use tools, change files,
 or add facts. Rewrite the supplied draft in concise natural Russian while preserving every fact,
-order, URL, time estimate, and uncertainty exactly. Return exactly two titled sections with short
-bullets. Every Jira URL must remain embedded in its task title and every Confluence URL in the
-descriptive phrase such as "подготовлен документ"; never print a bare URL or a separate link label.
+order, URL, time estimate, and uncertainty exactly. Preserve the supplied titled sections and use
+short bullets. Every Jira URL must remain embedded in its task title, every Confluence URL in the
+descriptive phrase such as "подготовлен документ", and every Slack URL in the corresponding
+activity title or description; never print a bare URL or a separate link label.
 Write about your own future actions only in the first person singular: "продолжу", "возьму",
 "повторю". Never use "мы", "продолжим", "сделаем", "проверим", or another plural form. Do not
 expose technical error details. Return only the Slack-ready message.
@@ -64,12 +70,15 @@ class DigestItem:
     jira_url: str
     note: str
     document_url: str | None = None
+    slack_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class DigestFacts:
     completed: tuple[DigestItem, ...]
     pending: tuple[DigestItem, ...]
+    active: tuple[DigestItem, ...] = ()
+    continuation_title: str = "Продолжу завтра"
     quota_note: str | None = None
 
 
@@ -85,11 +94,38 @@ class AgentSubmitter(Protocol):
         max_interim_results: int = 2,
     ) -> HeadlessAgentRun: ...
 
+    async def submit(
+        self,
+        client: AsyncWebClient,
+        *,
+        channel_id: str,
+        message_ts: str,
+        thread_ts: str,
+        text: str,
+        show_status: bool = True,
+        timeout_seconds: int | None = None,
+        disable_link_previews: bool = False,
+        optional_reply: bool = False,
+        require_artifact: bool = False,
+        automated: bool = False,
+        react_to_message: bool = True,
+        agent_name: str | None = None,
+        wait_for_quota_admission: bool = False,
+        quota_admission_session_used_limit: int = 50,
+        quota_admission_check_weekly: bool = True,
+    ) -> Any: ...
+
 
 class DigestStore(Protocol):
     def list_scheduled_agent_runs(self, limit: int = 100) -> list[dict[str, Any]]: ...
 
     def active_jira_task_agent_links(self) -> list[dict[str, Any]]: ...
+
+    def list_agent_sessions(self, limit: int = 100) -> list[dict[str, Any]]: ...
+
+    def thread_messages(
+        self, channel_id: str, thread_ts: str, limit: int = 30
+    ) -> list[dict[str, Any]]: ...
 
 
 def next_run_at(now: dt.datetime) -> dt.datetime:
@@ -113,7 +149,10 @@ def _result_text(run: dict[str, Any]) -> str:
 
 
 def _run_day(run: dict[str, Any], timezone: ZoneInfo) -> dt.date | None:
-    value = run.get("updated_at")
+    return _timestamp_day(run.get("updated_at"), timezone)
+
+
+def _timestamp_day(value: Any, timezone: ZoneInfo) -> dt.date | None:
     if not value:
         return None
     with suppress(ValueError, TypeError):
@@ -152,6 +191,20 @@ def _run_task_keys(run: dict[str, Any]) -> tuple[str, ...]:
     return ()
 
 
+def _experiment_config_ids(run: dict[str, Any]) -> tuple[str, ...]:
+    if run.get("channel_name") != "experiment-config-check" or run.get("status") != "completed":
+        return ()
+    prompt = str(run.get("messages", [{}])[0].get("text", ""))
+    selection = re.search(
+        r"Experiments to review:(.*?)(?:For every experiment|\Z)",
+        prompt,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if selection is None:
+        return ()
+    return tuple(dict.fromkeys(re.findall(r"\bid=(\d{3,})\b", selection.group(1))))
+
+
 def _document_url(text: str) -> str | None:
     match = CONFLUENCE_RE.search(text)
     return match.group(0).rstrip(".,") if match else None
@@ -169,6 +222,131 @@ def _next_weekday_label(now: dt.datetime) -> str:
     if candidate == local_date + dt.timedelta(days=1):
         return "завтра"
     return "в понедельник"
+
+
+def _continuation_title(now: dt.datetime) -> str:
+    local_now = now.astimezone(ZoneInfo(TIMEZONE))
+    if local_now.weekday() == 4:
+        return "Продолжу на следующей неделе"
+    return "Продолжу завтра"
+
+
+def _general_queue(tasks: list[Any]) -> list[Any]:
+    """Keep ordinary ug-ai-analyst Jira work; specialized crons own reserved tasks."""
+    return [task for task in tasks if not is_reserved_experiment_task(str(task.summary))]
+
+
+def digest_quota_allows_launch(usage: ClaudeUsage) -> bool:
+    """Use only the five-hour allowance for this small digest formatting pass."""
+    return usage.session_used_percent < DIGEST_SESSION_USED_LIMIT
+
+
+def _slack_thread_url(channel_id: str, thread_ts: str) -> str:
+    anchor = thread_ts.replace(".", "")
+    return (
+        f"https://mu--se.slack.com/archives/{channel_id}/p{anchor}"
+        f"?thread_ts={thread_ts}&cid={channel_id}"
+    )
+
+
+def _activity_refs(text: str) -> set[str]:
+    """Return stable work identifiers shared by preparer, reviewer and Slack publication."""
+    refs = {f"jira:{key}" for key in TASK_RE.findall(text)}
+    refs.update(
+        f"confluence:{match}"
+        for match in re.findall(r"(?:pageId=|/pages/)(\d{5,})", text)
+    )
+    refs.update(
+        f"experiment:{match}"
+        for match in re.findall(r"/experiment/view\?id=(\d+)", text)
+    )
+    return refs
+
+
+def _item_refs(item: DigestItem) -> set[str]:
+    refs: set[str] = set()
+    if TASK_RE.fullmatch(item.task_key):
+        refs.add(f"jira:{item.task_key}")
+    refs.update(
+        _activity_refs(
+            "\n".join(
+                filter(None, (item.title, item.note, item.jira_url, item.document_url))
+            )
+        )
+    )
+    return refs
+
+
+def _merge_completed_session(
+    completed: list[DigestItem],
+    session_item: DigestItem,
+    session_refs: set[str],
+) -> bool:
+    """Attach a Slack publication to the same completed work instead of duplicating it."""
+    if not session_refs:
+        return False
+    for index, item in enumerate(completed):
+        if not session_refs.intersection(_item_refs(item)):
+            continue
+        completed[index] = replace(
+            item,
+            slack_urls=tuple(dict.fromkeys((*item.slack_urls, session_item.jira_url))),
+        )
+        return True
+    return False
+
+
+def _slack_session_item(session: dict[str, Any]) -> tuple[str, DigestItem] | None:
+    """Turn one substantive Slack agent session into a completed or pending item."""
+    status = str(session.get("status", ""))
+    turns = int(session.get("turn_count") or 0)
+    if status == "idle" and turns < 1:
+        return None
+    channel_id = str(session["channel_id"])
+    channel_name = str(session.get("channel_name") or channel_id)
+    thread_ts = str(session["thread_ts"])
+    agent_name = str(session.get("agent_name") or "")
+    url = _slack_thread_url(channel_id, thread_ts)
+
+    if agent_name == "mobile-health/slack":
+        title = "Разбор аномалий мобильной монетизации"
+        completed_note = (
+            "выполнил разбор и дополнил его по запросу"  # noqa: RUF001
+            if turns > 1
+            else "выполнил разбор"
+        )
+    elif agent_name == "web-health/slack":
+        title = "Разбор аномалий веб-монетизации"
+        completed_note = (
+            "проверил алерт и связал его с готовым разбором"  # noqa: RUF001
+        )
+    elif agent_name == "anomaly-alerts/slack":
+        title = f"Разбор аномалий в #{channel_name}"
+        completed_note = "выполнил разбор"
+    elif agent_name == "experiment-finalizer/slack":
+        title = "Обновление страницы с итогами эксперимента"  # noqa: RUF001
+        completed_note = "обновил страницу с итогами"  # noqa: RUF001
+    elif agent_name == "experiment-config-check/slack":
+        title = "Проверка конфигурации эксперимента"
+        completed_note = "проверил конфигурацию"
+    else:
+        title = f"Работа агента в #{channel_name}"
+        completed_note = "завершил работу"
+
+    if status == "idle":
+        bucket, note = "completed", completed_note
+    elif status in {"running", "queued"}:
+        bucket, note = "active", "сейчас выполняю разбор"
+    elif status == "failed":
+        bucket, note = "pending", "запуск завершился ошибкой; повторю позднее"
+    else:
+        bucket, note = "pending", "запуск не завершён; повторю позднее"
+    return bucket, DigestItem(
+        f"slack:{channel_id}:{thread_ts}",
+        title,
+        url,
+        note,
+    )
 
 
 def _valid_completed_run(run: dict[str, Any], task_status: str) -> bool:
@@ -223,6 +401,30 @@ async def collect_facts(
 
     completed: list[DigestItem] = []
     completed_keys: set[str] = set()
+    config_ids = tuple(
+        dict.fromkeys(
+            experiment_id
+            for run in reversed(today_runs)
+            for experiment_id in _experiment_config_ids(run)
+        )
+    )
+    if config_ids:
+        config_links = ", ".join(
+            "[{}]({}/components/ab/experiment/view?id={})".format(
+                experiment_id,
+                "https://www.ultimate-guitar.com",
+                experiment_id,
+            )
+            for experiment_id in config_ids
+        )
+        completed.append(
+            DigestItem(
+                f"experiment-config:{today.isoformat()}",
+                "Проверка конфигураций экспериментов",
+                "",
+                f"проверил ID экспериментов: {config_links}",
+            )
+        )
     for run in reversed(today_runs):
         for task_key in _run_task_keys(run):
             if task_key in completed_keys:
@@ -243,6 +445,50 @@ async def collect_facts(
             )
             completed_keys.add(task_key)
 
+    try:
+        sessions = await asyncio.to_thread(store.list_agent_sessions, 500)
+    except Exception:
+        LOGGER.warning("Daily digest could not read Slack agent sessions")
+        sessions = []
+    today_sessions = [
+        session
+        for session in sessions
+        if today
+        in {
+            _timestamp_day(session.get("created_at"), timezone),
+            _timestamp_day(session.get("updated_at"), timezone),
+        }
+    ]
+    active: list[DigestItem] = []
+    slack_pending: list[DigestItem] = []
+    for session in reversed(today_sessions):
+        shaped = _slack_session_item(session)
+        if shaped is None:
+            continue
+        bucket, item = shaped
+        if bucket == "completed":
+            try:
+                messages = await asyncio.to_thread(
+                    store.thread_messages,
+                    str(session["channel_id"]),
+                    str(session["thread_ts"]),
+                    100,
+                )
+            except Exception:
+                LOGGER.warning("Daily digest could not read one Slack agent thread")
+                messages = []
+            session_refs = _activity_refs(
+                "\n".join(str(message.get("text", "")) for message in messages)
+            )
+            if _merge_completed_session(completed, item, session_refs):
+                continue
+            completed.append(item)
+            completed_keys.add(item.task_key)
+        elif bucket == "active":
+            active.append(item)
+        else:
+            slack_pending.append(item)
+
     pending: list[DigestItem] = []
     pending_keys: set[str] = set()
     today_keys = {task_key for run in today_runs for task_key in _run_task_keys(run)}
@@ -261,6 +507,22 @@ async def collect_facts(
         )
         pending_keys.add(task_key)
 
+    async def add_active(task_key: str, note: str) -> None:
+        if task_key in completed_keys or any(item.task_key == task_key for item in active):
+            return
+        task = await snapshot(task_key)
+        active.append(
+            DigestItem(
+                task_key,
+                _task_title(task, task_key),
+                f"{settings.jira_url.rstrip('/')}/browse/{task_key}",
+                note,
+            )
+        )
+
+    pending.extend(slack_pending)
+    pending_keys.update(item.task_key for item in slack_pending)
+
     active_links = await asyncio.to_thread(store.active_jira_task_agent_links)
     for link in active_links:
         task_key = str(link["task_key"])
@@ -269,7 +531,7 @@ async def collect_facts(
         task = await snapshot(task_key)
         if str(getattr(task, "status", "")).casefold() in FINAL_STATUSES:
             continue
-        await add_pending(task_key, "уже в работе; продолжу на ближайшей проверке")
+        await add_active(task_key, "уже в работе; завершаю")
 
     failed_keys: list[str] = []
     for run in today_runs:
@@ -280,7 +542,7 @@ async def collect_facts(
 
     if reader is not None:
         try:
-            queued = await reader.queued_tasks()
+            queued = _general_queue(await reader.queued_tasks())
             for index, task in enumerate(queued, 1):
                 await add_pending(
                     task.key,
@@ -305,18 +567,25 @@ async def collect_facts(
     quota_note: str | None = None
     try:
         usage = await read_usage(settings.claude_cli, model=settings.claude_model)
-        if not weekly_quota_allows_launch(usage, now=current):
+        if not digest_quota_allows_launch(usage):
             quota_note = (
-                "Лимита для полного запуска сейчас недостаточно; продолжу очередь "
-                "после восстановления лимита."
+                "Лимит для новых агентских запусков ниже безопасного порога; проверю "
+                "очередь снова по обычному расписанию. Этот дайджест автоматически "
+                "не обновляется."
             )
     except Exception:
         quota_note = (
-            "Проверка лимита или сервис ИИ недоступны; очередь сохранена, продолжу "
-            "после восстановления."
+            "Не смог проверить лимит или доступность ИИ; новые запуски останутся на "  # noqa: RUF001
+            "плановых повторах. Этот дайджест автоматически не обновляется."
         )
 
-    return DigestFacts(tuple(completed), tuple(pending), quota_note), usage
+    return DigestFacts(
+        tuple(completed),
+        tuple(pending),
+        active=tuple(active),
+        continuation_title=_continuation_title(current),
+        quota_note=quota_note,
+    ), usage
 
 
 def render_fallback(facts: DigestFacts) -> str:
@@ -324,19 +593,31 @@ def render_fallback(facts: DigestFacts) -> str:
     lines = ["*Сделано сегодня*"]
     if facts.completed:
         for item in facts.completed:
-            suffix = (
-                f"[{item.note}]({item.document_url})"
-                if item.document_url
-                else item.note
-            )
-            lines.append(f"- [{item.title}]({item.jira_url}) — {suffix}.")
+            suffix = item.note
+            if item.document_url:
+                suffix = f"[{item.note}]({item.document_url})"
+            if item.slack_urls:
+                slack_links = ", ".join(
+                    f"[результат в Slack{f' {index}' if len(item.slack_urls) > 1 else ''}]({url})"
+                    for index, url in enumerate(item.slack_urls, 1)
+                )
+                suffix = f"{suffix}, {slack_links}"
+            title = f"[{item.title}]({item.jira_url})" if item.jira_url else item.title
+            lines.append(f"- {title} — {suffix}.")
     else:
         lines.append("- Завершённых задач сегодня нет.")
-    lines.extend(("", "*Не завершено и что дальше*"))  # noqa: RUF001
+    if facts.active:
+        lines.extend(("", "*Завершаю работу*"))
+        for item in facts.active:
+            title = f"[{item.title}]({item.jira_url})" if item.jira_url else item.title
+            lines.append(f"- {title} — {item.note}.")
+    lines.extend(("", f"*{facts.continuation_title}*"))
     if facts.quota_note:
         lines.append(f"- {facts.quota_note}")
     if facts.pending:
-        lines.extend(f"- [{item.title}]({item.jira_url}) — {item.note}." for item in facts.pending)
+        for item in facts.pending:
+            title = f"[{item.title}]({item.jira_url})" if item.jira_url else item.title
+            lines.append(f"- {title} — {item.note}.")
     elif not facts.quota_note:
         lines.append("- Застрявших задач и очереди сейчас нет.")
     return "\n".join(lines)
@@ -345,7 +626,9 @@ def render_fallback(facts: DigestFacts) -> str:
 def is_valid_agent_digest(text: str, draft: str) -> bool:
     """Reject formatting output that loses facts/links or leaks bare URLs."""
     stripped = text.strip()
-    if "Сделано сегодня" not in stripped or "Не завершено" not in stripped:  # noqa: RUF001
+    if "Сделано сегодня" not in stripped or not re.search(
+        r"\*?Продолжу (?:завтра|на следующей неделе)\*?", stripped
+    ):
         return False
     plural_forms = re.compile(
         r"\b(?:мы|продолжим|сделаем|проверим|возьмём|вернёмся)\b",
@@ -371,8 +654,16 @@ async def build_digest(
     current = now or dt.datetime.now(dt.UTC)
     facts, usage = await collect_facts(settings, store, now=current)
     draft = render_fallback(facts)
-    if usage is None or not weekly_quota_allows_launch(usage, now=current):
+    if usage is None or not digest_quota_allows_launch(usage):
         return draft, False
+    return await _format_draft(settings, agent, draft)
+
+
+async def _format_draft(
+    settings: Settings,
+    agent: AgentSubmitter,
+    draft: str,
+) -> tuple[str, bool]:
     prompt = f"{DIGEST_PROMPT}\n\nAuthoritative draft:\n{draft}"
     try:
         run = await asyncio.wait_for(
@@ -400,10 +691,35 @@ async def run_once(
     *,
     now: dt.datetime | None = None,
 ) -> tuple[str, bool]:
-    message, used_agent = await build_digest(settings, store, agent, now=now)
-    conversation = await client.conversations_open(users=settings.slack_user_id)
+    current = now or dt.datetime.now(dt.UTC)
+    facts, usage = await collect_facts(settings, store, now=current)
+    channel_id = CHANNEL_ID
+    if usage is None or not digest_quota_allows_launch(usage):
+        placeholder = "Собираю информацию..."
+        response = await client.chat_postMessage(channel=channel_id, text=placeholder)
+        thread_ts = str(response["ts"])
+        draft = render_fallback(replace(facts, quota_note=None))
+        prompt = f"{DIGEST_PROMPT}\n\nAuthoritative draft:\n{draft}"
+        await agent.submit(
+            client,
+            channel_id=channel_id,
+            message_ts=thread_ts,
+            thread_ts=thread_ts,
+            text=prompt,
+            show_status=False,
+            timeout_seconds=TIMEOUT_SECONDS,
+            disable_link_previews=True,
+            automated=True,
+            react_to_message=False,
+            agent_name="daily-activity-digest/slack",
+            wait_for_quota_admission=True,
+            quota_admission_session_used_limit=DIGEST_SESSION_USED_LIMIT,
+            quota_admission_check_weekly=False,
+        )
+        return placeholder, False
+    message, used_agent = await _format_draft(settings, agent, render_fallback(facts))
     await client.chat_postMessage(
-        channel=conversation["channel"]["id"],
+        channel=channel_id,
         markdown_text=message,
         unfurl_links=False,
         unfurl_media=False,

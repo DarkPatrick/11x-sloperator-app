@@ -245,11 +245,11 @@ sudo cp deploy/apparmor.codex /etc/apparmor.d/codex
 sudo apparmor_parser -r /etc/apparmor.d/codex
 ```
 
-Claude Opus is the default. Select the provider and model in the first message:
+Claude Opus 5.5 is the default. Select the provider and model in the first message:
 
 ```text
 [claude] Analyze experiment 1234
-[claude:claude-opus-5] Analyze experiment 1234
+[claude:claude-opus-5-5] Analyze experiment 1234
 [codex:gpt-5.6-sol] Review the analysis scripts
 ```
 

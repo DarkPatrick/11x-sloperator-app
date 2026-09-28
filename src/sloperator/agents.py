@@ -42,7 +42,13 @@ from sloperator.claude_budget import (
     quota_exhausted,
     transcript_directory,
 )
-from sloperator.claude_usage import ClaudeUsageError, quota_retry_at, read_usage
+from sloperator.claude_usage import (
+    ClaudeUsage,
+    ClaudeUsageError,
+    parse_reset_at,
+    quota_retry_at,
+    read_usage,
+)
 from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
 from sloperator.config import Settings
 from sloperator.jira_agent_policy import policy_for_job
@@ -93,6 +99,56 @@ async def wait_for_claude_quota_reset(settings: Settings, *, context: str) -> No
         )
         await asyncio.sleep(max(0.0, (retry_at - now).total_seconds()))
         return
+
+
+def automated_quota_allows_launch(
+    usage: ClaudeUsage,
+    *,
+    now: dt.datetime,
+    session_used_limit: int = 50,
+    check_weekly: bool = True,
+) -> bool:
+    """Apply the conservative admission gate used by autonomous agent launches."""
+    if usage.session_used_percent >= session_used_limit:
+        return False
+    if not check_weekly:
+        return True
+    if usage.week_remaining_percent > 90:
+        return True
+    reset = parse_reset_at(usage.week_reset_text, now=now)
+    if reset is None:
+        return False
+    remaining_days = max(1, (reset.date() - now.date()).days)
+    return usage.week_remaining_percent > 14 * remaining_days
+
+
+async def wait_for_automated_quota_admission(
+    settings: Settings,
+    *,
+    context: str,
+    session_used_limit: int = 50,
+    check_weekly: bool = True,
+) -> None:
+    """Poll until a deferred autonomous Slack turn has safe Claude headroom."""
+    while True:
+        try:
+            usage = await read_usage(settings.claude_cli, model=settings.claude_model)
+        except (ClaudeUsageError, OSError, TimeoutError) as error:
+            LOGGER.warning(
+                "%s is waiting for safe Claude admission; /usage failed (%s)",
+                context,
+                type(error).__name__,
+            )
+        else:
+            if automated_quota_allows_launch(
+                usage,
+                now=dt.datetime.now(dt.UTC),
+                session_used_limit=session_used_limit,
+                check_weekly=check_weekly,
+            ):
+                return
+            LOGGER.info("%s is waiting for safe Claude admission", context)
+        await asyncio.sleep(600)
 
 
 async def retry_claude_quota[Result](
@@ -1385,6 +1441,9 @@ class AgentOrchestrator:
         automated: bool = False,
         react_to_message: bool = True,
         agent_name: str | None = None,
+        wait_for_quota_admission: bool = False,
+        quota_admission_session_used_limit: int = 50,
+        quota_admission_check_weekly: bool = True,
         reuse_key: str | None = None,
         reuse_mention_line: str | None = None,
         files: Sequence[Mapping[str, Any]] = (),
@@ -1443,6 +1502,9 @@ class AgentOrchestrator:
             "automated": automated,
             "react_to_message": react_to_message,
             "agent_name": agent_name,
+            "wait_for_quota_admission": wait_for_quota_admission,
+            "quota_admission_session_used_limit": quota_admission_session_used_limit,
+            "quota_admission_check_weekly": quota_admission_check_weekly,
             "reuse_key": reuse_key,
             "reuse_mention_line": reuse_mention_line,
         }
@@ -1508,6 +1570,9 @@ class AgentOrchestrator:
                 automated=automated,
                 react_to_message=react_to_message,
                 agent_name=agent_name,
+                wait_for_quota_admission=wait_for_quota_admission,
+                quota_admission_session_used_limit=quota_admission_session_used_limit,
+                quota_admission_check_weekly=quota_admission_check_weekly,
             ),
             name=f"agent-turn-{channel_id}-{message_ts}",
         )
@@ -1544,6 +1609,15 @@ class AgentOrchestrator:
                     react_to_message=bool(options.get("react_to_message", True)),
                     agent_name=(
                         str(options["agent_name"]) if options.get("agent_name") else None
+                    ),
+                    wait_for_quota_admission=bool(
+                        options.get("wait_for_quota_admission", False)
+                    ),
+                    quota_admission_session_used_limit=int(
+                        options.get("quota_admission_session_used_limit", 50)
+                    ),
+                    quota_admission_check_weekly=bool(
+                        options.get("quota_admission_check_weekly", True)
                     ),
                     files=options.get("files", []),
                 ),
@@ -2309,6 +2383,9 @@ class AgentOrchestrator:
         automated: bool,
         react_to_message: bool = True,
         agent_name: str | None = None,
+        wait_for_quota_admission: bool = False,
+        quota_admission_session_used_limit: int = 50,
+        quota_admission_check_weekly: bool = True,
         files: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         key = (channel_id, thread_ts)
@@ -2407,6 +2484,13 @@ class AgentOrchestrator:
                         return
 
                 assert session is not None
+                if wait_for_quota_admission and session.provider == "claude":
+                    await wait_for_automated_quota_admission(
+                        self.settings,
+                        context=f"Slack thread {thread_ts}",
+                        session_used_limit=quota_admission_session_used_limit,
+                        check_weekly=quota_admission_check_weekly,
+                    )
                 if react_to_message:
                     request_reaction_started = await self._set_request_reaction(
                         client, channel_id, message_ts, "eyes"

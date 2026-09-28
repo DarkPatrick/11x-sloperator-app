@@ -113,7 +113,7 @@ def parse_usage(text: str) -> ClaudeUsage:
 
 
 async def read_usage(
-    cli: Path, *, model: str = "claude-opus-5", cwd: Path = Path("/tmp")
+    cli: Path, *, model: str = "claude-opus-5-5", cwd: Path = Path("/tmp")
 ) -> ClaudeUsage:
     process = await asyncio.create_subprocess_exec(
         str(cli), "-p", "--model", model, "--output-format", "json", "/usage",

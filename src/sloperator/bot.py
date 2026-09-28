@@ -18,6 +18,7 @@ from sloperator.anomaly_alerts import AnomalyAlertResponder, is_anomaly_trigger
 from sloperator.archive import ArchiveMiddleware
 from sloperator.automation_controls import AutomationControls
 from sloperator.config import Settings
+from sloperator.daily_activity_digest import CHANNEL_ID as DAILY_ACTIVITY_DIGEST_CHANNEL
 from sloperator.experiment_config_check import (
     ExperimentConfigResponder,
     is_experiment_config_trigger,
@@ -76,9 +77,9 @@ def response_for(command: str) -> str:
                 "• `help` — this message\n\n"
                 "Сообщение во время работы уточняет текущий ход агента.\n"
                 "Любой другой текст запускает или продолжает сессию в этом треде.\n"
-                "По умолчанию: Claude Opus. Выбор для нового Chat:\n"
+                "По умолчанию: Claude Opus 5.5. Выбор для нового Chat:\n"
                 "• `[claude] запрос`\n"
-                "• `[claude:claude-opus-5] запрос`\n"
+                "• `[claude:claude-opus-5-5] запрос`\n"
                 "• `[codex:gpt-5.6-sol] запрос`"
             )
         case "ping":
@@ -109,6 +110,7 @@ def is_trusted_channel_thread(event: Mapping[str, Any], settings: Settings) -> b
                 settings.experiment_design_channel,
                 settings.experiment_analytics_channel,
                 settings.mobile_health_alert_channel,
+                DAILY_ACTIVITY_DIGEST_CHANNEL,
             }
         )
         and isinstance(event.get("thread_ts"), str)

@@ -11,6 +11,7 @@ from sloperator.bot import (
     vpn_otp_from_command,
 )
 from sloperator.config import Settings
+from sloperator.daily_activity_digest import CHANNEL_ID as DAILY_ACTIVITY_DIGEST_CHANNEL
 from sloperator.store import EventStore
 
 
@@ -81,6 +82,24 @@ def test_trusted_channel_thread_requires_owner_monitoring_channel_and_thread() -
     assert not is_trusted_channel_thread({**event, "user": "UOTHER"}, settings)
     assert not is_trusted_channel_thread({**event, "channel": "COTHER"}, settings)
     assert not is_trusted_channel_thread({**event, "thread_ts": None}, settings)
+
+
+def test_trusted_channel_thread_supports_daily_digest_channel() -> None:
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        slack_allowed_conversation_users=frozenset({"UOWNER", "UANALYST"}),
+    )
+    event = {
+        "user": "UANALYST",
+        "channel": DAILY_ACTIVITY_DIGEST_CHANNEL,
+        "thread_ts": "100.1",
+        "ts": "100.2",
+        "text": "Что ещё осталось?",
+    }
+
+    assert is_trusted_channel_thread(event, settings)
 
 
 def test_trusted_channel_thread_supports_subscription_flow_channel() -> None:

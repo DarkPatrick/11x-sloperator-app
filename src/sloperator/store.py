@@ -1632,7 +1632,9 @@ class EventStore:
                 """
                 UPDATE agent_sessions
                 SET external_session_id = ?, status = 'idle',
-                    turn_count = turn_count + 1, updated_at = CURRENT_TIMESTAMP
+                    turn_count = turn_count + 1,
+                    last_activity_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE channel_id = ? AND thread_ts = ?
                 """,
                 (external_session_id, channel_id, thread_ts),

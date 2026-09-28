@@ -31,6 +31,8 @@ from sloperator.automation_error_audit import (
 )
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
+from sloperator.daily_activity_digest import cancel_task as cancel_daily_activity_digest
+from sloperator.daily_activity_digest import run_weekdays as run_daily_activity_digest
 from sloperator.experiment_analytics_planner import (
     InvalidAnalyticsResult,
 )
@@ -169,6 +171,7 @@ async def serve(settings: Settings) -> None:
         "experiment-analytics-planner"
     ]
     error_audit_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["automation-error-audit"]
+    activity_digest_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["daily-activity-digest"]
     skill_docs_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["skill-docs-sync"]
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
@@ -250,6 +253,7 @@ async def serve(settings: Settings) -> None:
     jira_task_automation_task: asyncio.Task[None] | None = None
     jira_task_poll_task: asyncio.Task[None] | None = None
     automation_error_audit_task: asyncio.Task[None] | None = None
+    daily_activity_digest_task: asyncio.Task[None] | None = None
     skill_docs_sync_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
@@ -556,6 +560,18 @@ async def serve(settings: Settings) -> None:
             ),
             name="daily-automation-error-audit",
         )
+        daily_activity_digest_task = asyncio.create_task(
+            run_daily_activity_digest(
+                app.client,
+                orchestrator,
+                settings,
+                store,
+                lambda: not automation_controls.disabled(
+                    "crons", activity_digest_job.display_name
+                ),
+            ),
+            name="weekday-daily-activity-digest",
+        )
         skill_docs_sync_task = asyncio.create_task(
             run_daily_skill_docs_sync(
                 settings,
@@ -588,6 +604,7 @@ async def serve(settings: Settings) -> None:
         await cancel_experiment_design(experiment_design_task)
         await cancel_experiment_analytics(experiment_analytics_task)
         await cancel_automation_error_audit(automation_error_audit_task)
+        await cancel_daily_activity_digest(daily_activity_digest_task)
         await cancel_skill_docs_sync(skill_docs_sync_task)
         await orchestrator.close()
         await slack_handler.close_async()  # type: ignore[no-untyped-call]

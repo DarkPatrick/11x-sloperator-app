@@ -165,6 +165,10 @@ def test_only_finalization_failures_are_classified_as_failed() -> None:
     assert is_transient_clickhouse_failure(
         "Experiment finalisation failed: ClickHouse HTTP status 504"
     )
+    assert is_transient_clickhouse_failure(
+        "Experiment finalisation failed: ClickHouse error 216 "
+        "QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING"
+    )
     assert not is_transient_clickhouse_failure(
         "Experiment finalisation failed: Jira task has the wrong status"
     )

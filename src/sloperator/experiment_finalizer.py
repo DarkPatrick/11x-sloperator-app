@@ -429,6 +429,14 @@ def is_transient_clickhouse_failure(text: str) -> bool:
     normalized = text.casefold()
     if "session_is_locked" in normalized or "session is locked" in normalized:
         return True
+    if (
+        "query_with_same_id_is_already_running" in normalized
+        or (
+            "query with id" in normalized
+            and "is already running" in normalized
+        )
+    ):
+        return True
     if "clickhouse" not in normalized:
         return False
     return any(

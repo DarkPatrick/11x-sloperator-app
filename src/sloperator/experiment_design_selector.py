@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import re
 import unicodedata
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
@@ -219,8 +220,42 @@ def confluence_page_ids(value: str) -> set[str]:
     return result
 
 
-async def resolve_project_page_id(jira: JiraRestReader, epic_key: str) -> str:
-    """Require one explicit Confluence project-page link on the selected Jira epic."""
+def header_links_epic(storage: str, epic_key: str) -> bool:
+    """Return whether the page's header table references the epic via a Jira macro or link."""
+    start = storage.find("<table")
+    end = storage.find("</table>", start)
+    if start < 0 or end < 0:
+        return False
+    header = storage[start:end]
+    key = re.escape(epic_key)
+    return bool(
+        re.search(rf'<ac:parameter ac:name="key">\s*{key}\s*</ac:parameter>', header)
+        or re.search(rf"/browse/{key}(?!\d)", header)
+    )
+
+
+async def fetch_page_storage(page_id: str) -> str | None:
+    """Read one page's storage body with the service account; None when it no longer exists."""
+    from sloperator.experiment_agent_tools import page_storage
+
+    try:
+        return await page_storage(page_id)
+    except FileNotFoundError:
+        return None
+    except (RuntimeError, ValueError, OSError) as error:
+        raise SelectionError(f"Confluence page {page_id} could not be read: {error}") from error
+
+
+async def resolve_project_page_id(
+    jira: JiraRestReader,
+    epic_key: str,
+    page_storage: Callable[[str], Awaitable[str | None]] = fetch_page_storage,
+) -> str:
+    """Resolve the epic's project page from its explicit Confluence links.
+
+    With several links, only pages whose header table references the epic qualify, and exactly
+    one such page must remain.
+    """
     ids: set[str] = set()
     for link in await jira.epic_page_links(epic_key):
         ids.update(confluence_page_ids(link))
@@ -229,12 +264,24 @@ async def resolve_project_page_id(jira: JiraRestReader, epic_key: str) -> str:
             f"Jira epic {epic_key} has no Confluence project-page link. "
             "Attach the project page to the epic before running experiment design."
         )
-    if len(ids) != 1:
+    if len(ids) == 1:
+        return next(iter(ids))
+    matching = []
+    for page_id in sorted(ids):
+        storage = await page_storage(page_id)
+        if storage is not None and header_links_epic(storage, epic_key):
+            matching.append(page_id)
+    if len(matching) == 1:
+        return matching[0]
+    if not matching:
         raise SelectionError(
-            f"Jira epic {epic_key} links to multiple Confluence pages. "
-            "Keep one project-page link on the epic before running experiment design."
+            f"Jira epic {epic_key} links to multiple Confluence pages, and none references the "
+            "epic in its header table. Link the epic in the project page header."
         )
-    return next(iter(ids))
+    raise SelectionError(
+        f"Jira epic {epic_key} links to multiple Confluence pages that reference the epic in "
+        f"their header tables ({', '.join(matching)}). Keep the epic in one project page header."
+    )
 
 
 def _normalize(value: str) -> str:

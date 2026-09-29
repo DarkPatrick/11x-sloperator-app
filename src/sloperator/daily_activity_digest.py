@@ -24,8 +24,11 @@ from sloperator.automated_session_policy import (
 )
 from sloperator.claude_usage import ClaudeUsage, read_usage
 from sloperator.config import Settings
+from sloperator.experiment_analytics_planner import FAILURE_PREFIX as ANALYTICS_FAILURE_PREFIX
 from sloperator.experiment_analytics_planner import select_from_jira as select_analytics
+from sloperator.experiment_design_planner import FAILURE_PREFIX as DESIGN_FAILURE_PREFIX
 from sloperator.experiment_design_planner import select_from_jira as select_design
+from sloperator.experiment_finalizer import FAILURE_PREFIXES as FINALIZATION_FAILURE_PREFIXES
 from sloperator.experiment_finalizer import (
     SELECTION_RULES as FINALIZATION_SELECTION_RULES,
 )
@@ -47,6 +50,26 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TASK_RE = re.compile(r"\bUMN-\d+\b")
 URL_RE = re.compile(r"https://[^\s)>]+")
 CONFLUENCE_RE = re.compile(r"https://alice\.mu\.se/[^\s)>]+")
+AUTOMATION_FAILURES = (
+    (DESIGN_FAILURE_PREFIX, "Дизайн эксперимента", "не удалось собрать дизайн эксперимента"),
+    (ANALYTICS_FAILURE_PREFIX, "Аналитика эксперимента", "не удалось подготовить аналитику"),
+    *(
+        (prefix, "Итоги эксперимента", "не удалось подвести итоги эксперимента")
+        for prefix in FINALIZATION_FAILURE_PREFIXES
+    ),
+)
+FAILURE_REASONS = (
+    (
+        re.compile(r"Confluence pages?\b|project-page link", re.IGNORECASE),
+        "нет однозначной ссылки на страницу проекта",
+    ),
+    (re.compile(r"start verification", re.IGNORECASE), "не подтвердился старт задачи в Jira"),
+    (
+        re.compile(r"selection changed|pairing changed", re.IGNORECASE),
+        "задача в Jira изменилась во время запуска",
+    ),
+    (re.compile(r"Jira review update failed", re.IGNORECASE), "не удалось обновить задачу в Jira"),
+)
 FINAL_STATUSES = {
     "done",
     "готово",
@@ -171,6 +194,10 @@ class DigestStore(Protocol):
 
     def thread_messages(
         self, channel_id: str, thread_ts: str, limit: int = 30
+    ) -> list[dict[str, Any]]: ...
+
+    def bot_channel_messages(
+        self, channel_ids: list[str], since_ts: float, limit: int = 200
     ) -> list[dict[str, Any]]: ...
 
 
@@ -524,6 +551,34 @@ def _slack_session_item(session: dict[str, Any]) -> tuple[str, DigestItem] | Non
     )
 
 
+@dataclass(frozen=True, slots=True)
+class AutomationFailure:
+    task_key: str | None
+    title: str
+    note: str
+
+
+def parse_automation_failure(
+    channel_id: str, message_ts: str, text: str
+) -> AutomationFailure | None:
+    """Turn a published experiment-automation failure into a plain digest outcome."""
+    stripped = text.strip()
+    for prefix, title, outcome in AUTOMATION_FAILURES:
+        if not stripped.startswith(prefix):
+            continue
+        detail = stripped.removeprefix(prefix).strip()
+        owned = re.match(r"(UMN-\d+):", detail) or re.search(r"\bResults task (UMN-\d+)", detail)
+        reason = next(
+            (plain for pattern, plain in FAILURE_REASONS if pattern.search(detail)), None
+        )
+        task_key = owned.group(1) if owned else None
+        note = f"{outcome}: {reason}" if reason else outcome
+        if reason is None or task_key is None:
+            note += f" ([подробности в Slack]({_slack_thread_url(channel_id, message_ts)}))"
+        return AutomationFailure(task_key, title, note)
+    return None
+
+
 def _valid_completed_run(run: dict[str, Any], task_status: str) -> bool:
     if run.get("status") != "completed":
         return False
@@ -619,6 +674,47 @@ async def collect_facts(
                 )
             )
             completed_keys.add(task_key)
+
+    day_start = dt.datetime.combine(today, dt.time(), timezone).timestamp()
+    failure_channels = list(
+        dict.fromkeys(
+            (
+                settings.experiment_design_channel,
+                settings.experiment_analytics_channel,
+                settings.experiment_finalizer_channel,
+            )
+        )
+    )
+    try:
+        failure_messages = await asyncio.to_thread(
+            store.bot_channel_messages, failure_channels, day_start
+        )
+    except Exception:
+        LOGGER.warning("Daily digest could not read published automation failures")
+        failure_messages = []
+    for message in reversed(failure_messages):
+        failure = parse_automation_failure(
+            str(message["channel_id"]), str(message["message_ts"]), str(message["text"])
+        )
+        if failure is None:
+            continue
+        item_key = failure.task_key or f"slack:{message['channel_id']}:{message['message_ts']}"
+        if item_key in completed_keys:
+            continue
+        task = await snapshot(failure.task_key) if failure.task_key else None
+        completed.append(
+            DigestItem(
+                item_key,
+                _task_title(task, failure.task_key) if failure.task_key else failure.title,
+                (
+                    f"{settings.jira_url.rstrip('/')}/browse/{failure.task_key}"
+                    if failure.task_key
+                    else ""
+                ),
+                failure.note,
+            )
+        )
+        completed_keys.add(item_key)
 
     try:
         sessions = await asyncio.to_thread(store.list_agent_sessions, 500)

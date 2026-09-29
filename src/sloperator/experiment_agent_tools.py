@@ -117,6 +117,23 @@ async def gather(keys: list[str], page_id: str, timeout: int) -> dict[str, Any]:
     }
 
 
+async def page_storage(page_id: str, timeout: int = 60) -> str:
+    """Return one page's storage body; FileNotFoundError when Confluence reports it missing."""
+    if not PAGE.fullmatch(page_id):
+        raise ValueError("Confluence page ID must be numeric")
+    with tempfile.TemporaryDirectory(prefix="experiment_page_") as artifact_dir:
+        try:
+            raw = await _capture([
+                str(PYTHON), str(CONFLUENCE), "fetch", page_id, "--as-bot",
+                "--out-dir", artifact_dir,
+            ], timeout)
+        except RuntimeError as error:
+            if "Confluence HTTP 404" in str(error):
+                raise FileNotFoundError(page_id) from error
+            raise
+        return Path(json.loads(raw)["storage_path"]).read_text(encoding="utf-8")
+
+
 async def wait_for(command: list[str], timeout: int) -> dict[str, Any]:
     """Wait once and return bounded output while preserving full logs on disk."""
     if not command:

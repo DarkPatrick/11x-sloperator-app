@@ -355,6 +355,8 @@ async def publish_notification(
 ) -> str:
     """Publish one verified reviewer notification and attach its session."""
     notification = normalize_review_notification(run.text, task_key)
+    if notification.startswith(FAILURE_PREFIX):
+        notification = task_failure(notification, task_key)
     published_run = replace(run, text=notification)
     response = await client.chat_postMessage(
         channel=settings.experiment_design_channel,
@@ -365,6 +367,14 @@ async def publish_notification(
     channel_id = response.get("channel", settings.experiment_design_channel)
     await agent.attach_session(channel_id, response["ts"], published_run)
     return notification
+
+
+def task_failure(message: str, task_key: str) -> str:
+    """Name the task in a failure so the daily digest can attribute it."""
+    reason = message.removeprefix(FAILURE_PREFIX).strip()
+    if reason.startswith(f"{task_key}:"):
+        return message
+    return f"{FAILURE_PREFIX} {task_key}: {reason}"
 
 
 async def publish_failure(
@@ -458,7 +468,7 @@ async def run_preparation(
         prepared = parse_preparation_result(prepared_run.text)
     except InvalidDesignResult as error:
         if str(error).startswith(FAILURE_PREFIX):
-            await publish_failure(client, settings, str(error))
+            await publish_failure(client, settings, task_failure(str(error), selected.task_key))
         raise
     if prepared is None:
         raise InvalidDesignResult("Preparation agent contradicted deterministic selection")

@@ -1002,6 +1002,31 @@ class EventStore:
         result.sort(key=lambda row: str(row["created_at"]), reverse=True)
         return result
 
+    def bot_channel_messages(
+        self, channel_ids: list[str], since_ts: float, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Return top-level bot-posted messages from channels since a Slack timestamp."""
+        if not channel_ids:
+            return []
+        placeholders = ", ".join("?" for _ in channel_ids)
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"""
+                SELECT channel_id, message_ts, text
+                FROM messages
+                WHERE channel_id IN ({placeholders})
+                  AND CAST(message_ts AS REAL) >= ?
+                  AND (thread_ts IS NULL OR thread_ts = message_ts)
+                  AND bot_id IS NOT NULL
+                  AND deleted = 0
+                ORDER BY CAST(message_ts AS REAL)
+                LIMIT ?
+                """,
+                (*channel_ids, since_ts, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def thread_messages(
         self, channel_id: str, thread_ts: str, limit: int = 30
     ) -> list[dict[str, Any]]:

@@ -358,3 +358,86 @@ async def test_successful_agent_digest_is_sent_to_channel(monkeypatch, tmp_path)
     assert "AUTOMATED RESPONSE STYLE" in agent.execute_once.await_args.args[0]
     client.conversations_open.assert_not_awaited()
     assert client.chat_postMessage.await_args.kwargs["channel"] == CHANNEL_ID
+
+
+def test_bot_channel_messages_returns_only_top_level_bot_posts(tmp_path) -> None:
+    from sloperator.store import EventStore
+
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    store.upsert_history_messages("C07A9FDQ14P", [
+        {"ts": "1790683216.035599", "thread_ts": "1790683216.035599", "bot_id": "B1",
+         "user": "UBOT", "text": "Experiment design automation failed: UMN-13525: x"},
+        {"ts": "1790683719.754809", "thread_ts": "1790683216.035599", "bot_id": "B1",
+         "user": "UBOT", "text": "reply"},
+        {"ts": "1790683800.000001", "user": "UHUMAN", "text": "human"},
+        {"ts": "1790500000.000001", "bot_id": "B1", "user": "UBOT", "text": "yesterday"},
+    ])
+
+    rows = store.bot_channel_messages(["C07A9FDQ14P"], 1790640000.0)
+
+    assert [row["message_ts"] for row in rows] == ["1790683216.035599"]
+
+
+async def test_published_automation_failure_is_reported_in_done_today(
+    monkeypatch, tmp_path
+) -> None:
+    from sloperator.daily_activity_digest import collect_facts
+
+    now = dt.datetime(2026, 9, 29, 16, 0, tzinfo=dt.UTC)
+    posted = str(dt.datetime(2026, 9, 29, 12, 0, 16, tzinfo=dt.UTC).timestamp())
+    store = SimpleNamespace(
+        list_scheduled_agent_runs=lambda _limit: [],
+        list_agent_sessions=lambda _limit: [],
+        active_jira_task_agent_links=lambda: [],
+        thread_messages=lambda *_args: [],
+        bot_channel_messages=lambda channels, since: [
+            {
+                "channel_id": "C07A9FDQ14P",
+                "message_ts": posted,
+                "text": (
+                    "Experiment design automation failed: UMN-13525: Jira epic UMN-13523 links "
+                    "to multiple Confluence pages. Keep one project-page link on the epic."
+                ),
+            },
+            {
+                "channel_id": "C07A9FDQ14P",
+                "message_ts": posted,
+                "text": "Experiment finalisation failed: publish hook blocked the write",
+            },
+        ] if channels == ["C07A9FDQ14P"] and since <= float(posted) else [],
+    )
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=SimpleNamespace(
+            summary="Расчет сверху и план тестирования - UG App: explore - Recommended course "
+            "slot for Pro",
+            status="In Progress",
+        )),
+        queued_tasks=AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr("sloperator.daily_activity_digest.JiraTaskReader", lambda *_: reader)
+    design = SimpleNamespace(task_key="UMN-13525")
+    monkeypatch.setattr("sloperator.daily_activity_digest.select_design", AsyncMock(
+        return_value=design))
+    monkeypatch.setattr("sloperator.daily_activity_digest.select_analytics", AsyncMock(
+        return_value=None))
+    monkeypatch.setattr("sloperator.daily_activity_digest.read_usage", AsyncMock(
+        return_value=ClaudeUsage(0, 0, "", "")))
+    current = replace(settings(tmp_path), jira_username="user", jira_api_token="token")
+
+    result, _usage = await collect_facts(current, store, now=now)
+
+    items = {item.title: item for item in result.completed}
+    finalizer_item = items.pop("Итоги эксперимента")
+    (design_item,) = items.values()
+    assert design_item.task_key == "UMN-13525"
+    assert design_item.note == (
+        "не удалось собрать дизайн эксперимента: нет однозначной ссылки на страницу проекта"
+    )
+    assert "Recommended course slot for Pro" in design_item.title
+    assert not any(item.task_key == "UMN-13525" for item in result.pending)
+    assert "[подробности в Slack](https://mu--se.slack.com/archives/C07A9FDQ14P/" in (
+        finalizer_item.note
+    )
+    rendered = render_fallback(result)
+    assert rendered.index("не удалось собрать дизайн") < rendered.index("*Продолжу")

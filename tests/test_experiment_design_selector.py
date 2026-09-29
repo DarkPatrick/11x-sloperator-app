@@ -74,12 +74,49 @@ async def test_project_page_requires_one_link_on_epic() -> None:
     with pytest.raises(SelectionError, match="no Confluence project-page link"):
         await resolve_project_page_id(jira, "UMN-13405")
 
+
+
+def header(epic_key: str) -> str:
+    return (
+        '<ac:structured-macro ac:name="info"><ac:rich-text-body><p>Naming</p>'
+        "</ac:rich-text-body></ac:structured-macro>"
+        '<table><tbody><tr><th>Status</th><td><ac:structured-macro ac:name="jira">'
+        f'<ac:parameter ac:name="key">{epic_key}</ac:parameter></ac:structured-macro>'
+        "</td></tr></tbody></table><table><tr><td>UMN-13405</td></tr></table>"
+    )
+
+
+async def test_project_page_with_several_links_uses_epic_in_header_table() -> None:
+    from unittest.mock import AsyncMock
+
+    jira = AsyncMock()
     jira.epic_page_links.return_value = [
-        "https://alice.mu.se/pages/viewpage.action?pageId=838613487",
-        "https://alice.mu.se/pages/viewpage.action?pageId=805320409",
+        "https://alice.mu.se/pages/viewpage.action?pageId=761947509",
+        "https://alice.mu.se/pages/viewpage.action?pageId=838626085",
+        "https://alice.mu.se/pages/viewpage.action?pageId=805320097",
+        "https://alice.mu.se/pages/viewpage.action?pageId=838626085",
     ]
-    with pytest.raises(SelectionError, match="multiple Confluence pages"):
-        await resolve_project_page_id(jira, "UMN-13405")
+    pages = {
+        "761947509": header("UMN-10743"),
+        "838626085": header("UMN-13405"),
+        "805320097": None,
+    }
+    storage = AsyncMock(side_effect=pages.get)
+    assert await resolve_project_page_id(jira, "UMN-13405", storage) == "838626085"
+    assert storage.await_count == 3
+
+    pages["838626085"] = header("UMN-1340")
+    with pytest.raises(SelectionError, match="none references the epic"):
+        await resolve_project_page_id(jira, "UMN-13405", storage)
+
+    pages["838626085"] = header("UMN-13405")
+    pages["761947509"] = header("UMN-13405").replace(
+        '<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">UMN-13405'
+        "</ac:parameter></ac:structured-macro>",
+        '<a href="https://mu--se.atlassian.net/browse/UMN-13405">epic</a>',
+    )
+    with pytest.raises(SelectionError, match="multiple Confluence pages that reference"):
+        await resolve_project_page_id(jira, "UMN-13405", storage)
 
 
 def raw_issue(
@@ -359,3 +396,12 @@ async def test_missing_required_board_column_fails_closed() -> None:
     jira.board_configuration = incomplete_configuration  # type: ignore[method-assign]
     with pytest.raises(SelectionError, match="columns"):
         await select_candidate(jira, now=NOW)
+
+
+def test_task_failure_names_selected_task_once() -> None:
+    from sloperator.experiment_design_planner import FAILURE_PREFIX, task_failure
+
+    assert task_failure(f"{FAILURE_PREFIX} selection changed", "UMN-1") == (
+        f"{FAILURE_PREFIX} UMN-1: selection changed"
+    )
+    assert task_failure(f"{FAILURE_PREFIX} UMN-1: x", "UMN-1") == f"{FAILURE_PREFIX} UMN-1: x"

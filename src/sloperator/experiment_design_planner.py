@@ -19,6 +19,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_ATLASSIAN_IDENTITY,
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
+    LOCAL_CONFLUENCE_USER_DIRECTORY,
 )
 from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
@@ -61,6 +62,8 @@ Realistic and Pessimistic. Never invent measured data.
 {AUTOMATED_ATLASSIAN_IDENTITY}
 
 {AUTOMATED_RESPONSE_STYLE}
+
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
 
 Use the `ug-experiment-design-power` skill for the entire design workflow, including every required
 neighboring skill, reference, SQL gate, freshness check, ClickHouse query, Redash publication,
@@ -125,6 +128,7 @@ def start_prompt(candidate: DesignCandidate) -> str:
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 {AUTOMATED_ATLASSIAN_IDENTITY}
 {AUTOMATED_RESPONSE_STYLE}
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
 {REVIEWER_OWNERSHIP_POLICY}
 
 Authoritative scheduler selection context:
@@ -168,6 +172,8 @@ every issue you find on that page and complete the whole workflow autonomously.
 {AUTOMATED_ATLASSIAN_IDENTITY}
 
 {AUTOMATED_RESPONSE_STYLE}
+
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
 
 Use the `ug-experiment-design-power` skill in its review/validation mode, including every required
 neighboring skill, reference, SQL gate, source-query execution, baseline reconciliation, table

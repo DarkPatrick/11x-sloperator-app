@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from sloperator.agents import HeadlessAgentRun
+from sloperator.automated_session_policy import LOCAL_CONFLUENCE_USER_DIRECTORY
 from sloperator.config import Settings
 from sloperator.experiment_analytics_planner import (
     PREPARATION_PROMPT,
@@ -32,6 +33,8 @@ def test_prompts_use_analytics_skill_service_accounts_and_owner_session() -> Non
     assert "ug-analytics-spec-writer" in PREPARATION_PROMPT
     assert "AUTOMATED RESPONSE STYLE" in PREPARATION_PROMPT
     assert "AUTOMATED ATLASSIAN IDENTITY" in PREPARATION_PROMPT
+    assert LOCAL_CONFLUENCE_USER_DIRECTORY in PREPARATION_PROMPT
+    assert LOCAL_CONFLUENCE_USER_DIRECTORY in prompt
     assert "`Аналитика`" in PREPARATION_PROMPT
     assert "responsible author" in prompt
     assert "Never describe yourself as merely a reviewer" in prompt

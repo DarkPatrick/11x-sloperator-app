@@ -17,6 +17,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_ATLASSIAN_IDENTITY,
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
+    LOCAL_CONFLUENCE_USER_DIRECTORY,
 )
 from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
@@ -58,6 +59,8 @@ choices. Complete the work autonomously and never invent product behaviour or an
 {AUTOMATED_ATLASSIAN_IDENTITY}
 
 {AUTOMATED_RESPONSE_STYLE}
+
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
 
 Use the `ug-analytics-spec-writer` skill for the entire workflow, including every required
 neighboring skill, reference, source-of-truth check, project-page builder, and post-write
@@ -116,6 +119,7 @@ def start_prompt(candidate: DesignCandidate) -> str:
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 {AUTOMATED_ATLASSIAN_IDENTITY}
 {AUTOMATED_RESPONSE_STYLE}
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
 {REVIEWER_OWNERSHIP_POLICY}
 
 Authoritative scheduler selection context:
@@ -156,6 +160,8 @@ a concise failure instead of searching for a replacement. Correct every issue on
 {AUTOMATED_ATLASSIAN_IDENTITY}
 
 {AUTOMATED_RESPONSE_STYLE}
+
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
 
 {REVIEWER_OWNERSHIP_POLICY}
 

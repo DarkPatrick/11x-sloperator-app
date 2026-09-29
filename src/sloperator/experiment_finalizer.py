@@ -19,6 +19,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_ATLASSIAN_IDENTITY,
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
+    LOCAL_CONFLUENCE_USER_DIRECTORY,
 )
 from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
@@ -151,6 +152,8 @@ all their data-quality, maturity, verification, language, and publication safegu
 
 {AUTOMATED_RESPONSE_STYLE}
 
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
+
 Goal: finalise exactly one eligible UG monetisation experiment.
 
 {SELECTION_RULES}
@@ -268,6 +271,7 @@ This is the authorised reviewer start pass for one UG experiment finalisation.
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 {AUTOMATED_ATLASSIAN_IDENTITY}
 {AUTOMATED_RESPONSE_STYLE}
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
 {REVIEWER_OWNERSHIP_POLICY}
 
 Select exactly one experiment using all of these gates before any Jira or Confluence write:
@@ -327,6 +331,7 @@ This is the authorised independent review pass for one prepared UG experiment fi
 {AUTOMATED_RESPONSE_STYLE}
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 {AUTOMATED_ATLASSIAN_IDENTITY}
+{LOCAL_CONFLUENCE_USER_DIRECTORY}
 {REVIEWER_OWNERSHIP_POLICY}
 
 Review only the exact experiment, project page, and iteration supplied below. Re-fetch the page and

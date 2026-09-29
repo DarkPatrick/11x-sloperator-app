@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from sloperator.agents import HeadlessAgentRun
+from sloperator.automated_session_policy import LOCAL_CONFLUENCE_USER_DIRECTORY
 from sloperator.config import Settings
 from sloperator.experiment_design_planner import (
     NO_OP_RESULT,
@@ -49,6 +50,7 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
     assert "[claude]" in PREPARATION_PROMPT
     assert "AUTOMATED RESPONSE STYLE" in PREPARATION_PROMPT
     assert "AUTOMATED ATLASSIAN IDENTITY" in PREPARATION_PROMPT
+    assert LOCAL_CONFLUENCE_USER_DIRECTORY in PREPARATION_PROMPT
     assert "pass `--as-bot` on every command" in PREPARATION_PROMPT
     assert "ug-experiment-design-power" in PREPARATION_PROMPT
     assert "cannot\ncommunicate with a human" in PREPARATION_PROMPT
@@ -70,6 +72,7 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
 
 def test_review_prompt_requires_independent_correction_and_final_actions() -> None:
     prompt = review_prompt("UMN-12312", "UMN-12310", "838613487")
+    assert LOCAL_CONFLUENCE_USER_DIRECTORY in prompt
     assert "AUTOMATED ATLASSIAN IDENTITY" in prompt
     assert "pass `--as-bot` on every command" in prompt
     assert "Never fall back to personal" in prompt

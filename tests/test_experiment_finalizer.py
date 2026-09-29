@@ -8,7 +8,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from sloperator.agents import HeadlessAgentRun
-from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
+from sloperator.automated_session_policy import (
+    AUTOMATED_RESPONSE_STYLE,
+    LOCAL_CONFLUENCE_USER_DIRECTORY,
+)
 from sloperator.config import Settings
 from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
@@ -38,6 +41,8 @@ PAGE_URL = "https://alice.mu.se/pages/viewpage.action?pageId=838613487"
 
 
 def test_reviewer_owns_start_and_worker_cannot_write_jira() -> None:
+    assert LOCAL_CONFLUENCE_USER_DIRECTORY in START_PROMPT
+    assert LOCAL_CONFLUENCE_USER_DIRECTORY in FINALIZATION_PROMPT
     assert "transition ID 281" in START_PROMPT
     assert "customfield_10312" in START_PROMPT
     assert "`search --jql ... --json`" in START_PROMPT
@@ -50,6 +55,7 @@ def test_reviewer_owns_start_and_worker_cannot_write_jira() -> None:
 
 def test_reviewer_can_recover_missing_start_without_duplicate_publication() -> None:
     assert AUTOMATED_RESPONSE_STYLE in REVIEW_PROMPT
+    assert LOCAL_CONFLUENCE_USER_DIRECTORY in REVIEW_PROMPT
     assert "From `Backlog` or `To Do`" in REVIEW_PROMPT
     assert "`281` to `In Progress` is explicitly" in REVIEW_PROMPT
     assert "before attempting `181`" in REVIEW_PROMPT

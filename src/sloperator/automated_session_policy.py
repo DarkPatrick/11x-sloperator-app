@@ -90,6 +90,23 @@ AUTOMATED ATLASSIAN IDENTITY (STRICT, applies to this autonomous workflow only):
 """
 
 
+LOCAL_CONFLUENCE_USER_DIRECTORY = """\
+LOCAL CONFLUENCE USER DIRECTORY (PRIVATE, READ-ONLY):
+- When Confluence storage identifies a person only through `<ri:user ri:userkey="...">`, first
+  read `context/confluence_userkey_to_display_name.json` in the ug-ai-analyst workspace and map
+  that exact user key to its display name. This local file is the authorised identity fallback for
+  automated design, analytics, and finalisation workflows.
+- Treat the dictionary as private personal data: never attach it, quote it wholesale, copy it into
+  an artifact, publish it, or modify it during an automated run. Use only the entries required for
+  the current page. If the file or key is absent, use another authorised lookup or leave the person
+  unresolved; never guess an identity.
+- For Slack-facing output, use a native `<@USERID>` when authoritatively known. Otherwise emit the
+  exact display name from the dictionary as plain text. Sloperator performs the authoritative
+  exact-name-to-Slack-mention conversion at the delivery boundary; do not claim that Slack lookup
+  is unavailable merely because the agent session itself has no Slack connector.
+"""
+
+
 SLACK_WORKER_HANDOFF = """\
 SLACK WORKER HANDOFF (STRICT):
 - Do the requested substantive work and return the complete factual result to Sloperator.

@@ -673,6 +673,31 @@ async def test_headless_run_is_visible_and_disables_interactive_hooks(
     assert store.get_agent_session("D123", "100.1") is not None
 
 
+async def test_headless_terminal_failure_is_persisted_as_failed(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    failure = "Experiment finalisation failed: ClickHouse SESSION_IS_LOCKED"
+    run_claude = AsyncMock(return_value=AgentRunResult(session_id="session-1", text=failure))
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    orchestrator = AgentOrchestrator(settings, store)
+
+    result = await orchestrator.execute_once(
+        "Automated work",
+        5_400,
+        failure_result=lambda text: text.startswith("Experiment finalisation failed:"),
+    )
+
+    assert result.text == failure
+    assert orchestrator.headless_sessions()[0]["status"] == "failed"
+    persisted = store.list_scheduled_agent_runs()[0]
+    assert persisted["status"] == "failed"
+    assert persisted["last_error"] == failure
+
+
 async def test_headless_run_ignores_interim_result_and_continues(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,

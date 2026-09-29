@@ -16,8 +16,11 @@ from sloperator.experiment_finalizer import (
     REVIEW_PROMPT,
     START_PROMPT,
     InvalidFinalizationNotification,
+    execute_finalizer_turn,
+    is_finalization_failure,
     is_finalization_notification,
     is_preparation_result,
+    is_transient_clickhouse_failure,
     next_run_at,
     normalize_finalization_notification,
     recover_missing_project_page,
@@ -120,6 +123,8 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "strictly below 5%" in FINALIZATION_PROMPT
     assert "every configured client and segment" in FINALIZATION_PROMPT
     assert "from stale cached results" in FINALIZATION_PROMPT
+    assert "complete successful calculation from the current calendar date" in FINALIZATION_PROMPT
+    assert 'set_setting("autogenerate_session_id", False)' in FINALIZATION_PROMPT
     assert "not an eligibility" in FINALIZATION_PROMPT
     assert "stop immediately" in FINALIZATION_PROMPT
     assert "calculator, do not" in FINALIZATION_PROMPT
@@ -147,6 +152,55 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "never change anything under `context/`" in FINALIZATION_PROMPT
     assert NO_OP_NOTIFICATION in FINALIZATION_PROMPT
     assert "one sentence, no bullets" in FINALIZATION_PROMPT
+
+
+def test_only_finalization_failures_are_classified_as_failed() -> None:
+    failure = "Experiment finalisation failed: ClickHouse unavailable"
+
+    assert is_finalization_failure(failure)
+    assert not is_finalization_failure(NO_OP_NOTIFICATION)
+    assert is_transient_clickhouse_failure(
+        "Experiment finalisation failed: ClickHouse error 373 SESSION_IS_LOCKED"
+    )
+    assert is_transient_clickhouse_failure(
+        "Experiment finalisation failed: ClickHouse HTTP status 504"
+    )
+    assert not is_transient_clickhouse_failure(
+        "Experiment finalisation failed: Jira task has the wrong status"
+    )
+
+
+async def test_transient_clickhouse_failure_retries_same_session(monkeypatch) -> None:
+    sleep = AsyncMock()
+    monkeypatch.setattr("sloperator.experiment_finalizer.asyncio.sleep", sleep)
+    failure = HeadlessAgentRun(
+        "claude",
+        "opus",
+        "reviewer-session",
+        "Experiment finalisation failed: ClickHouse error 373 SESSION_IS_LOCKED",
+    )
+    success = HeadlessAgentRun(
+        "claude",
+        "opus",
+        "reviewer-session",
+        f"FINALIZATION_STARTED: 7607 | {PAGE_URL} | Iteration 3 | UMN-13000",
+    )
+    agent = SimpleNamespace(execute_once=AsyncMock(side_effect=[failure, success]))
+
+    result = await execute_finalizer_turn(
+        agent,
+        START_PROMPT,
+        7_200,
+        job_name="experiment-finalizer-reviewer",
+        accept_result=lambda _: True,
+    )
+
+    assert result == success
+    sleep.assert_awaited_once_with(30)
+    retry_call = agent.execute_once.await_args_list[1]
+    assert retry_call.kwargs["existing_session_id"] == "reviewer-session"
+    assert 'set_setting("autogenerate_session_id", False)' in retry_call.args[0]
+    assert retry_call.kwargs["failure_result"](failure.text)
 
 
 async def test_run_once_posts_once_and_attaches_resumable_session(monkeypatch) -> None:

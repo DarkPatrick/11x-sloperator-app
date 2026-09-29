@@ -41,6 +41,22 @@ FAILURE_PREFIXES = (
     "Experiment finalisation failed:",
     "Experiment finalization failed:",
 )
+TRANSIENT_CLICKHOUSE_RETRY_DELAYS = (30, 90, 180)
+TRANSIENT_CLICKHOUSE_RETRY_PROMPT = f"""[claude]
+This is an orchestrator-authorised retry of the same experiment-finalizer turn after a transient
+ClickHouse failure. {AUTOMATED_RESPONSE_STYLE}
+
+Retry only the failed calculation for the exact same candidate. Reuse all successfully completed
+selection and calculation evidence from this session; do not recalculate earlier candidates and do
+not select a different candidate unless the original selection rules require continuing after this
+candidate is conclusively ineligible. Start the retry in a fresh Python process and disable
+clickhouse-connect server sessions before importing clickhouse-worker or the calculator with
+`clickhouse_connect.common.set_setting("autogenerate_session_id", False)`. This workflow uses
+short-lived clients and package-managed physical tables, so it must not share a ClickHouse session
+id across requests. Re-fetch and verify every expected row after the calculation. Do not treat rows
+from the failed attempt as a successful calculation. Preserve the original no-write boundaries and
+return the exact terminal format required by the original turn.
+"""
 
 SELECTION_RULES = f"""\
 Selection rules:
@@ -88,9 +104,18 @@ Selection rules:
    outside these rules, make no Confluence or Jira writes, and return exactly
    `{NO_OP_NOTIFICATION}` and nothing else.
 8. Walk the ordered preliminary candidate pool from oldest to newest. For each candidate, obtain
-   freshly calculated maturity data. Use results produced by this run; if its calculator rows are
-   not demonstrably fresh, recalculate it first using the direct-library procedure below and verify
-   the fresh rows. Never determine eligibility from stale cached results. Apply a
+   demonstrably fresh maturity data. Before recalculating, check whether the package already has a
+   complete successful calculation from the current calendar date in Asia/Nicosia. Reuse it only
+   when the latest calculation-log entry is successful, no later failed attempt or later partial
+   table rewrite exists, the installed calculator commit and effective configuration have not
+   changed, and every expected result/stat/funnel and raw-users table has complete coverage for the
+   current clients, segments, variations, and actual end date. All table watermarks must belong to
+   that successful calculation window. A same-day `updated_at` value by itself is not proof: mixed
+   old/new rows or rows touched after the success marker make the cache unverifiable. If all these
+   checks pass, use those rows and do not invoke the calculator. Otherwise recalculate once using
+   the direct-library procedure below and verify the fresh rows.
+   Never determine eligibility from stale cached results, partial results, or merely same-day rows.
+   Apply a
    strict, fail-closed pending-trials gate to that candidate. An
    experiment is eligible only when `pending trials, %` is present and strictly below 5% in every
    applicable variation row for every configured client and segment. A value equal to or above 5%,
@@ -149,8 +174,11 @@ Execution for the selected experiment:
    do not use the calculator HTTP API in this job. First run the repository freshness preflight and
    perform the skill's mandatory installed-commit versus git `main` check. If the installed
    `ug-experiment-calculator` is stale, update it through the repository's supported
-   internal-library update flow before calculating. Then run the synchronous in-process
-   `calculate_exp_info(exp_id, config=cfg, update_rollout=True)` with the standard
+   internal-library update flow before calculating. Before importing clickhouse-worker or the
+   calculator, disable clickhouse-connect server sessions with
+   `clickhouse_connect.common.set_setting("autogenerate_session_id", False)`. Then run the
+   synchronous in-process `calculate_exp_info(exp_id, config=cfg, update_rollout=True)` with the
+   standard
    `ExperimentCalculatorConfig.from_env()` configuration and the
    `ug_monetization_sloperator_` table prefix. This direct calculation is explicitly authorised for
    this scheduled job, including its documented writes and subscription-source refresh. During
@@ -268,8 +296,11 @@ Fresh calculation procedure used to establish candidate maturity:
    do not use the calculator HTTP API in this job. First run the repository freshness preflight and
    perform the skill's mandatory installed-commit versus git `main` check. If the installed
    `ug-experiment-calculator` is stale, update it through the repository's supported
-   internal-library update flow before calculating. Then run the synchronous in-process
-   `calculate_exp_info(exp_id, config=cfg, update_rollout=True)` with the standard
+   internal-library update flow before calculating. Before importing clickhouse-worker or the
+   calculator, disable clickhouse-connect server sessions with
+   `clickhouse_connect.common.set_setting("autogenerate_session_id", False)`. Then run the
+   synchronous in-process `calculate_exp_info(exp_id, config=cfg, update_rollout=True)` with the
+   standard
    `ExperimentCalculatorConfig.from_env()` configuration and the
    `ug_monetization_sloperator_` table prefix. This direct calculation is explicitly authorised for
    this scheduled job, including its documented writes and subscription-source refresh. During
@@ -334,6 +365,7 @@ class AgentSubmitter(Protocol):
         *,
         job_name: str = "scheduled-agent",
         accept_result: Callable[[str], bool] = lambda _: True,
+        failure_result: Callable[[str], bool] = lambda _: False,
         max_interim_results: int = 2,
         existing_session_id: str | None = None,
     ) -> HeadlessAgentRun: ...
@@ -383,6 +415,76 @@ def is_preparation_result(text: str) -> bool:
         or stripped.startswith(NO_OP_PREFIX)
         or stripped.startswith(FAILURE_PREFIXES)
     )
+
+
+def is_finalization_failure(text: str) -> bool:
+    """Return whether a terminal finalizer response represents a failed run."""
+    return text.strip().startswith(FAILURE_PREFIXES)
+
+
+def is_transient_clickhouse_failure(text: str) -> bool:
+    """Recognize ClickHouse failures that are safe to retry in a fresh process."""
+    if not is_finalization_failure(text):
+        return False
+    normalized = text.casefold()
+    if "session_is_locked" in normalized or "session is locked" in normalized:
+        return True
+    if "clickhouse" not in normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "502 bad gateway",
+            "503 service unavailable",
+            "504 gateway time-out",
+            "504 gateway timeout",
+            "http status 502",
+            "http status 503",
+            "http status 504",
+            "connection reset",
+            "remote end closed connection",
+        )
+    )
+
+
+async def execute_finalizer_turn(
+    agent: AgentSubmitter,
+    prompt: str,
+    timeout_seconds: int,
+    *,
+    job_name: str,
+    accept_result: Callable[[str], bool],
+    existing_session_id: str | None = None,
+) -> HeadlessAgentRun:
+    """Execute one finalizer turn and retry only transient ClickHouse failures."""
+    run = await agent.execute_once(
+        prompt,
+        timeout_seconds,
+        job_name=job_name,
+        accept_result=accept_result,
+        failure_result=is_finalization_failure,
+        existing_session_id=existing_session_id,
+    )
+    for attempt, delay in enumerate(TRANSIENT_CLICKHOUSE_RETRY_DELAYS, start=1):
+        if not is_transient_clickhouse_failure(run.text):
+            return run
+        LOGGER.warning(
+            "Transient ClickHouse failure in %s; retry %d/%d in %d seconds",
+            job_name,
+            attempt,
+            len(TRANSIENT_CLICKHOUSE_RETRY_DELAYS),
+            delay,
+        )
+        await asyncio.sleep(delay)
+        run = await agent.execute_once(
+            TRANSIENT_CLICKHOUSE_RETRY_PROMPT + "\nPrevious failure:\n" + run.text,
+            timeout_seconds,
+            job_name=job_name,
+            accept_result=accept_result,
+            failure_result=is_finalization_failure,
+            existing_session_id=run.session_id,
+        )
+    return run
 
 
 def normalize_finalization_notification(text: str) -> str:
@@ -438,7 +540,8 @@ async def run_once(
     settings: Settings,
 ) -> str:
     """Run headlessly, publish once, and attach the resumable session."""
-    start_run = await agent.execute_once(
+    start_run = await execute_finalizer_turn(
+        agent,
         START_PROMPT,
         settings.experiment_finalizer_timeout_seconds,
         job_name="experiment-finalizer-reviewer",
@@ -504,7 +607,8 @@ exactly `FINALIZATION_STARTED: {experiment_id} | {project_page_url} | Iteration 
 Do not switch candidates or search for another Confluence page. On a real mismatch or another
 failure, return exactly `Experiment finalisation failed: <reason>`.
 """
-    return await agent.execute_once(
+    return await execute_finalizer_turn(
+        agent,
         recovery_prompt,
         settings.experiment_finalizer_timeout_seconds,
         job_name="experiment-finalizer-reviewer",
@@ -539,7 +643,8 @@ async def run_preparation(
     started_run: HeadlessAgentRun,
     project_page_id: str,
 ) -> str:
-    prepared_run = await agent.execute_once(
+    prepared_run = await execute_finalizer_turn(
+        agent,
         FINALIZATION_PROMPT + "\n\nAuthoritative project page ID: " + project_page_id
         + "\n" + agent_instructions(project_page_id, started_run.text.strip().split(" | ")[-1])
         + "\nReviewer verified start:\n" + started_run.text,
@@ -580,7 +685,8 @@ async def run_review(
     task_match = re.search(r"\| (UMN-\d+)$", start_context.strip())
     if page_match and task_match:
         review_text += "\n" + agent_instructions(page_match.group(1), task_match.group(1))
-    review_run = await agent.execute_once(
+    review_run = await execute_finalizer_turn(
+        agent,
         review_text,
         settings.experiment_finalizer_timeout_seconds,
         job_name="experiment-finalizer-reviewer",

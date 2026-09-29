@@ -212,7 +212,9 @@ AUTOMATED_INFRASTRUCTURE_POLICY = """\
 AUTOMATED DEPENDENCY FAILURE POLICY (STRICT):
 - If ClickHouse, clickhouse-worker, Metabase, Redash, Confluence, Jira, Slack, or any HTTP/API
   dependency is unavailable, returns a network/DNS/connection timeout, or returns HTTP 4xx/5xx,
-  stop the task immediately. Do not retry the same command or poll the same request in a loop.
+  stop the current turn immediately. Do not retry the same command or poll the same request in a
+  loop. A later turn explicitly labelled as an orchestrator-authorised retry is a new bounded
+  attempt and may retry only the failed operation under that turn's instructions.
 - Return exactly one concise line beginning with `SLOPERATOR_INFRA_PAUSED:` followed by the
   dependency, status/error, and a safe retry-after hint. Do not continue analysis or publication.
 """
@@ -1698,6 +1700,7 @@ class AgentOrchestrator:
         workspace: Path | None = None,
         existing_session_id: str | None = None,
         accept_result: Callable[[str], bool] = lambda _: True,
+        failure_result: Callable[[str], bool] = lambda _: False,
         max_interim_results: int = 2,
     ) -> HeadlessAgentRun:
         """Run one isolated agent turn without creating a Slack thread."""
@@ -1926,12 +1929,15 @@ class AgentOrchestrator:
                 "%Y-%m-%d %H:%M:%S",
                 time.gmtime(),
             )
+        response, artifact = extract_artifact(result.text, self.settings.agent_workspace)
+        terminal_status = "failed" if failure_result(response) else "completed"
+        terminal_error = response if terminal_status == "failed" else None
         self._headless_sessions[key].update(
-            status="completed",
+            status=terminal_status,
             turn_count=1,
             external_session_id=result.session_id,
+            last_error=terminal_error,
         )
-        response, artifact = extract_artifact(result.text, self.settings.agent_workspace)
         if artifact is not None:
             LOGGER.warning(
                 "Ignoring headless agent artifact marker; scheduled artifacts belong on Confluence"
@@ -1950,9 +1956,10 @@ class AgentOrchestrator:
         await asyncio.to_thread(
             self.store.finish_scheduled_agent_run,
             run_id,
-            status="completed",
+            status=terminal_status,
             external_session_id=result.session_id,
             result_text=response,
+            last_error=terminal_error,
         )
         return HeadlessAgentRun(
             provider=parsed.provider,

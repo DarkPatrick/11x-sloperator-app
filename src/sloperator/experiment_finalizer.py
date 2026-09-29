@@ -43,6 +43,7 @@ FAILURE_PREFIXES = (
     "Experiment finalization failed:",
 )
 TRANSIENT_CLICKHOUSE_RETRY_DELAYS = (30, 90, 180)
+PENDING_TRIALS_SMALL_COUNT_LIMIT = 10
 TRANSIENT_CLICKHOUSE_RETRY_PROMPT = f"""[claude]
 This is an orchestrator-authorised retry of the same experiment-finalizer turn after a transient
 ClickHouse failure. {AUTOMATED_RESPONSE_STYLE}
@@ -116,17 +117,27 @@ Selection rules:
    checks pass, use those rows and do not invoke the calculator. Otherwise recalculate once using
    the direct-library procedure below and verify the fresh rows.
    Never determine eligibility from stale cached results, partial results, or merely same-day rows.
-   Apply a
-   strict, fail-closed pending-trials gate to that candidate. An
-   experiment is eligible only when `pending trials, %` is present and strictly below 5% in every
-   applicable variation row for every configured client and segment. A value equal to or above 5%,
-   or a missing, null, stale, failed, or unverifiable value, excludes only that candidate before any
-   Results/Insights/Decision generation and before any Confluence or Jira write. When a candidate
+   Apply a strict, fail-closed pending-trials gate to that candidate. Evaluate every configured
+   client and segment independently across all of its applicable variation rows. That client +
+   segment passes when either (a) `pending trials, %` is present and strictly below 5% in every
+   variation, or (b) fresh `pending_trial_cnt` and `access_trial_cnt` rows are present for every
+   variation and the sum of `pending_trial_cnt` across those variations is strictly below
+   {PENDING_TRIALS_SMALL_COUNT_LIMIT}. This small-count exception is an absolute tolerance, not a
+   replacement percentage: never combine clients or segments, and a total equal to
+   {PENDING_TRIALS_SMALL_COUNT_LIMIT} is not exempt. Missing, null, stale, failed, or unverifiable
+   counts exclude the candidate; when the summed count is {PENDING_TRIALS_SMALL_COUNT_LIMIT} or
+   higher, any missing/null pending share or any share equal to or above 5% also excludes it. Apply
+   the same rule to bandit arms. When a candidate
    is excluded by this gate, continue to the next candidate in the ordered pool and calculate its
    fresh maturity data. Stop iterating at the first candidate that passes every eligibility rule;
    select and finalise exactly that experiment. Pending charges are explicitly not an eligibility
    condition: report incomplete charge maturity as a caveat in the published Results/Insights, but
-   do not exclude an otherwise eligible experiment for it. Only if every candidate in the pool has
+   do not exclude an otherwise eligible experiment for it. If the small-count exception is used,
+   the published Results/Insights must name the affected client + segment, total pending count,
+   total access-trial count, maximum branch share, and the {PENDING_TRIALS_SMALL_COUNT_LIMIT}-trial
+   threshold; describe trial-to-charge and trial-derived money metrics as low-sample and still
+   maturing, without labelling the whole experiment preliminary solely for that exception. Only if
+   every candidate in the pool has
    been checked and excluded may you return exactly `{NO_OP_NOTIFICATION}` and nothing else. Do not
    treat this expected no-op as an error.
 9. Immediately before any write, re-fetch the UGM allowlist and experiment title and re-check both

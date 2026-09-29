@@ -16,6 +16,7 @@ from sloperator.config import Settings
 from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
     NO_OP_NOTIFICATION,
+    PENDING_TRIALS_SMALL_COUNT_LIMIT,
     REVIEW_PROMPT,
     START_PROMPT,
     InvalidFinalizationNotification,
@@ -127,7 +128,13 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "before any\n   calculator invocation" in FINALIZATION_PROMPT
     assert "strict, fail-closed pending-trials gate" in FINALIZATION_PROMPT
     assert "strictly below 5%" in FINALIZATION_PROMPT
-    assert "every configured client and segment" in FINALIZATION_PROMPT
+    assert PENDING_TRIALS_SMALL_COUNT_LIMIT == 10
+    assert "sum of `pending_trial_cnt`" in FINALIZATION_PROMPT
+    assert "strictly below\n   10" in FINALIZATION_PROMPT
+    assert "a total equal to\n   10 is not exempt" in FINALIZATION_PROMPT
+    assert "never combine clients or segments" in FINALIZATION_PROMPT
+    assert "trial-derived money metrics as low-sample and still" in FINALIZATION_PROMPT
+    assert "every configured\n   client and segment" in FINALIZATION_PROMPT
     assert "from stale cached results" in FINALIZATION_PROMPT
     assert "complete successful calculation from the current calendar date" in FINALIZATION_PROMPT
     assert 'set_setting("autogenerate_session_id", False)' in FINALIZATION_PROMPT
@@ -135,7 +142,7 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "stop immediately" in FINALIZATION_PROMPT
     assert "calculator, do not" in FINALIZATION_PROMPT
     assert "continue to the next candidate" in FINALIZATION_PROMPT
-    assert "Only if every candidate in the pool has" in FINALIZATION_PROMPT
+    assert "Only if\n   every candidate in the pool has" in FINALIZATION_PROMPT
     assert "treat this expected no-op as an error" in FINALIZATION_PROMPT
     assert "once for each preliminary candidate in rule 7 until one passes" in FINALIZATION_PROMPT
     assert "Results → Insights → Decision / Next steps" in FINALIZATION_PROMPT

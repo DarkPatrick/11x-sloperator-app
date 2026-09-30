@@ -19,6 +19,8 @@ CONFLUENCE = WORKSPACE / ".claude/confluence/confluence_page.py"
 ISSUE = re.compile(r"UMN-\d+\Z")
 PAGE = re.compile(r"\d+\Z")
 MAX_TAIL = 3000
+LONG_COMMAND_TIMEOUT_SECONDS = 3_600
+LONG_COMMAND_BASH_TIMEOUT_MS = 3_660_000
 CLI = "/home/egor/projects/11x-sloperator-app/.venv/bin/python -m sloperator.experiment_agent_tools"
 
 
@@ -32,9 +34,11 @@ It prints brief facts and snapshot paths. Read needed passages with
 `{CLI} excerpt --file <text_path> --find <heading-or-id>`; repeat for a few exact headings or IDs.
 Never dump the whole page into the conversation. Re-fetch immediately before writes and after
 publication.
-For long local calculations, run `{CLI} wait --timeout 540 -- <command> <args>` as one synchronous
-Bash call with a 600000 ms Bash timeout. The wrapper saves full logs and returns a bounded final
-result. Do not launch background jobs, sleep, or poll for progress through repeated Bash calls.
+For long local calculations, run
+`{CLI} wait --timeout {LONG_COMMAND_TIMEOUT_SECONDS} -- <command> <args>` as one synchronous
+Bash call with a {LONG_COMMAND_BASH_TIMEOUT_MS} ms Bash timeout. The wrapper saves full logs and
+returns a bounded final result. Do not launch background jobs, sleep, or poll for progress through
+repeated Bash calls.
 """
 
 
@@ -190,7 +194,7 @@ def main() -> int:
     context.add_argument("--issue", action="append", required=True)
     context.add_argument("--timeout", type=int, default=90)
     waiting = sub.add_parser("wait")
-    waiting.add_argument("--timeout", type=int, default=540)
+    waiting.add_argument("--timeout", type=int, default=LONG_COMMAND_TIMEOUT_SECONDS)
     waiting.add_argument("command", nargs=argparse.REMAINDER)
     snippet = sub.add_parser("excerpt")
     snippet.add_argument("--file", required=True)

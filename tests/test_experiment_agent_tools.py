@@ -8,7 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from sloperator.experiment_agent_tools import _issue_brief, excerpt, gather, wait_for
+from sloperator.experiment_agent_tools import (
+    LONG_COMMAND_BASH_TIMEOUT_MS,
+    LONG_COMMAND_TIMEOUT_SECONDS,
+    _issue_brief,
+    agent_instructions,
+    excerpt,
+    gather,
+    wait_for,
+)
+
+
+def test_agent_instructions_allow_full_experiment_recalculation() -> None:
+    instructions = agent_instructions("123", "UMN-456")
+    assert f"wait --timeout {LONG_COMMAND_TIMEOUT_SECONDS}" in instructions
+    assert f"{LONG_COMMAND_BASH_TIMEOUT_MS} ms Bash timeout" in instructions
+    assert LONG_COMMAND_TIMEOUT_SECONDS >= 3_600
 
 
 def test_issue_brief_excludes_large_description() -> None:

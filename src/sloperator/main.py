@@ -108,7 +108,7 @@ from sloperator.experiment_finalizer import (
     is_reviewer_result as is_finalization_reviewer_result,
 )
 from sloperator.experiment_finalizer import (
-    run_preparation as run_finalization_preparation,
+    run_preparation_from_started_run as run_finalization_preparation,
 )
 from sloperator.experiment_finalizer import (
     run_review as run_finalization_review,
@@ -279,8 +279,8 @@ async def serve(settings: Settings) -> None:
                     await run_finalization_preparation(app.client, orchestrator, settings, run)
                 else:
                     await publish_run(app.client, orchestrator, settings, run)
-            except InvalidFinalizationNotification as error:
-                LOGGER.error("Recovered experiment finalizer returned an invalid interim response")
+            except (InvalidFinalizationNotification, SelectionError) as error:
+                LOGGER.error("Recovered experiment finalizer could not continue: %s", error)
                 if run.run_id is not None:
                     await asyncio.to_thread(
                         store.finish_scheduled_agent_run,
@@ -295,7 +295,7 @@ async def serve(settings: Settings) -> None:
                     channel=conversation["channel"]["id"],
                     markdown_text=(
                         f"<@{settings.slack_user_id}> ⚠️ Experiment finalizer остановлен: "
-                        "после восстановления агент вернул промежуточный, но не финальный "
+                        "восстановленный запуск не прошёл проверку или вернул нефинальный "
                         "результат. Сервис продолжает работать; задачу нужно запустить повторно."
                     ),
                 )

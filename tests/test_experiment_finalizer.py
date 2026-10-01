@@ -29,6 +29,7 @@ from sloperator.experiment_finalizer import (
     normalize_finalization_notification,
     recover_missing_project_page,
     run_once,
+    run_preparation_from_started_run,
     validate_started_page,
 )
 
@@ -270,6 +271,28 @@ async def test_run_once_posts_once_and_attaches_resumable_session(monkeypatch) -
     attached_run = agent.attach_session.await_args.args[2]
     assert attached_run.text == VALID_NOTIFICATION.strip()
     assert attached_run.session_id == review_run.session_id
+
+
+async def test_recovered_start_resolves_page_before_preparation(monkeypatch) -> None:
+    validate = AsyncMock(return_value="838613487")
+    prepare = AsyncMock(return_value="published")
+    monkeypatch.setattr("sloperator.experiment_finalizer.validate_started_page", validate)
+    monkeypatch.setattr("sloperator.experiment_finalizer.run_preparation", prepare)
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    agent = SimpleNamespace()
+    settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
+    start_run = HeadlessAgentRun(
+        "claude",
+        "opus",
+        "reviewer-session",
+        f"FINALIZATION_STARTED: 7607 | {PAGE_URL} | Iteration 3 | UMN-13000",
+    )
+
+    result = await run_preparation_from_started_run(client, agent, settings, start_run)
+
+    assert result == "published"
+    validate.assert_awaited_once_with(settings, start_run.text)
+    prepare.assert_awaited_once_with(client, agent, settings, start_run, "838613487")
 
 
 async def test_worker_private_handoff_reaches_reviewer(monkeypatch) -> None:

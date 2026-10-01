@@ -579,6 +579,16 @@ async def run_once(
         return await publish_run(client, agent, settings, no_op_run)
     if STARTED_RE.fullmatch(start_run.text.strip()) is None:
         raise InvalidFinalizationNotification(start_run.text)
+    return await run_preparation_from_started_run(client, agent, settings, start_run)
+
+
+async def run_preparation_from_started_run(
+    client: AsyncWebClient,
+    agent: AgentSubmitter,
+    settings: Settings,
+    start_run: HeadlessAgentRun,
+) -> str:
+    """Validate a reviewer start before handing it to the preparation agent."""
     try:
         project_page_id = await validate_started_page(settings, start_run.text)
     except SelectionError as error:

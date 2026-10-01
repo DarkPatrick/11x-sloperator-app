@@ -183,7 +183,7 @@ async def start_task_with_reviewer(agent: Any, task_key: str, link: dict[str, An
         reviewer_start_prompt(task_key), 7200, job_name="jira-task-reviewer",
         existing_session_id=link.get("reviewer_session_id"),
     )
-    ready = result.text.strip().splitlines()[-1:] == ["TASK_READY"]
+    ready = str(result.text).strip().splitlines()[-1:] == ["TASK_READY"]
     agent.store.upsert_jira_task_agent_link(
         task_key, reviewer_session_id=result.session_id,
         phase="worker" if ready else "waiting",
@@ -294,7 +294,7 @@ async def should_handle_jira_comment(
         prompt, 180, job_name="jira-comment-reply-decision",
         workspace=workspace,
     )
-    return result.text.strip() == "REPLY"
+    return str(result.text).strip() == "REPLY"
 
 
 async def should_handle_confluence_comment(
@@ -317,7 +317,7 @@ async def should_handle_confluence_comment(
         prompt, 180, job_name="confluence-comment-reply-decision",
         workspace=workspace,
     )
-    return result.text.strip() == "REPLY"
+    return str(result.text).strip() == "REPLY"
 
 async def abuse_precheck(settings: Settings, summary: str, comments: list[dict[str, Any]]) -> bool:
     trusted = []
@@ -396,9 +396,10 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
                     worker_prompt(task.key, task.summary, task.description), 7200, job_name="jira-task-worker",
                     existing_session_id=(link or {}).get("worker_session_id"),
                 )
+                page_match = PAGE_RE.search(str(worker.text))
                 agent.store.upsert_jira_task_agent_link(
                     task.key, worker_session_id=worker.session_id, phase="reviewer",
-                    confluence_page_url=(PAGE_RE.search(worker.text).group(1) if PAGE_RE.search(worker.text) else None),
+                    confluence_page_url=page_match.group(1) if page_match else None,
                 )
                 reviewer = await agent.execute_once(
                     reviewer_prompt(task.key, task.description) + f"\n\nWorker handoff:\n{worker.text}",
@@ -519,6 +520,7 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                         if not await should_handle_confluence_comment(
                             agent, task, page_context, page_target, page_comments
                         ):
+                            assert latest_page_activity is not None
                             LOGGER.info(
                                 "Confluence comment %s for %s does not need an agent reply",
                                 page_target["id"], task.key,
@@ -575,9 +577,10 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                             job_name="jira-task-worker",
                             existing_session_id=link.get("worker_session_id"),
                         )
+                        page_match = PAGE_RE.search(str(worker.text))
                         agent.store.upsert_jira_task_agent_link(
                             task.key, worker_session_id=worker.session_id, phase="reviewer",
-                            confluence_page_url=(PAGE_RE.search(worker.text).group(1) if PAGE_RE.search(worker.text) else None),
+                            confluence_page_url=page_match.group(1) if page_match else None,
                         )
                         handoff = "\n\nPrivate worker handoff:\n" + worker.text
                         link = agent.store.jira_task_agent_link(task.key)

@@ -73,8 +73,8 @@ class SlackMentionResolver:
         candidates: dict[str, set[str]] = {}
         cursor = ""
         while True:
-            response = await client.users_list(limit=200, **({"cursor": cursor} if cursor else {}))
-            members = response.get("members", [])
+            response = await client.users_list(limit=200, cursor=cursor or None)
+            members: Any = response.get("members", [])
             if isinstance(members, list):
                 for member in members:
                     if (
@@ -101,7 +101,7 @@ class SlackMentionResolver:
                         # have at least two words; display-name-only users remain plain text.
                         if len(alias) >= 5 and " " in alias:
                             candidates.setdefault(alias, set()).add(user_id)
-            metadata = response.get("response_metadata", {})
+            metadata: Any = response.get("response_metadata", {})
             next_cursor = metadata.get("next_cursor") if isinstance(metadata, dict) else None
             cursor = next_cursor.strip() if isinstance(next_cursor, str) else ""
             if not cursor:

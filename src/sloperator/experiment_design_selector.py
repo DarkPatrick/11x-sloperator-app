@@ -6,7 +6,7 @@ import datetime as dt
 import json
 import re
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
@@ -196,7 +196,7 @@ class JiraRestReader:
         return key
 
 
-def _strings_in(value: Any):
+def _strings_in(value: Any) -> Iterator[str]:
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):

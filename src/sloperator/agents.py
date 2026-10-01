@@ -661,12 +661,12 @@ async def fetch_thread_context(
                 channel=channel_id,
                 ts=thread_ts,
                 limit=min(100, THREAD_CONTEXT_LIMIT - len(messages)),
-                **({"cursor": cursor} if cursor else {}),
+                cursor=cursor,
             )
-            page = response.get("messages", [])
+            page: Any = response.get("messages", [])
             if isinstance(page, list):
                 messages.extend(item for item in page if isinstance(item, dict))
-            metadata = response.get("response_metadata", {})
+            metadata: Any = response.get("response_metadata", {})
             next_cursor = metadata.get("next_cursor") if isinstance(metadata, dict) else None
             cursor = next_cursor.strip() if isinstance(next_cursor, str) else ""
             if not cursor or not page:
@@ -680,7 +680,7 @@ async def fetch_thread_context(
     for user_id in sorted(user_ids):
         try:
             response = await client.users_info(user=user_id)
-            user = response.get("user", {})
+            user: Any = response.get("user", {})
             profile = user.get("profile", {}) if isinstance(user, dict) else {}
             display_name = profile.get("display_name") if isinstance(profile, dict) else None
             real_name = profile.get("real_name") if isinstance(profile, dict) else None

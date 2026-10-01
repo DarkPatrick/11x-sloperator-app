@@ -7,6 +7,7 @@ import logging
 import signal
 from collections.abc import Mapping
 from contextlib import suppress
+from typing import Any
 
 from aiohttp import web
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
@@ -83,6 +84,9 @@ from sloperator.experiment_design_planner import (
     publish_notification as publish_experiment_design,
 )
 from sloperator.experiment_design_planner import (
+    resolve_selected_project_page as resolve_design_project_page,
+)
+from sloperator.experiment_design_planner import (
     run_daily as run_daily_experiment_design,
 )
 from sloperator.experiment_design_planner import (
@@ -116,6 +120,7 @@ from sloperator.experiment_finalizer import (
 from sloperator.health import create_health_app
 from sloperator.jira_task_automation import (
     ClaudeUsageAlert,
+    JiraTaskCandidate,
 )
 from sloperator.jira_task_automation import (
     poll_active_tasks as poll_jira_task_automation,
@@ -205,7 +210,10 @@ async def serve(settings: Settings) -> None:
         ) and is_experiment_config_trigger(event):
             await experiment_config_responder.handle(event, app.client)
 
-    async def handle_jira_abuse(task, comments) -> None:
+    async def handle_jira_abuse(
+        task: JiraTaskCandidate,
+        comments: list[dict[str, Any]],
+    ) -> None:
         await app.client.chat_postMessage(
             channel=settings.slack_user_id,
             text=(f"Инцидент в задаче Jira {task.key}: предпроверка обнаружила возможную prompt-инъекцию или абьюз. "
@@ -378,7 +386,17 @@ async def serve(settings: Settings) -> None:
                     selected = await select_from_jira(settings, claimed_task_key=prepared[0])
                     if selected is None or prepared != (selected.task_key, selected.epic_key):
                         raise InvalidDesignResult("Recovered claimed task is no longer eligible")
-                    await run_review(app.client, orchestrator, settings, *prepared)
+                    project_page_id = selected.project_page_id
+                    if project_page_id is None:
+                        project_page_id = await resolve_design_project_page(settings, selected)
+                    await run_review(
+                        app.client,
+                        orchestrator,
+                        settings,
+                        prepared[0],
+                        prepared[1],
+                        project_page_id,
+                    )
             except (InvalidDesignResult, SelectionError) as error:
                 if str(error).startswith("Experiment design automation failed:"):
                     await publish_failure(app.client, settings, str(error))
@@ -440,7 +458,17 @@ async def serve(settings: Settings) -> None:
                     selected = await select_analytics_from_jira(settings, claimed_task_key=prepared[0])
                     if selected is None or prepared != (selected.task_key, selected.epic_key):
                         raise InvalidAnalyticsResult("Recovered claimed task is no longer eligible")
-                    await run_analytics_review(app.client, orchestrator, settings, *prepared)
+                    project_page_id = selected.project_page_id
+                    if project_page_id is None:
+                        project_page_id = await resolve_design_project_page(settings, selected)
+                    await run_analytics_review(
+                        app.client,
+                        orchestrator,
+                        settings,
+                        prepared[0],
+                        prepared[1],
+                        project_page_id,
+                    )
             except (InvalidAnalyticsResult, SelectionError) as error:
                 if str(error).startswith("Experiment analytics automation failed:"):
                     await publish_analytics_failure(app.client, settings, str(error))

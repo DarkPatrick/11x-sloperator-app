@@ -65,7 +65,8 @@ def _merge_attached_scheduled_sessions(
             merged.append(session)
             continue
 
-        attached_external_ids.add(external_id)
+        if isinstance(external_id, str):
+            attached_external_ids.add(external_id)
         item = dict(session)
         item["channel_name"] = f"{scheduled['channel_name']} → {session['channel_name']}"
         item["created_at"] = scheduled["created_at"]

@@ -139,6 +139,7 @@ class AgentSubmitter(Protocol):
         require_artifact: bool = False,
         automated: bool = False,
         timeout_seconds: int | None = None,
+        agent_name: str | None = None,
         reuse_key: str | None = None,
         reuse_mention_line: str | None = None,
     ) -> Awaitable[object]: ...

@@ -83,7 +83,7 @@ class TranscriptBudget:
 
     async def run[T](self, operation: Callable[[], Awaitable[T]], *, interval: float = 2) -> T:
         await asyncio.to_thread(self.check)
-        task = asyncio.create_task(operation())
+        task: asyncio.Future[T] = asyncio.ensure_future(operation())
         try:
             while not task.done():
                 await asyncio.wait({task}, timeout=interval)

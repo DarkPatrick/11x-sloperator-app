@@ -151,6 +151,9 @@ async def test_planner_activity_resumes_only_for_human_requests(
     monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))
     monkeypatch.setattr(automation, "weekly_quota_allows_launch", lambda *args, **kwargs: True)
     monkeypatch.setattr(automation, "abuse_precheck", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        automation, "should_handle_jira_comment", AsyncMock(return_value=True)
+    )
     monkeypatch.setattr(automation.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
     agent = SimpleNamespace(
         store=store,
@@ -205,12 +208,16 @@ async def test_confluence_followup_requires_new_human_comment(
     )
     monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
     monkeypatch.setattr(automation, "read_confluence_comments", AsyncMock(return_value=[{
+        "id": "page-comment",
         "author": {"accountId": author},
         "created": (baseline + dt.timedelta(seconds=seconds_after_baseline)).isoformat(),
     }]))
     monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))
     monkeypatch.setattr(automation, "weekly_quota_allows_launch", lambda *args, **kwargs: True)
     monkeypatch.setattr(automation, "abuse_precheck", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        automation, "should_handle_confluence_comment", AsyncMock(return_value=True)
+    )
     monkeypatch.setattr(automation.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
     agent = SimpleNamespace(
         store=store,

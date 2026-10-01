@@ -227,6 +227,9 @@ async def test_run_once_posts_once_and_attaches_resumable_session(monkeypatch) -
         AsyncMock(return_value="838613487"),
     )
     client = SimpleNamespace(
+        conversations_history=AsyncMock(
+            return_value={"messages": [], "response_metadata": {"next_cursor": ""}}
+        ),
         chat_postMessage=AsyncMock(return_value={"channel": "DOWNER", "ts": "100.1"}),
     )
     prep_run = HeadlessAgentRun(
@@ -271,6 +274,37 @@ async def test_run_once_posts_once_and_attaches_resumable_session(monkeypatch) -
     attached_run = agent.attach_session.await_args.args[2]
     assert attached_run.text == VALID_NOTIFICATION.strip()
     assert attached_run.session_id == review_run.session_id
+
+
+async def test_publish_run_skips_existing_experiment_notification() -> None:
+    from sloperator.experiment_finalizer import publish_run
+
+    existing_text = (
+        "<https://alice.mu.se/pages/viewpage.action?pageId=838613487|Project> — "
+        "experiment <https://www.ultimate-guitar.com/components/ab/experiment/view?id=7607|7607>, "
+        "Iteration 3. Results calculated and published."
+    )
+    client = SimpleNamespace(
+        conversations_history=AsyncMock(return_value={
+            "messages": [{"ts": "100.1", "text": existing_text}],
+            "response_metadata": {"next_cursor": ""},
+        }),
+        chat_postMessage=AsyncMock(),
+    )
+    agent = SimpleNamespace(attach_session=AsyncMock())
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        experiment_finalizer_channel="CFINAL",
+    )
+    run = HeadlessAgentRun("claude", "opus", "session-1", VALID_NOTIFICATION)
+
+    result = await publish_run(client, agent, settings, run)
+
+    assert result == VALID_NOTIFICATION.strip()
+    client.chat_postMessage.assert_not_awaited()
+    agent.attach_session.assert_not_awaited()
 
 
 async def test_recovered_start_resolves_page_before_preparation(monkeypatch) -> None:

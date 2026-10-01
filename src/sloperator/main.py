@@ -284,7 +284,20 @@ async def serve(settings: Settings) -> None:
         for run in recovered_headless:
             try:
                 if FINALIZATION_STARTED_RE.fullmatch(run.text.strip()):
-                    await run_finalization_preparation(app.client, orchestrator, settings, run)
+                    preparation_exists = await asyncio.to_thread(
+                        store.has_scheduled_agent_run_with_prompt_marker,
+                        "experiment-finalizer-preparer",
+                        run.text.strip(),
+                    )
+                    if preparation_exists:
+                        LOGGER.warning(
+                            "Recovered experiment finalizer start already has a preparation; "
+                            "skipping duplicate handoff"
+                        )
+                    else:
+                        await run_finalization_preparation(
+                            app.client, orchestrator, settings, run
+                        )
                 else:
                     await publish_run(app.client, orchestrator, settings, run)
             except (InvalidFinalizationNotification, SelectionError) as error:

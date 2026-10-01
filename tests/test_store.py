@@ -399,6 +399,30 @@ def test_scheduler_history_is_not_limited_by_recent_agent_sessions(tmp_path: Pat
     history = store.scheduled_run_history()
     assert len(history) == 105
     assert any(row["channel_name"] == "experiment-finalizer" for row in history)
+
+
+def test_scheduled_prompt_marker_detects_existing_workflow_handoff(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    marker = (
+        "FINALIZATION_STARTED: 7952 | https://alice.mu.se/pages/828886205 | "
+        "Iteration 1 | UMN-12779"
+    )
+    store.create_scheduled_agent_run(
+        "prep-1",
+        "experiment-finalizer-preparer",
+        "claude",
+        "opus",
+        "session-1",
+        "Preparation prompt\nReviewer verified start:\n" + marker,
+    )
+
+    assert store.has_scheduled_agent_run_with_prompt_marker(
+        "experiment-finalizer-preparer", marker
+    )
+    assert not store.has_scheduled_agent_run_with_prompt_marker(
+        "experiment-finalizer-reviewer", marker
+    )
 def test_jira_task_agent_link_is_durable(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "tasks.sqlite3")
     store.initialize()

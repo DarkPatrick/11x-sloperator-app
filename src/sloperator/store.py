@@ -1938,6 +1938,24 @@ class EventStore:
             for row in rows
         ]
 
+    def has_scheduled_agent_run_with_prompt_marker(
+        self,
+        job_name: str,
+        marker: str,
+    ) -> bool:
+        """Return whether a workflow handoff already created its downstream run."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM scheduled_agent_runs
+                WHERE job_name = ? AND instr(prompt, ?) > 0
+                LIMIT 1
+                """,
+                (job_name, marker),
+            ).fetchone()
+        return row is not None
+
     def channel_map(self) -> list[tuple[str, str | None, str, bool]]:
         """Return channel identifiers and membership without message content."""
         with self._connect() as connection:

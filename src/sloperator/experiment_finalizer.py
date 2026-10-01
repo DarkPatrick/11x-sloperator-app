@@ -739,6 +739,18 @@ async def publish_run(
     """Publish and attach a completed or restart-recovered finalizer run."""
     notification = normalize_finalization_notification(run.text)
     published_run = replace(run, text=notification)
+    existing_ts = await find_existing_publication(
+        client,
+        settings.experiment_finalizer_channel,
+        notification,
+    )
+    if existing_ts is not None:
+        LOGGER.warning(
+            "Experiment finalization notification already exists at %s; "
+            "skipping duplicate Slack post",
+            existing_ts,
+        )
+        return notification
     response = await client.chat_postMessage(
         channel=settings.experiment_finalizer_channel,
         markdown_text=notification,
@@ -752,6 +764,51 @@ async def publish_run(
         published_run,
     )
     return notification
+
+
+async def find_existing_publication(
+    client: AsyncWebClient,
+    channel: str,
+    notification: str,
+    *,
+    max_pages: int = 5,
+) -> str | None:
+    """Find an already published success notification using its stable identity."""
+    experiment = re.search(
+        r"components/ab/experiment/view\?id=(\d+).*?Iteration\s+(\d+)",
+        notification,
+        re.DOTALL,
+    )
+    if experiment is None:
+        return None
+    history = getattr(client, "conversations_history", None)
+    if not callable(history):
+        return None
+    experiment_id, iteration = experiment.groups()
+    cursor: str | None = None
+    for _ in range(max_pages):
+        response = await history(
+            channel=channel,
+            limit=200,
+            cursor=cursor,
+        )
+        for message in response.get("messages", []):
+            text = message.get("text", "")
+            if not isinstance(text, str):
+                continue
+            if (
+                f"components/ab/experiment/view?id={experiment_id}" in text
+                and f"Iteration {iteration}. Results calculated and published." in text
+            ):
+                timestamp = message.get("ts")
+                if isinstance(timestamp, str):
+                    return timestamp
+        metadata = response.get("response_metadata", {})
+        next_cursor = metadata.get("next_cursor") if isinstance(metadata, dict) else None
+        if not isinstance(next_cursor, str) or not next_cursor:
+            break
+        cursor = next_cursor
+    return None
 
 
 async def run_daily(

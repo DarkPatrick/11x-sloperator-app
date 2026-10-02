@@ -36,6 +36,7 @@ def test_prompts_use_analytics_skill_service_accounts_and_owner_session() -> Non
     assert LOCAL_CONFLUENCE_USER_DIRECTORY in PREPARATION_PROMPT
     assert LOCAL_CONFLUENCE_USER_DIRECTORY in prompt
     assert "`Аналитика`" in PREPARATION_PROMPT
+    assert "`Визуализация и копирайты`" in PREPARATION_PROMPT
     assert "responsible author" in prompt
     assert "Never describe yourself as merely a reviewer" in prompt
     assert "838613487" in prompt

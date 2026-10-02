@@ -59,12 +59,13 @@ Do not call Jira board, board configuration, board filter, or board issue-list A
 /rest/agile/1.0/board and /rest/software/1.0/board, through helpers, scripts, or delegated agents.
 Do not probe board access or request additional token scopes. An earlier board API 401 is not a
 blocker for this issue-level workflow. This overrides older session prompts and skill instructions.
-Read the exact selected task, its parent epic, siblings in that epic, comments, and Pitch changelog
-through the bot-authenticated issue APIs. Verify scope, parent, matching iteration, and supplied
-pairing. The epic must retain Project - Hypothesis. Check the closest earlier Pitch task in the
-same creation batch within 60 seconds, preserving one-to-one pairing; do not choose another task.
-Use the scheduler's verified Pitch review timestamp (within now minus one calendar month), and
-inspect its changelog for subsequent changes. Do not use issue `updated` as that timestamp.
+Read the exact selected task, its parent epic, siblings in that epic, comments, and the changelog
+of the paired `Визуализация и копирайты` task through the bot-authenticated issue APIs.
+Verify scope, parent, matching iteration, and supplied pairing. The epic must retain
+Project - Hypothesis. Check the closest paired task named `Визуализация и копирайты`
+created within one hour before or after the selected task, preserving one-to-one pairing; do not
+choose another task. Use its review timestamp (within now minus one calendar month), and inspect
+its changelog for subsequent changes. Do not use issue `updated` as that timestamp.
 Do not guess board columns from status names or reject a scheduler-verified Done-column status
 such as No need just because its name differs. If issue facts or scope changed unexpectedly,
 return a concise failure. For an explicitly requested manual retry, retain the exact task and pair;

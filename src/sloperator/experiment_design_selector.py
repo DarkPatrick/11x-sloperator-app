@@ -17,10 +17,10 @@ from aiohttp import BasicAuth, ClientSession, ClientTimeout
 BOARD_ID = 175
 BOARD_TIMEZONE = "Asia/Nicosia"
 EPIC_COMPONENT = "Project - Hypothesis"
-PITCH_TITLE = "проектирование и питч"
+PREREQUISITE_TITLE = "визуализация и копирайты"
 CALCULATION_TITLE = "расчет сверху и план тестирования"
 ANALYTICS_TITLE = "аналитика"
-PAIR_WINDOW_SECONDS = 60
+PAIR_WINDOW_SECONDS = 60 * 60
 
 
 class SelectionError(RuntimeError):
@@ -381,7 +381,7 @@ def _pair_children(children: list[Issue], task_title: str) -> list[tuple[Issue, 
     pairs: list[tuple[Issue, Issue]] = []
     for parent_key in sorted({issue.parent_key for issue in children if issue.parent_key}):
         siblings = [issue for issue in children if issue.parent_key == parent_key]
-        pitches = [issue for issue in siblings if PITCH_TITLE in _normalize(issue.summary)]
+        pitches = [issue for issue in siblings if PREREQUISITE_TITLE in _normalize(issue.summary)]
         calculations = [issue for issue in siblings if task_title in _normalize(issue.summary)]
         used: set[str] = set()
         for calculation in sorted(calculations, key=lambda issue: (issue.created_at, issue.key)):
@@ -389,19 +389,20 @@ def _pair_children(children: list[Issue], task_title: str) -> list[tuple[Issue, 
                 pitch
                 for pitch in pitches
                 if pitch.key not in used
-                and 0
-                <= (calculation.created_at - pitch.created_at).total_seconds()
+                and abs((calculation.created_at - pitch.created_at).total_seconds())
                 <= PAIR_WINDOW_SECONDS
             ]
             if not options:
                 continue
             closest_seconds = min(
-                (calculation.created_at - pitch.created_at).total_seconds() for pitch in options
+                abs((calculation.created_at - pitch.created_at).total_seconds())
+                for pitch in options
             )
             closest = [
                 pitch
                 for pitch in options
-                if (calculation.created_at - pitch.created_at).total_seconds() == closest_seconds
+                if abs((calculation.created_at - pitch.created_at).total_seconds())
+                == closest_seconds
             ]
             if len(closest) != 1:
                 continue

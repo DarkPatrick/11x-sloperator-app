@@ -219,9 +219,9 @@ async def test_selects_oldest_eligible_pair_deterministically() -> None:
         children=[
             raw_issue(
                 "UMN-101",
-                "Проектирование и Питч — first",
+                "Визуализация и копирайты — first",
                 "5",
-                "2026-08-01T10:00:00Z",
+                "2026-08-01T10:01:00Z",
                 parent="UMN-100",
             ),
             raw_issue(
@@ -233,7 +233,7 @@ async def test_selects_oldest_eligible_pair_deterministically() -> None:
             ),
             raw_issue(
                 "UMN-103",
-                "Проектирование и Питч — second",
+                "Визуализация и копирайты — second",
                 "4",
                 "2026-08-02T10:00:00Z",
                 parent="UMN-100",
@@ -267,7 +267,7 @@ async def test_selects_oldest_eligible_pair_deterministically() -> None:
     next_queued = await select_candidate(jira, now=NOW)
     assert next_queued is not None and next_queued.task_key == "UMN-104"
     assert await select_candidate(jira, now=NOW, claimed_task_key="UMN-102") == candidate
-    # Claiming does not bypass the pitch's review-age eligibility gate.
+    # Claiming does not bypass the prerequisite task's review-age eligibility gate.
     jira.changelogs["UMN-101"] = [transition("2026-07-01T12:00:00Z", "5")]
     assert await select_candidate(jira, now=NOW, claimed_task_key="UMN-102") is None
 
@@ -287,7 +287,7 @@ async def test_can_select_analytics_task_with_the_same_pairing_rules() -> None:
         children=[
             raw_issue(
                 "UMN-201",
-                "Проектирование и Питч — iteration 2",
+                "Визуализация и копирайты — iteration 2",
                 "5",
                 "2026-08-20T10:00:00Z",
                 parent="UMN-200",
@@ -313,6 +313,41 @@ async def test_can_select_analytics_task_with_the_same_pairing_rules() -> None:
     )
 
 
+async def test_old_pitch_task_no_longer_unlocks_work() -> None:
+    jira = FakeJira(
+        epics=[
+            raw_issue(
+                "UMN-200",
+                "Epic",
+                "3",
+                "2026-08-01T00:00:00Z",
+                issue_type="Epic",
+                components=("Project - Hypothesis",),
+            )
+        ],
+        children=[
+            raw_issue(
+                "UMN-201",
+                "Проектирование и Питч",
+                "5",
+                "2026-08-20T10:00:00Z",
+                parent="UMN-200",
+            ),
+            raw_issue(
+                "UMN-202",
+                "Аналитика",
+                "1",
+                "2026-08-20T10:00:30Z",
+                parent="UMN-200",
+            ),
+        ],
+        changelogs={"UMN-201": [transition("2026-08-25T12:00:00Z", "5")]},
+    )
+
+    assert await select_candidate(jira, now=NOW, task_title="Аналитика") is None
+    assert jira.requested_changelogs == []
+
+
 async def test_excludes_old_transition_wrong_columns_and_pair_outside_window() -> None:
     jira = FakeJira(
         epics=[
@@ -327,17 +362,17 @@ async def test_excludes_old_transition_wrong_columns_and_pair_outside_window() -
         ],
         children=[
             raw_issue(
-                "UMN-101", "Проектирование и Питч", "5", "2026-07-01T00:00:00Z", parent="UMN-100"
+                "UMN-101", "Визуализация и копирайты", "5", "2026-07-01T00:00:00Z", parent="UMN-100"
             ),
             raw_issue(
                 "UMN-102",
                 "Расчет сверху и план тестирования",
                 "1",
-                "2026-07-01T00:01:01Z",
+                "2026-07-01T01:00:01Z",
                 parent="UMN-100",
             ),
             raw_issue(
-                "UMN-103", "Проектирование и Питч", "5", "2026-08-01T00:00:00Z", parent="UMN-100"
+                "UMN-103", "Визуализация и копирайты", "5", "2026-08-01T00:00:00Z", parent="UMN-100"
             ),
             raw_issue(
                 "UMN-104",
@@ -353,7 +388,7 @@ async def test_excludes_old_transition_wrong_columns_and_pair_outside_window() -
     assert await select_candidate(jira, now=NOW) is None
 
 
-async def test_ambiguous_equidistant_pitch_pair_is_excluded() -> None:
+async def test_ambiguous_equidistant_prerequisite_pair_is_excluded() -> None:
     jira = FakeJira(
         epics=[
             raw_issue(
@@ -367,10 +402,18 @@ async def test_ambiguous_equidistant_pitch_pair_is_excluded() -> None:
         ],
         children=[
             raw_issue(
-                "UMN-101", "Проектирование и Питч A", "5", "2026-08-01T10:00:00Z", parent="UMN-100"
+                "UMN-101",
+                "Визуализация и копирайты A",
+                "5",
+                "2026-08-01T10:00:00Z",
+                parent="UMN-100",
             ),
             raw_issue(
-                "UMN-102", "Проектирование и Питч B", "5", "2026-08-01T10:00:00Z", parent="UMN-100"
+                "UMN-102",
+                "Визуализация и копирайты B",
+                "5",
+                "2026-08-01T10:00:00Z",
+                parent="UMN-100",
             ),
             raw_issue(
                 "UMN-103",

@@ -55,8 +55,9 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
     assert "ug-experiment-design-power" in PREPARATION_PROMPT
     assert "cannot\ncommunicate with a human" in PREPARATION_PROMPT
     assert "Project - Hypothesis" in PREPARATION_PROMPT
-    assert "closest earlier Pitch task" in PREPARATION_PROMPT
-    assert "within 60 seconds" in PREPARATION_PROMPT
+    assert "paired task named" in PREPARATION_PROMPT
+    assert "Визуализация и копирайты" in PREPARATION_PROMPT
+    assert "within one hour before or after" in PREPARATION_PROMPT
     assert "one-to-one pairing" in PREPARATION_PROMPT
     assert "Do not call Jira board" in PREPARATION_PROMPT
     assert "No need" in PREPARATION_PROMPT

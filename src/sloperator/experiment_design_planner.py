@@ -46,7 +46,7 @@ TASK_LINK_RE = re.compile(r"mu--se\.atlassian\.net/browse/(?P<task>UMN-\d+)")
 SELECTION_RULES = (
     ISSUE_SELECTION_POLICY
     + "\nSelected task kind: `Расчет сверху и план тестирования`; "
-    "paired task: `Проектирование и Питч`.\n"
+    "paired prerequisite task: `Визуализация и копирайты`.\n"
 )
 
 PREPARATION_PROMPT = f"""\
@@ -111,7 +111,7 @@ def preparation_prompt(candidate: DesignCandidate) -> str:
 Authoritative scheduler selection context:
 {candidate.to_json()}
 - calculation task: `{candidate.task_key}`
-- paired Pitch task: `{candidate.pitch_key}`
+- paired `Визуализация и копирайты` task: `{candidate.pitch_key}`
 - epic: `{candidate.epic_key}`
 - project page ID: `{candidate.project_page_id}`
 
@@ -134,7 +134,8 @@ def start_prompt(candidate: DesignCandidate) -> str:
 Authoritative scheduler selection context:
 {candidate.to_json()}
 
-Start only task {candidate.task_key}, paired Pitch {candidate.pitch_key}, epic {candidate.epic_key}.
+Start only task {candidate.task_key}, paired prerequisite {candidate.pitch_key},
+epic {candidate.epic_key}.
 {SELECTION_RULES}
 {REVIEWER_START_POLICY}
 Do not prepare the deliverable in this pass. After verifying the start, return exactly:

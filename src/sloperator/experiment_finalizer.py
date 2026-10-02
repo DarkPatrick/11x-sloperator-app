@@ -44,6 +44,7 @@ FAILURE_PREFIXES = (
 )
 TRANSIENT_CLICKHOUSE_RETRY_DELAYS = (30, 90, 180)
 PENDING_TRIALS_SMALL_COUNT_LIMIT = 10
+MATURITY_FORECAST_COMMENT_PREFIX = "Прогноз готовности к итогам:"
 TRANSIENT_CLICKHOUSE_RETRY_PROMPT = f"""[claude]
 This is an orchestrator-authorised retry of the same experiment-finalizer turn after a transient
 ClickHouse failure. {AUTOMATED_RESPONSE_STYLE}
@@ -140,12 +141,58 @@ Selection rules:
    every candidate in the pool has
    been checked and excluded may you return exactly `{NO_OP_NOTIFICATION}` and nothing else. Do not
    treat this expected no-op as an error.
-9. Immediately before any write, re-fetch the UGM allowlist and experiment title and re-check both
-   monetisation gates from rule 1, the actual end timestamp/client classification and age gate, the
-   admin/page conditions, and the strict pending-trials gate against the same fresh
-   calculation. If the experiment is no longer eligible, make no Confluence or Jira writes and
-   return exactly `{NO_OP_NOTIFICATION}` and nothing else. Keep filter/audit details internal.
+9. Immediately before any finalisation or publication write, re-fetch the UGM allowlist and
+   experiment title and re-check both monetisation gates from rule 1, the actual end
+   timestamp/client classification and age gate, the admin/page conditions, and the strict
+   pending-trials gate against the same fresh calculation. If the experiment is no longer
+   eligible, make no finalisation or publication writes and return exactly `{NO_OP_NOTIFICATION}`
+   and nothing else. The reviewer-selection pass has one separately defined exception for an
+   idempotent maturity forecast on an ineligible Results task. Keep filter/audit details internal.
 
+"""
+
+MATURITY_FORECAST_POLICY = f"""\
+Pending-trials maturity forecast for reviewer selection only:
+- When a preliminary candidate fails only the pending-trials gate in rule 8, calculate its earliest
+  expected eligibility date before continuing to the next candidate. Use the same package-derived
+  subscription source, identities, filters, distinct keys, client/segment/variation boundaries,
+  `first_charge_expected_dt`, `pending_trial_cnt`, and `access_trial_cnt` semantics as the fresh
+  production calculation. Do not estimate from aggregate trend or assume a uniform trial length.
+- Evaluate future scheduled finalizer runs at 12:00 Asia/Nicosia, weekdays only. For each run,
+  recompute the remaining pending trials from the row-level expected-charge timestamps. The
+  forecast date is the first scheduled run on which every client + segment is expected to pass the
+  production gate: either every applicable variation is strictly below 5%, or that client +
+  segment's summed pending count is strictly below {PENDING_TRIALS_SMALL_COUNT_LIMIT}. Also compute
+  the first scheduled date when every variation is strictly below 5% if the small-count exception
+  makes eligibility earlier. If row-level timestamps or denominators are missing or unverifiable,
+  make no forecast write for that candidate.
+- The user explicitly authorises exactly one forecast annotation on the exact queued Results task.
+  Before any write, re-fetch that task with status, `customfield_10312`, `duedate`, and all comments
+  through the repository Jira helper with `--as-bot`; use
+  `comments <KEY> --as-bot --limit 1000 --json` and compare the returned count with `total`. If the
+  response is incomplete, make no forecast writes. Re-verify its experiment/iteration mapping and
+  that it remains in Backlog or To Do. Search the complete comment response for the stable prefix
+  `{MATURITY_FORECAST_COMMENT_PREFIX}`. If any such comment already exists, do not add, edit, or
+  reply to a forecast comment and do not change either date field, even if a newer forecast differs.
+  Continue candidate selection using fresh data.
+- When no forecast comment exists and Start date is empty or already equals the forecast date, set
+  Start date with `set-start-date <KEY> --as-bot --date YYYY-MM-DD` only when it is empty; skip the
+  setter when it already equals the forecast date. Then set Due date with
+  `set-due-date <KEY> --as-bot --date YYYY-MM-DD` only when it differs. Use the forecast eligibility
+  date for both. Re-fetch and require both fields to equal that date before commenting. If Start
+  date contains a different value, preserve it and make no forecast writes; continue candidate
+  selection. These value checks also resume a partially completed first annotation without
+  repeating a field write that already succeeded.
+- Only after both fields are verified, add one short Russian Jira comment through
+  `add-comment <KEY> --as-bot --text ...`. It must begin exactly
+  `{MATURITY_FORECAST_COMMENT_PREFIX} YYYY-MM-DD.` Then name the limiting client + segment and the
+  forecast pending count/denominator and maximum variation share. If eligibility relies on the
+  small-count exception while a variation remains at or above 5%, say so and include the separate
+  expected all-variations-below-5% date. Re-fetch the comments and both fields to verify them.
+- These forecast writes do not authorise assignment, a status transition, Confluence changes,
+  calculation publication, or any other Jira edit. Never annotate a candidate rejected for any
+  reason other than pending-trial maturity. A write or verification failure is a real workflow
+  failure; do not silently claim idempotency or continue after a partial, unverified annotation.
 """
 
 FINALIZATION_PROMPT = f"""\
@@ -285,8 +332,10 @@ This is the authorised reviewer start pass for one UG experiment finalisation.
 {LOCAL_CONFLUENCE_USER_DIRECTORY}
 {REVIEWER_OWNERSHIP_POLICY}
 
-Select exactly one experiment using all of these gates before any Jira or Confluence write:
+Select exactly one experiment using all of these gates before any finalisation or publication
+write. The maturity-forecast metadata exception is defined separately below:
 {SELECTION_RULES}
+{MATURITY_FORECAST_POLICY}
 Before the project-page check in rule 5, identify the exact Results task and its parent epic using
 rule 6. Resolve its project page from the experiment admin object's `project` value and
 independently verify it against the Results task's parent epic. For the Jira check, request

@@ -15,6 +15,8 @@ from sloperator.automated_session_policy import (
 from sloperator.config import Settings
 from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
+    MATURITY_FORECAST_COMMENT_PREFIX,
+    MATURITY_FORECAST_POLICY,
     NO_OP_NOTIFICATION,
     PENDING_TRIALS_SMALL_COUNT_LIMIT,
     REVIEW_PROMPT,
@@ -166,6 +168,27 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "never change anything under `context/`" in FINALIZATION_PROMPT
     assert NO_OP_NOTIFICATION in FINALIZATION_PROMPT
     assert "one sentence, no bullets" in FINALIZATION_PROMPT
+
+
+def test_reviewer_forecasts_pending_trial_maturity_once_on_results_task() -> None:
+    assert MATURITY_FORECAST_COMMENT_PREFIX == "Прогноз готовности к итогам:"
+    assert MATURITY_FORECAST_POLICY in START_PROMPT
+    assert MATURITY_FORECAST_POLICY not in FINALIZATION_PROMPT
+    assert "fails only the pending-trials gate" in START_PROMPT
+    assert "`first_charge_expected_dt`" in START_PROMPT
+    assert "weekdays only" in START_PROMPT
+    assert "first scheduled run" in START_PROMPT
+    assert "all-variations-below-5% date" in START_PROMPT
+    assert "all comments" in START_PROMPT
+    assert "comments <KEY> --as-bot --limit 1000 --json" in START_PROMPT
+    assert "returned count with `total`" in START_PROMPT
+    assert "do not change either date field" in START_PROMPT
+    assert "`set-start-date <KEY> --as-bot --date YYYY-MM-DD`" in START_PROMPT
+    assert "`set-due-date <KEY> --as-bot --date YYYY-MM-DD`" in START_PROMPT
+    assert "without\n  repeating a field write" in START_PROMPT
+    assert "`add-comment <KEY> --as-bot --text ...`" in START_PROMPT
+    assert "Only after both fields are verified" in START_PROMPT
+    assert "do not authorise assignment, a status transition" in START_PROMPT
 
 
 def test_only_finalization_failures_are_classified_as_failed() -> None:

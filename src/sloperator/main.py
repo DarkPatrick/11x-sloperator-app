@@ -33,6 +33,7 @@ from sloperator.automation_error_audit import (
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
 from sloperator.daily_activity_digest import cancel_task as cancel_daily_activity_digest
+from sloperator.daily_activity_digest import resume_interrupted as resume_daily_activity_digest
 from sloperator.daily_activity_digest import run_weekdays as run_daily_activity_digest
 from sloperator.experiment_analytics_planner import (
     InvalidAnalyticsResult,
@@ -515,6 +516,17 @@ async def serve(settings: Settings) -> None:
                     external_session_id=run.session_id,
                     result_text=run.text,
                 )
+        recovered_digests = await resume_daily_activity_digest(
+            app.client,
+            orchestrator,
+            settings,
+            store,
+        )
+        if recovered_digests:
+            LOGGER.info(
+                "Recovered and published %d interrupted daily activity digest(s)",
+                recovered_digests,
+            )
         await synchronize_archive(app.client, store, settings.backfill_limit)
         archive_task = asyncio.create_task(
             periodically_synchronize_archive(

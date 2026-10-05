@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, call
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -32,6 +32,7 @@ from sloperator.daily_activity_digest import (
     is_valid_agent_digest,
     next_run_at,
     render_fallback,
+    resume_interrupted,
     run_once,
 )
 
@@ -358,6 +359,93 @@ async def test_successful_agent_digest_is_sent_to_channel(monkeypatch, tmp_path)
     assert "AUTOMATED RESPONSE STYLE" in agent.execute_once.await_args.args[0]
     client.conversations_open.assert_not_awaited()
     assert client.chat_postMessage.await_args.kwargs["channel"] == CHANNEL_ID
+
+
+@pytest.mark.asyncio
+async def test_interrupted_forecast_resumes_and_finishes_digest(monkeypatch, tmp_path) -> None:
+    current_facts = facts()
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.collect_facts",
+        AsyncMock(return_value=(current_facts, ClaudeUsage(99, 0, "", "Oct 5, 10:00PM"))),
+    )
+    formatted = render_fallback(current_facts)
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest._format_draft",
+        AsyncMock(return_value=(formatted, True)),
+    )
+    recovered = HeadlessAgentRun(
+        "claude",
+        "claude-opus-5-5",
+        "forecast-session",
+        'FINALIZATION_FORECAST: {"id":"7982","task":"UMN-14000",'
+        '"title":"Итоги - Experiment 7982"}',
+        run_id="forecast-run",
+        job_name=FINALIZATION_FORECAST_JOB_NAME,
+    )
+    agent = AsyncMock()
+    agent.resume_interrupted_headless.side_effect = [[], [recovered]]
+    client = AsyncMock()
+    store = MagicMock()
+
+    count = await resume_interrupted(client, agent, settings(tmp_path), store)
+
+    assert count == 1
+    assert agent.resume_interrupted_headless.await_count == 2
+    client.chat_postMessage.assert_awaited_once()
+    store.finish_scheduled_agent_run.assert_called_once_with(
+        "forecast-run",
+        status="completed",
+        external_session_id="forecast-session",
+        result_text=recovered.text,
+    )
+
+
+@pytest.mark.asyncio
+async def test_interrupted_formatter_resumes_and_publishes_directly(tmp_path) -> None:
+    message = render_fallback(facts())
+    recovered = HeadlessAgentRun(
+        "claude",
+        "claude-opus-5-5",
+        "digest-session",
+        message,
+        run_id="digest-run",
+        job_name="daily-activity-digest",
+    )
+    agent = AsyncMock()
+    agent.resume_interrupted_headless.return_value = [recovered]
+    client = AsyncMock()
+    store = MagicMock()
+    store.list_interrupted_scheduled_agent_runs.return_value = [{
+        "run_id": "forecast-run",
+        "status": "recovered",
+        "external_session_id": "forecast-session",
+        "result_text": "FINALIZATION_FORECAST_NONE",
+    }]
+
+    count = await resume_interrupted(client, agent, settings(tmp_path), store)
+
+    assert count == 1
+    agent.resume_interrupted_headless.assert_awaited_once()
+    client.chat_postMessage.assert_awaited_once_with(
+        channel=CHANNEL_ID,
+        markdown_text=message,
+        unfurl_links=False,
+        unfurl_media=False,
+    )
+    assert store.finish_scheduled_agent_run.call_args_list == [
+        call(
+            "digest-run",
+            status="completed",
+            external_session_id="digest-session",
+            result_text=message,
+        ),
+        call(
+            "forecast-run",
+            status="completed",
+            external_session_id="forecast-session",
+            result_text="FINALIZATION_FORECAST_NONE",
+        ),
+    ]
 
 
 def test_bot_channel_messages_returns_only_top_level_bot_posts(tmp_path) -> None:

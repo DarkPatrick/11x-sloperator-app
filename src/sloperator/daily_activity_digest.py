@@ -184,9 +184,23 @@ class AgentSubmitter(Protocol):
         quota_admission_check_weekly: bool = True,
     ) -> Any: ...
 
+    async def resume_interrupted_headless(
+        self,
+        timeout_seconds: int,
+        *,
+        job_name: str | None = None,
+        workspace: Path | None = None,
+        accept_result: Callable[[str], bool] = lambda _: True,
+        max_interim_results: int = 2,
+    ) -> list[HeadlessAgentRun]: ...
+
 
 class DigestStore(Protocol):
     def list_scheduled_agent_runs(self, limit: int = 100) -> list[dict[str, Any]]: ...
+
+    def list_interrupted_scheduled_agent_runs(
+        self, job_name: str | None = None
+    ) -> list[dict[str, object]]: ...
 
     def active_jira_task_agent_links(self) -> list[dict[str, Any]]: ...
 
@@ -199,6 +213,16 @@ class DigestStore(Protocol):
     def bot_channel_messages(
         self, channel_ids: list[str], since_ts: float, limit: int = 200
     ) -> list[dict[str, Any]]: ...
+
+    def finish_scheduled_agent_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        external_session_id: str | None = None,
+        result_text: str | None = None,
+        last_error: str | None = None,
+    ) -> None: ...
 
 
 def next_run_at(now: dt.datetime) -> dt.datetime:
@@ -420,6 +444,15 @@ async def _add_finalization_forecast(
                 "Очередь итогов не удалось надёжно проверить; повторю проверку по расписанию.",
             ),
         )
+    return _add_finalization_forecast_item(facts, item, now=now)
+
+
+def _add_finalization_forecast_item(
+    facts: DigestFacts,
+    item: DigestItem | None,
+    *,
+    now: dt.datetime,
+) -> DigestFacts:
     if item is None:
         return replace(
             facts,
@@ -441,6 +474,28 @@ async def _add_finalization_forecast(
     if item.task_key in {entry.task_key for entry in (*facts.completed, *facts.pending)}:
         return facts
     return replace(facts, pending=(*facts.pending, item))
+
+
+def _add_recovered_finalization_forecast(
+    facts: DigestFacts,
+    settings: Settings,
+    text: str,
+    *,
+    now: dt.datetime,
+) -> DigestFacts:
+    """Apply a recovered forecast result without launching a replacement session."""
+    try:
+        item = _parse_finalization_forecast(text, settings)
+    except Exception:
+        LOGGER.exception("Daily digest could not use the recovered finalization forecast")
+        return replace(
+            facts,
+            queue_notes=(
+                *facts.queue_notes,
+                "Очередь итогов не удалось надёжно проверить; повторю проверку по расписанию.",
+            ),
+        )
+    return _add_finalization_forecast_item(facts, item, now=now)
 
 
 def _slack_thread_url(channel_id: str, thread_ts: str) -> str:
@@ -993,11 +1048,14 @@ async def run_once(
     store: DigestStore,
     *,
     now: dt.datetime | None = None,
+    recovered_forecast: str | None = None,
 ) -> tuple[str, bool]:
     current = now or dt.datetime.now(dt.UTC)
     facts, usage = await collect_facts(settings, store, now=current)
     channel_id = CHANNEL_ID
-    if usage is None or not digest_quota_allows_launch(usage):
+    if recovered_forecast is None and (
+        usage is None or not digest_quota_allows_launch(usage)
+    ):
         placeholder = "Собираю информацию..."
         response = await client.chat_postMessage(channel=channel_id, text=placeholder)
         thread_ts = str(response["ts"])
@@ -1030,7 +1088,15 @@ async def run_once(
             quota_admission_check_weekly=False,
         )
         return placeholder, False
-    facts = await _add_finalization_forecast(facts, settings, agent, now=current)
+    if recovered_forecast is None:
+        facts = await _add_finalization_forecast(facts, settings, agent, now=current)
+    else:
+        facts = _add_recovered_finalization_forecast(
+            facts,
+            settings,
+            recovered_forecast,
+            now=current,
+        )
     message, used_agent = await _format_draft(settings, agent, render_fallback(facts))
     await client.chat_postMessage(
         channel=channel_id,
@@ -1039,6 +1105,117 @@ async def run_once(
         unfurl_media=False,
     )
     return message, used_agent
+
+
+async def resume_interrupted(
+    client: AsyncWebClient,
+    agent: AgentSubmitter,
+    settings: Settings,
+    store: DigestStore,
+) -> int:
+    """Resume the interrupted agent stage and finish the digest workflow."""
+    recovered_digests = await agent.resume_interrupted_headless(
+        TIMEOUT_SECONDS,
+        job_name=JOB_NAME,
+        workspace=PROJECT_ROOT,
+        accept_result=lambda text: is_valid_agent_digest(text, text),
+    )
+    published = 0
+    for run in recovered_digests:
+        message = run.text.strip()
+        if not is_valid_agent_digest(message, message):
+            LOGGER.error("Recovered daily activity digest did not pass output validation")
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status="failed",
+                    external_session_id=run.session_id,
+                    result_text=run.text,
+                    last_error="recovered digest failed output validation",
+                )
+            continue
+        await client.chat_postMessage(
+            channel=CHANNEL_ID,
+            markdown_text=message,
+            unfurl_links=False,
+            unfurl_media=False,
+        )
+        if run.run_id is not None:
+            await asyncio.to_thread(
+                store.finish_scheduled_agent_run,
+                run.run_id,
+                status="completed",
+                external_session_id=run.session_id,
+                result_text=run.text,
+            )
+        published += 1
+    if recovered_digests:
+        # A restart can interrupt the formatter after its recovered forecast handed off.
+        # Close that upstream recovered run once the formatter has actually published.
+        if published:
+            upstream_forecasts = await asyncio.to_thread(
+                store.list_interrupted_scheduled_agent_runs,
+                FINALIZATION_FORECAST_JOB_NAME,
+            )
+            for upstream in upstream_forecasts:
+                if upstream.get("status") != "recovered":
+                    continue
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    str(upstream["run_id"]),
+                    status="completed",
+                    external_session_id=(
+                        str(upstream["external_session_id"])
+                        if upstream.get("external_session_id") is not None
+                        else None
+                    ),
+                    result_text=(
+                        str(upstream["result_text"])
+                        if upstream.get("result_text") is not None
+                        else None
+                    ),
+                )
+        return published
+
+    recovered_forecasts = await agent.resume_interrupted_headless(
+        settings.experiment_finalizer_timeout_seconds,
+        job_name=FINALIZATION_FORECAST_JOB_NAME,
+        workspace=settings.agent_workspace,
+        accept_result=_is_finalization_forecast,
+        max_interim_results=0,
+    )
+    for run in recovered_forecasts:
+        try:
+            await run_once(
+                client,
+                agent,
+                settings,
+                store,
+                recovered_forecast=run.text,
+            )
+        except Exception as error:
+            LOGGER.exception("Recovered daily activity forecast could not finish the digest")
+            if run.run_id is not None:
+                await asyncio.to_thread(
+                    store.finish_scheduled_agent_run,
+                    run.run_id,
+                    status="interrupted",
+                    external_session_id=run.session_id,
+                    result_text=run.text,
+                    last_error=repr(error),
+                )
+            continue
+        if run.run_id is not None:
+            await asyncio.to_thread(
+                store.finish_scheduled_agent_run,
+                run.run_id,
+                status="completed",
+                external_session_id=run.session_id,
+                result_text=run.text,
+            )
+        published += 1
+    return published
 
 
 async def run_weekdays(

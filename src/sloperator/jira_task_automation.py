@@ -178,16 +178,25 @@ never mention internal workers or reviewers in user-facing communication.
 """
 
 
-async def start_task_with_reviewer(agent: Any, task_key: str, link: dict[str, Any]) -> bool:
+async def start_task_with_reviewer(
+    agent: Any,
+    task_key: str,
+    link: dict[str, Any],
+    *,
+    last_jira_updated_at: str | None = None,
+) -> bool:
     result = await agent.execute_once(
         reviewer_start_prompt(task_key), 7200, job_name="jira-task-reviewer",
         existing_session_id=link.get("reviewer_session_id"),
     )
     ready = str(result.text).strip().splitlines()[-1:] == ["TASK_READY"]
-    agent.store.upsert_jira_task_agent_link(
-        task_key, reviewer_session_id=result.session_id,
-        phase="worker" if ready else "waiting",
-    )
+    values: dict[str, Any] = {
+        "reviewer_session_id": result.session_id,
+        "phase": "worker" if ready else "waiting",
+    }
+    if last_jira_updated_at is not None:
+        values["last_jira_updated_at"] = last_jira_updated_at
+    agent.store.upsert_jira_task_agent_link(task_key, **values)
     return ready
 
 
@@ -389,7 +398,12 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
                 continue
             async with _TASK_EXECUTION_LOCK:
                 link = agent.store.jira_task_agent_link(task.key)
-                if not await start_task_with_reviewer(agent, task.key, link or {}):
+                if not await start_task_with_reviewer(
+                    agent,
+                    task.key,
+                    link or {},
+                    last_jira_updated_at=task.updated_at.isoformat(),
+                ):
                     continue
                 link = agent.store.jira_task_agent_link(task.key)
                 worker = await agent.execute_once(
@@ -539,6 +553,21 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     # changes do not authorize another review of an already owned task.
                     # Wait for a human request, a return to work, or an unfinished worker.
                     if (
+                        link.get("phase") == "waiting"
+                        and not returned_to_work
+                        and reply_target is None
+                        and not has_new_page_comment
+                    ):
+                        # Older waiting links may predate the Jira cursor. Establish their
+                        # current issue state as the baseline without spending another agent turn.
+                        if previous_jira is None:
+                            agent.store.upsert_jira_task_agent_link(
+                                task.key,
+                                phase="waiting",
+                                last_jira_updated_at=task.updated_at.isoformat(),
+                            )
+                        continue
+                    if (
                         link.get("phase") != "worker"
                         and task.status not in QUEUED_STATUSES
                         and not returned_to_work
@@ -561,7 +590,12 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                         continue
                     handoff = ""
                     if task.status in QUEUED_STATUSES or returned_to_work or link.get("phase") in {"worker", "waiting"}:
-                        if not await start_task_with_reviewer(agent, task.key, link):
+                        if not await start_task_with_reviewer(
+                            agent,
+                            task.key,
+                            link,
+                            last_jira_updated_at=task.updated_at.isoformat(),
+                        ):
                             continue
                         link = agent.store.jira_task_agent_link(task.key)
                         worker = await agent.execute_once(

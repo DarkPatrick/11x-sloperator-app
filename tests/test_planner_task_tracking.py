@@ -179,6 +179,55 @@ async def test_planner_activity_resumes_only_for_human_requests(
     assert automation.is_reserved_experiment_task(task.summary)
 
 
+async def test_waiting_queued_task_without_new_activity_does_not_resume_reviewer(
+    tmp_path, monkeypatch
+):
+    store = EventStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    store.upsert_jira_task_agent_link(
+        "UMN-13632",
+        reviewer_session_id="waiting-reviewer",
+        phase="waiting",
+    )
+    updated_at = dt.datetime(2026, 10, 5, 12, 34, tzinfo=dt.UTC)
+    task = SimpleNamespace(
+        key="UMN-13632",
+        summary="Waiting for experiment results",
+        description="Need the experiment id",
+        status="To Do",
+        updated_at=updated_at,
+    )
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=task),
+        recent_comments=AsyncMock(return_value=[{
+            "id": "bot-question",
+            "body": "Which experiment should I use?",
+            "author": {"accountId": automation.SERVICE_ACCOUNT_ID},
+            "created": updated_at.isoformat(),
+        }]),
+        was_returned_to_work=AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
+    monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))
+    monkeypatch.setattr(automation, "weekly_quota_allows_launch", lambda *args, **kwargs: True)
+    monkeypatch.setattr(automation.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
+    agent = SimpleNamespace(store=store, execute_once=AsyncMock())
+    settings = SimpleNamespace(
+        jira_username="bot",
+        jira_api_token="token",
+        jira_url="https://jira.invalid",
+        agent_workspace=tmp_path,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await automation.poll_active_tasks(settings, agent)
+
+    agent.execute_once.assert_not_called()
+    link = store.jira_task_agent_link("UMN-13632")
+    assert link["phase"] == "waiting"
+    assert link["last_jira_updated_at"] == updated_at.isoformat()
+
+
 @pytest.mark.parametrize("author,seconds_after_baseline,expected", [
     ("human", -1, 0),
     (automation.SERVICE_ACCOUNT_ID, 1, 0),

@@ -273,7 +273,12 @@ async def test_hourly_starts_reviewer_before_worker_and_resumes_owner(monkeypatc
 
     from sloperator import jira_task_automation as automation
 
-    task = SimpleNamespace(key="UMN-14000", summary="Geo discovery", description="Compare geos")
+    task = SimpleNamespace(
+        key="UMN-14000",
+        summary="Geo discovery",
+        description="Compare geos",
+        updated_at=dt.datetime(2026, 10, 5, 12, 0, tzinfo=dt.UTC),
+    )
     reader = SimpleNamespace(queued_tasks=AsyncMock(return_value=[task]), recent_comments=AsyncMock(return_value=[]))
     monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
     monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))

@@ -108,8 +108,10 @@ relevant application source/release history. Perform all of these checks:
    `segments: {{'Total': {{'pro_rights': 'all'}}}}`; calculator auto-substitution does not count
    as a configured segment.
 2. Check that configured Android/iOS/web application versions are the versions required by the
-   project and actually containing the experiment implementation. Verify against source code and
-   release tags when the project table alone is ambiguous.
+   project and actually containing the experiment implementation. Verify the implementation in
+   source code, then verify the shipped version directly against the authoritative published
+   release history for the relevant platform. Never use git tags as evidence of an app release or
+   infer the released version from tags: tags are not precise enough to establish what shipped.
 3. Check that the configured activation event exactly matches the project table and the implemented
    exposure/activation point. Distinguish assignment from real exposure and flag uncertainty.
 4. Check that the number and identifiers of test branches/variations in the admin configuration

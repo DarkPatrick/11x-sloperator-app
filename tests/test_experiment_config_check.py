@@ -64,6 +64,8 @@ def test_prompt_makes_every_requested_check_and_is_read_only() -> None:
 
     assert "ug-experiment-config-builder" in prompt
     assert "application versions" in prompt
+    assert "authoritative published\n   release history" in prompt
+    assert "Never use git tags as evidence of an app release" in prompt
     assert "activation event" in prompt
     assert "number and identifiers of test branches" in prompt
     assert "Нужно исправить" in prompt

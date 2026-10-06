@@ -15,13 +15,17 @@ from sloperator.admin import (
     _crontab,
     _label_cron_history,
     _merge_attached_scheduled_sessions,
+    _reconcile_timer_controls,
     _set_cron_enabled,
+    _set_timer_enabled,
     _slack_trigger_definitions,
     _systemd_scheduler_history,
     _systemd_scheduler_jobs,
+    _timer_jobs,
     _unmatched_cron_launches,
 )
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
+from sloperator.automation_controls import AutomationControls
 from sloperator.config import Settings
 
 
@@ -732,3 +736,67 @@ def test_recent_launch_before_first_outcome_log_is_not_hidden() -> None:
                                    history, outcomes, {"poller"})
     assert len(rows) == 1
     assert rows[0]["status"] == "unknown"
+
+
+def _fake_systemctl(spec: Path, active: str = "active"):
+    calls: list[list[str]] = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        result = type("Result", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+        if args[1] == "list-unit-files":
+            result.stdout = "ug-ai-analyst-job-payment-class-a.timer enabled enabled\n"
+        elif args[1] == "show" and args[2].endswith(".timer"):
+            result.stdout = (
+                "TimersCalendar={ OnCalendar=*-*-* *:07:00 ; "
+                "next_elapse=Tue 2026-10-06 19:07:00 UTC }\n"
+                f"ActiveState={active}\n"
+            )
+        elif args[1] == "show":
+            result.stdout = (
+                "ExecStart={ path=/venv/bin/python ; argv[]=/venv/bin/python -m "
+                f"sloperator.operations_cron --spec {spec} ; status=0/0 }}\n"
+            )
+        return result
+
+    return run, calls
+
+
+def test_timer_jobs_describe_systemd_scheduled_jobs(tmp_path: Path) -> None:
+    spec = tmp_path / "payment-class-a.json"
+    spec.write_text(
+        json.dumps({"name": "ug-ai-analyst:payment-class-a", "command": "cd /x && run"})
+    )
+    run, _calls = _fake_systemctl(spec)
+    with patch("sloperator.admin.subprocess.run", side_effect=run):
+        assert _timer_jobs() == [
+            {
+                "name": "payment-class-a",
+                "schedule": "systemd: *-*-* *:07:00",
+                "command": "cd /x && run",
+                "enabled": True,
+                "unit": "ug-ai-analyst-job-payment-class-a.timer",
+            }
+        ]
+
+
+def test_set_timer_enabled_stops_known_timer_only(tmp_path: Path) -> None:
+    spec = tmp_path / "payment-class-a.json"
+    spec.write_text(json.dumps({"name": "x", "command": "run"}))
+    run, calls = _fake_systemctl(spec)
+    with patch("sloperator.admin.subprocess.run", side_effect=run):
+        assert _set_timer_enabled("payment-class-a", False)
+        assert not _set_timer_enabled("unknown", False)
+    assert ["systemctl", "stop", "ug-ai-analyst-job-payment-class-a.timer"] in calls
+    assert not any("ug-ai-analyst-job-unknown.timer" in call for call in calls)
+
+
+def test_reconcile_timer_controls_stops_admin_disabled_timer(tmp_path: Path) -> None:
+    spec = tmp_path / "payment-class-a.json"
+    spec.write_text(json.dumps({"name": "x", "command": "run"}))
+    controls = AutomationControls(tmp_path / "controls.json")
+    controls.set_enabled("crons", "payment-class-a", False)
+    run, calls = _fake_systemctl(spec)
+    with patch("sloperator.admin.subprocess.run", side_effect=run):
+        _reconcile_timer_controls(controls)
+    assert ["systemctl", "stop", "ug-ai-analyst-job-payment-class-a.timer"] in calls

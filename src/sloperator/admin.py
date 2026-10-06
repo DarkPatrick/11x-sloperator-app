@@ -13,6 +13,7 @@ import secrets
 import shlex
 import subprocess
 import time
+from contextlib import suppress
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -930,6 +931,87 @@ def _set_cron_enabled(name: str, enabled: bool) -> bool:
     return True
 
 
+_TIMER_PREFIX = "ug-ai-analyst-job-"
+_TIMER_SPEC = re.compile(r"--spec (\S+\.json)")
+_TIMER_CALENDAR = re.compile(r"OnCalendar=(.+?) ;")
+
+
+def _systemctl_show(unit: str, properties: str) -> dict[str, str]:
+    result = subprocess.run(
+        ["systemctl", "show", unit, f"--property={properties}", "--no-pager"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def _timer_jobs() -> list[dict[str, Any]]:
+    """Describe ug-ai-analyst jobs scheduled by systemd timers instead of crontab."""
+    result = subprocess.run(
+        [
+            "systemctl",
+            "list-unit-files",
+            f"{_TIMER_PREFIX}*.timer",
+            "--no-legend",
+            "--no-pager",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    jobs: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields or not fields[0].endswith(".timer"):
+            continue
+        unit = fields[0]
+        timer = _systemctl_show(unit, "TimersCalendar,ActiveState")
+        service = _systemctl_show(unit.removesuffix(".timer") + ".service", "ExecStart")
+        calendar = _TIMER_CALENDAR.search(timer.get("TimersCalendar", ""))
+        spec = _TIMER_SPEC.search(service.get("ExecStart", ""))
+        command = (
+            unwrap_command(f"python -m sloperator.operations_cron --spec {spec.group(1)}")
+            if spec
+            else service.get("ExecStart", "")
+        )
+        jobs.append(
+            {
+                "name": unit.removeprefix(_TIMER_PREFIX).removesuffix(".timer"),
+                "schedule": f"systemd: {calendar.group(1)}" if calendar else "systemd timer",
+                "command": command,
+                "enabled": timer.get("ActiveState") == "active",
+                "unit": unit,
+            }
+        )
+    return sorted(jobs, key=lambda job: job["name"])
+
+
+def _set_timer_enabled(name: str, enabled: bool) -> bool:
+    """Start or stop one job timer; polkit grants this to the service user."""
+    if name not in {job["name"] for job in _timer_jobs()}:
+        return False
+    result = subprocess.run(
+        ["systemctl", "start" if enabled else "stop", f"{_TIMER_PREFIX}{name}.timer"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "systemctl failed")
+    return True
+
+
+def _reconcile_timer_controls(controls: AutomationControls) -> None:
+    """Keep admin-stopped timers stopped after a reboot re-activates enabled timers."""
+    for job in _timer_jobs():
+        if job["enabled"] and controls.disabled("crons", job["name"]):
+            _set_timer_enabled(job["name"], False)
+
+
 def _cron_history() -> list[dict[str, str]]:
     result = subprocess.run(
         [
@@ -1444,6 +1526,9 @@ def create_admin_routes(
         await sql_manager.close()
 
     app.on_cleanup.append(close_admin_managers)
+    # Admin must start even when systemd is unavailable (tests, dev hosts).
+    with suppress(OSError, RuntimeError, subprocess.SubprocessError):
+        _reconcile_timer_controls(automation_controls)
 
     def require_local(request: web.Request) -> None:
         if request.remote not in {"127.0.0.1", "::1"}:
@@ -1496,7 +1581,7 @@ def create_admin_routes(
             asyncio.to_thread(_systemd_scheduler_jobs, orchestrator.settings),
             asyncio.to_thread(_systemd_scheduler_history, scheduler_runs),
         )
-        cron_jobs = _cron_jobs(crontab)
+        cron_jobs = [*_cron_jobs(crontab), *await asyncio.to_thread(_timer_jobs)]
         for service_job in service_jobs:
             service_job["enabled"] = not automation_controls.disabled(
                 "crons", service_job["name"]
@@ -1552,7 +1637,9 @@ def create_admin_routes(
         name = request.match_info["name"]
         enabled = request.match_info["action"] == "start"
         if kind == "crons" and name not in EMBEDDED_SCHEDULED_JOBS_BY_NAME:
-            if not await asyncio.to_thread(_set_cron_enabled, name, enabled):
+            if not await asyncio.to_thread(
+                _set_timer_enabled, name, enabled
+            ) and not await asyncio.to_thread(_set_cron_enabled, name, enabled):
                 raise web.HTTPNotFound(text="Unknown managed cron")
         elif kind == "triggers":
             valid = {item["key"] for item in _slack_trigger_definitions(orchestrator.settings)}

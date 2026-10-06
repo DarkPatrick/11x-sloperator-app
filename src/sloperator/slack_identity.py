@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from slack_sdk.web.async_client import AsyncWebClient
@@ -34,8 +36,13 @@ class _Directory:
 class SlackMentionResolver:
     """Cache the visible workspace directory and replace unambiguous exact names."""
 
-    def __init__(self, ttl_seconds: float = 3600) -> None:
+    def __init__(
+        self,
+        ttl_seconds: float = 3600,
+        private_aliases_path: Path | None = None,
+    ) -> None:
         self.ttl_seconds = ttl_seconds
+        self.private_aliases_path = private_aliases_path
         self._directories: dict[str, _Directory] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -68,8 +75,7 @@ class SlackMentionResolver:
             self._directories[cache_key] = _Directory(aliases, now + self.ttl_seconds)
             return aliases
 
-    @staticmethod
-    async def _fetch_aliases(client: AsyncWebClient) -> tuple[tuple[str, str], ...]:
+    async def _fetch_aliases(self, client: AsyncWebClient) -> tuple[tuple[str, str], ...]:
         candidates: dict[str, set[str]] = {}
         cursor = ""
         while True:
@@ -106,8 +112,37 @@ class SlackMentionResolver:
             cursor = next_cursor.strip() if isinstance(next_cursor, str) else ""
             if not cursor:
                 break
+        for alias, user_id in self._private_aliases():
+            candidates.setdefault(alias, set()).add(user_id)
         unique = ((alias, next(iter(ids))) for alias, ids in candidates.items() if len(ids) == 1)
         return tuple(sorted(unique, key=lambda item: len(item[0]), reverse=True))
+
+    def _private_aliases(self) -> tuple[tuple[str, str], ...]:
+        path = self.private_aliases_path
+        if path is None:
+            return ()
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return ()
+        except (json.JSONDecodeError, OSError) as error:
+            LOGGER.warning(
+                "Could not read private Slack identity aliases: %s",
+                type(error).__name__,
+            )
+            return ()
+        aliases = value.get("aliases") if isinstance(value, dict) else None
+        if not isinstance(aliases, dict):
+            return ()
+        result: list[tuple[str, str]] = []
+        for raw_alias, raw_user_id in aliases.items():
+            if not isinstance(raw_alias, str) or not isinstance(raw_user_id, str):
+                continue
+            alias = " ".join(raw_alias.split())
+            user_id = raw_user_id.strip()
+            if len(alias) >= 5 and " " in alias and re.fullmatch(r"U[A-Z0-9]+", user_id):
+                result.append((alias, user_id))
+        return tuple(result)
 
     @staticmethod
     def _replace_plain_text(text: str, aliases: tuple[tuple[str, str], ...]) -> str:
@@ -120,7 +155,11 @@ class SlackMentionResolver:
         return text
 
 
-DEFAULT_SLACK_MENTION_RESOLVER = SlackMentionResolver()
+DEFAULT_SLACK_MENTION_RESOLVER = SlackMentionResolver(
+    private_aliases_path=Path(__file__).resolve().parents[2]
+    / "data"
+    / "slack-identity-aliases.json"
+)
 
 
 async def resolve_payload_mentions(

@@ -95,6 +95,35 @@ async def test_resolver_preserves_links_code_and_existing_mentions() -> None:
     )
 
 
+async def test_resolver_uses_private_exact_aliases(tmp_path) -> None:
+    aliases = tmp_path / "slack-identity-aliases.json"
+    aliases.write_text(
+        '{"aliases": {"Yanina Bykouskaya": "U09CYCGN6H4"}}',
+        encoding="utf-8",
+    )
+    client = SimpleNamespace(
+        token="xoxb-test",
+        users_list=AsyncMock(
+            return_value=_page(
+                [
+                    {
+                        "id": "U09CYCGN6H4",
+                        "profile": {
+                            "display_name": "Yana Bykouskaya",
+                            "real_name": "Yana Bykouskaya",
+                        },
+                    }
+                ]
+            )
+        ),
+    )
+    resolver = SlackMentionResolver(private_aliases_path=aliases)
+
+    assert await resolver.resolve(client, "Yanina Bykouskaya and Yana Bykouskaya") == (
+        "<@U09CYCGN6H4> and <@U09CYCGN6H4>"
+    )
+
+
 async def test_payload_resolution_fails_open(monkeypatch) -> None:
     resolver = SimpleNamespace(resolve=AsyncMock(side_effect=RuntimeError("Slack unavailable")))
     monkeypatch.setattr(

@@ -171,3 +171,18 @@ async def test_observed_client_resolves_before_every_message_delivery(monkeypatc
 
     assert api_call.await_args.args == ("chat.postMessage",)
     assert api_call.await_args.kwargs["json"]["text"] == "<@U1>"
+
+
+def test_default_aliases_path_prefers_env_then_working_directory(tmp_path, monkeypatch) -> None:
+    from sloperator import slack_identity
+
+    configured = tmp_path / "custom.json"
+    monkeypatch.setenv(slack_identity.PRIVATE_ALIASES_ENV, str(configured))
+    assert slack_identity.default_private_aliases_path() == configured
+
+    monkeypatch.delenv(slack_identity.PRIVATE_ALIASES_ENV)
+    monkeypatch.setattr(slack_identity, "__file__", str(tmp_path / "site" / "pkg" / "mod.py"))
+    monkeypatch.chdir(tmp_path)
+    assert slack_identity.default_private_aliases_path() == (
+        tmp_path / "data" / "slack-identity-aliases.json"
+    )

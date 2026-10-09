@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -124,6 +125,7 @@ class SlackMentionResolver:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
+            LOGGER.warning("Private Slack identity aliases file not found: %s", path)
             return ()
         except (json.JSONDecodeError, OSError) as error:
             LOGGER.warning(
@@ -155,10 +157,28 @@ class SlackMentionResolver:
         return text
 
 
+PRIVATE_ALIASES_ENV = "SLOPERATOR_SLACK_IDENTITY_ALIASES"
+_PRIVATE_ALIASES_RELATIVE = Path("data") / "slack-identity-aliases.json"
+
+
+def default_private_aliases_path() -> Path:
+    """Locate the gitignored alias file independently of how the package was installed.
+
+    `Path(__file__)` points into site-packages for a non-editable install, so the checkout's
+    `data/` is found through the explicit env override, then the source tree (editable install),
+    then the service working directory.
+    """
+    configured = os.environ.get(PRIVATE_ALIASES_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    source_tree = Path(__file__).resolve().parents[2] / _PRIVATE_ALIASES_RELATIVE
+    if source_tree.exists():
+        return source_tree
+    return Path.cwd() / _PRIVATE_ALIASES_RELATIVE
+
+
 DEFAULT_SLACK_MENTION_RESOLVER = SlackMentionResolver(
-    private_aliases_path=Path(__file__).resolve().parents[2]
-    / "data"
-    / "slack-identity-aliases.json"
+    private_aliases_path=default_private_aliases_path()
 )
 
 

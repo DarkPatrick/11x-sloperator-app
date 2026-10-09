@@ -64,7 +64,7 @@ def test_confluence_destination_selects_parent_and_required_templates() -> None:
 def test_latest_external_confluence_activity_ignores_service_account() -> None:
     comments = [
         {
-            "author": "Egor Semin",
+            "author": "Pat Doe",
             "created": "2026-09-16T08:01:31.054Z",
             "updated": "2026-09-16T08:01:31.054Z",
         },
@@ -90,11 +90,11 @@ def test_latest_external_confluence_activity_ignores_service_account() -> None:
 
 def test_latest_external_confluence_comment_uses_unprocessed_human_activity() -> None:
     comments = [
-        {"id": "1", "author": "Egor Semin", "text": "Please fix this",
+        {"id": "1", "author": "Pat Doe", "text": "Please fix this",
          "created": "2026-09-16T08:01:31Z"},
         {"id": "2", "author": "ug-ai-analyst", "text": "Fixed",
          "created": "2026-09-16T08:03:00Z"},
-        {"id": "3", "author": "Artyom Smirnov", "text": "@Egor please check",
+        {"id": "3", "author": "Sam Roe", "text": "@Pat please check",
          "created": "2026-09-16T08:04:00Z"},
         {"id": "4", "author": {"accountId": "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"},
          "text": "Done", "created": "2026-09-16T08:05:00Z"},
@@ -134,7 +134,7 @@ async def test_jira_comment_decision_requires_explicit_reply_verdict() -> None:
     from unittest.mock import AsyncMock
 
     task = SimpleNamespace(key="UMN-13435", summary="Analytics specification")
-    comment = {"id": "354007", "body": "@Egor Semin проверь"}
+    comment = {"id": "354007", "body": "@Pat Doe проверь"}
     agent = SimpleNamespace(execute_once=AsyncMock(
         return_value=SimpleNamespace(text="IGNORE")
     ))
@@ -157,8 +157,8 @@ async def test_confluence_comment_decision_requires_explicit_reply_verdict() -> 
     from unittest.mock import AsyncMock
 
     task = SimpleNamespace(key="UMN-13435", summary="Analytics specification")
-    comment = {"id": "838611732", "author": "Artyom Smirnov",
-               "text": "@Egor Semin проверь"}
+    comment = {"id": "838611732", "author": "Sam Roe",
+               "text": "@Pat Doe проверь"}
     agent = SimpleNamespace(execute_once=AsyncMock(
         return_value=SimpleNamespace(text="IGNORE")
     ))
@@ -206,8 +206,8 @@ async def test_unrelated_confluence_comment_does_not_start_reviewer(monkeypatch)
         status="In Review", updated_at=dt.datetime(2026, 9, 22, 7, 0, tzinfo=dt.UTC),
     )
     comment = {
-        "id": "838611732", "author": "Artyom Smirnov",
-        "text": "@Egor Semin проверь", "created": "2026-09-22T08:00:00Z",
+        "id": "838611732", "author": "Sam Roe",
+        "text": "@Pat Doe проверь", "created": "2026-09-22T08:00:00Z",
     }
     reader = SimpleNamespace(
         task_snapshot=AsyncMock(return_value=task),

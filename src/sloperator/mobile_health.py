@@ -194,7 +194,7 @@ backticks or a code fence.
 
 The first Slack-facing response containing the analysis must begin with exactly this mention line:
 `<@U0149RHN7D3> <@U09CYCGN6H4> <@U0525MDT0MN>`
-These are, respectively, Artyom Smirnov, Yanina Bykouskaya, and Egor Semin. Keep the mention line
+These are the alert owners. Keep the mention line
 separate from the metric blocks; it is the only additional visible line allowed.
 
 Budget exactly six visible lines per metric: one header plus the five fields. This compact format

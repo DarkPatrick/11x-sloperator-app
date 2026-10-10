@@ -1234,6 +1234,27 @@ class EventStore:
                 (status, external_session_id, status, result_text, last_error, run_id),
             )
 
+    def abandon_stale_scheduled_agent_runs(self, max_age_hours: int = 24) -> list[str]:
+        """Stop resuming unfinished cron turns that their next scheduled run has superseded.
+
+        Every recurring job runs at least daily and times out within hours, so an unfinished
+        turn older than a day is no longer worth resuming on each service restart.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                UPDATE scheduled_agent_runs
+                SET status = 'abandoned',
+                    last_error = COALESCE(last_error, 'stale unfinished run; not resumed'),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ('running', 'interrupted', 'recovered')
+                  AND datetime(created_at) <= datetime('now', ?)
+                RETURNING job_name || ' ' || run_id
+                """,
+                (f"-{int(max_age_hours)} hours",),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def scheduled_run_history(self) -> list[dict[str, Any]]:
         """Read 28 days of scheduler outcomes without the agent UI's session limit."""
         with self._connect() as connection:

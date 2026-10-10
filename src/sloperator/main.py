@@ -277,6 +277,13 @@ async def serve(settings: Settings) -> None:
         await site.start()
         await slack_handler.connect_async()  # type: ignore[no-untyped-call]
         await orchestrator.resume_interrupted(app.client)
+        abandoned_runs = await asyncio.to_thread(store.abandon_stale_scheduled_agent_runs)
+        if abandoned_runs:
+            LOGGER.warning(
+                "Abandoned %d stale unfinished scheduled run(s): %s",
+                len(abandoned_runs),
+                ", ".join(abandoned_runs),
+            )
         recovered_headless = await orchestrator.resume_interrupted_headless(
             settings.experiment_finalizer_timeout_seconds,
             job_name="experiment-finalizer-reviewer",
@@ -358,6 +365,17 @@ async def serve(settings: Settings) -> None:
             )
             if recovered_task_runs:
                 LOGGER.info("Recovered %d interrupted %s run(s)", len(recovered_task_runs), task_job)
+            # The hourly Jira automation picks the task up again from Jira state; close the
+            # recovered turn so it is not handed back on every later restart.
+            for run in recovered_task_runs:
+                if run.run_id is not None:
+                    await asyncio.to_thread(
+                        store.finish_scheduled_agent_run,
+                        run.run_id,
+                        status="completed",
+                        external_session_id=run.session_id,
+                        result_text=run.text,
+                    )
         recovered_design_reviews = await orchestrator.resume_interrupted_headless(
             settings.experiment_design_timeout_seconds,
             job_name="experiment-design-reviewer",

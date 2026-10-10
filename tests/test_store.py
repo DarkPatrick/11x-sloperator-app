@@ -437,3 +437,23 @@ def test_jira_task_agent_link_is_durable(tmp_path: Path) -> None:
     assert link["worker_session_id"] == "worker-1"
     assert link["reviewer_session_id"] == "reviewer-1"
     assert link["phase"] == "worker"
+
+
+def test_stale_unfinished_scheduled_runs_are_abandoned(tmp_path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    for run_id, status in (("old-running", "running"), ("old-recovered", "recovered"),
+                           ("old-done", "completed"), ("fresh-running", "running")):
+        store.create_scheduled_agent_run(run_id, "jira-task-worker", "claude", "opus", None, "p")
+        store.finish_scheduled_agent_run(run_id, status=status)
+    with sqlite3.connect(tmp_path / "events.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scheduled_agent_runs SET created_at=datetime('now','-2 days') "
+            "WHERE run_id LIKE 'old-%'"
+        )
+
+    abandoned = store.abandon_stale_scheduled_agent_runs()
+
+    assert sorted(abandoned) == ["jira-task-worker old-recovered", "jira-task-worker old-running"]
+    remaining = {row["run_id"] for row in store.list_interrupted_scheduled_agent_runs()}
+    assert remaining == {"fresh-running"}

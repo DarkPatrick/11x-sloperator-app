@@ -109,6 +109,44 @@ async def _list_conversations(
             return channels
 
 
+async def _unseen_messages(
+    store: EventStore,
+    channel_id: str,
+    messages: list[Mapping[str, Any]],
+    *,
+    skip: str | None = None,
+) -> list[Mapping[str, Any]]:
+    """Return messages the archive has not stored yet, in their original order."""
+    unseen: list[Mapping[str, Any]] = []
+    for message in messages:
+        message_ts = message.get("ts")
+        if (
+            isinstance(message_ts, str)
+            and message_ts != skip
+            and not await asyncio.to_thread(store.contains_message, channel_id, message_ts)
+        ):
+            unseen.append(message)
+    return unseen
+
+
+async def _dispatch_new_messages(
+    handler: NewMessageHandler | None,
+    channel_id: str,
+    messages: list[Mapping[str, Any]],
+) -> None:
+    if handler is None:
+        return
+    for message in messages:
+        try:
+            await handler(channel_id, message)
+        except Exception:
+            LOGGER.exception(
+                "New Slack history message handler failed for %s/%s",
+                channel_id,
+                message.get("ts"),
+            )
+
+
 async def synchronize_archive(
     client: AsyncWebClient,
     store: EventStore,
@@ -163,28 +201,14 @@ async def synchronize_archive(
             continue
         history_data = _response_data(response)
         messages: list[Mapping[str, Any]] = history_data.get("messages", [])
-        new_messages: list[Mapping[str, Any]] = []
         message_handler = on_new_message
-        if message_handler is not None:
-            for message in messages:
-                message_ts = message.get("ts")
-                if isinstance(message_ts, str) and not await asyncio.to_thread(
-                    store.contains_message,
-                    channel_id,
-                    message_ts,
-                ):
-                    new_messages.append(message)
+        new_messages = (
+            await _unseen_messages(store, channel_id, messages)
+            if message_handler is not None
+            else []
+        )
         await asyncio.to_thread(store.upsert_history_messages, channel_id, messages)
-        for message in new_messages:
-            try:
-                assert message_handler is not None
-                await message_handler(channel_id, message)
-            except Exception:
-                LOGGER.exception(
-                    "New Slack history message handler failed for %s/%s",
-                    channel_id,
-                    message.get("ts"),
-                )
+        await _dispatch_new_messages(message_handler, channel_id, new_messages)
 
         for message in messages:
             latest_reply = message.get("latest_reply")
@@ -211,11 +235,18 @@ async def synchronize_archive(
                         error.response.get("error", "Slack API error"),
                     )
                     continue
-                await asyncio.to_thread(
-                    store.upsert_history_messages,
-                    channel_id,
-                    _response_data(replies).get("messages", []),
+                thread_messages: list[Mapping[str, Any]] = _response_data(replies).get(
+                    "messages", []
                 )
+                # Terminal replies (e.g. a monitor's "Recovered" under its own alert) arrive only
+                # here: conversations.history returns top-level messages, never thread replies.
+                new_replies = (
+                    await _unseen_messages(store, channel_id, thread_messages, skip=message["ts"])
+                    if message_handler is not None
+                    else []
+                )
+                await asyncio.to_thread(store.upsert_history_messages, channel_id, thread_messages)
+                await _dispatch_new_messages(message_handler, channel_id, new_replies)
 
 
 async def periodically_synchronize_archive(

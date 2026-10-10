@@ -1916,7 +1916,7 @@ class EventStore:
             rows = connection.execute(
                 """
                 SELECT run_id, job_name, provider, model, external_session_id, prompt,
-                       status, result_text
+                       status, result_text, created_at
                 FROM scheduled_agent_runs
                 WHERE status IN ('running', 'interrupted', 'recovered')
                   AND (? IS NULL OR job_name = ?)
@@ -1934,6 +1934,7 @@ class EventStore:
                 "prompt": row[5],
                 "status": row[6],
                 "result_text": row[7],
+                "created_at": row[8],
             }
             for row in rows
         ]

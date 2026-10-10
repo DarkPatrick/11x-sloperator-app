@@ -29,6 +29,7 @@ from sloperator.experiment_analytics_planner import select_from_jira as select_a
 from sloperator.experiment_design_planner import FAILURE_PREFIX as DESIGN_FAILURE_PREFIX
 from sloperator.experiment_design_planner import select_from_jira as select_design
 from sloperator.experiment_finalizer import FAILURE_PREFIXES as FINALIZATION_FAILURE_PREFIXES
+from sloperator.experiment_finalizer import NO_OP_PREFIX as FINALIZATION_NO_OP_PREFIX
 from sloperator.experiment_finalizer import (
     SELECTION_RULES as FINALIZATION_SELECTION_RULES,
 )
@@ -70,6 +71,9 @@ FAILURE_REASONS = (
     ),
     (re.compile(r"Jira review update failed", re.IGNORECASE), "не удалось обновить задачу в Jira"),
 )
+# Top-level digest posts: the regular message and the low-quota placeholder thread root.
+DIGEST_POST_MARKERS = ("Сделано сегодня", "Собираю информацию...")
+WAITING_TITLE = "Жду разъяснений"
 FINAL_STATUSES = {
     "done",
     "готово",
@@ -88,6 +92,7 @@ order, URL, time estimate, and uncertainty exactly. Preserve the supplied titled
 short bullets. Every Jira URL must remain embedded in its task title, every Confluence URL in the
 descriptive phrase such as "подготовлен документ", and every Slack URL in the corresponding
 activity title or description; never print a bare URL or a separate link label.
+Keep every person's full name exactly as written, as plain text without "@" or other markup.
 Write about your own future actions only in the first person singular: "продолжу", "возьму",
 "повторю". Never use "мы", "продолжим", "сделаем", "проверим", or another plural form. Do not
 expose technical error details. Return only the Slack-ready message.
@@ -146,6 +151,7 @@ class DigestFacts:
     completed: tuple[DigestItem, ...]
     pending: tuple[DigestItem, ...]
     active: tuple[DigestItem, ...] = ()
+    waiting: tuple[DigestItem, ...] = ()
     continuation_title: str = "Продолжу завтра"
     quota_note: str | None = None
     queue_notes: tuple[str, ...] = ()
@@ -553,6 +559,17 @@ def _merge_completed_session(
     return False
 
 
+def _is_no_op_finalizer_thread(
+    session: dict[str, Any], messages: list[dict[str, Any]]
+) -> bool:
+    """A finalizer thread that only says no experiment qualified is not work done."""
+    if session.get("agent_name") != "experiment-finalizer/slack":
+        return False
+    texts = [str(message.get("text", "")).strip() for message in messages]
+    texts = [text for text in texts if text]
+    return bool(texts) and all(text.startswith(FINALIZATION_NO_OP_PREFIX) for text in texts)
+
+
 def _slack_session_item(session: dict[str, Any]) -> tuple[str, DigestItem] | None:
     """Turn one substantive Slack agent session into a completed or pending item."""
     status = str(session.get("status", ""))
@@ -803,6 +820,8 @@ async def collect_facts(
             except Exception:
                 LOGGER.warning("Daily digest could not read one Slack agent thread")
                 messages = []
+            if _is_no_op_finalizer_thread(session, messages):
+                continue
             session_refs = _activity_refs(
                 "\n".join(str(message.get("text", "")) for message in messages)
             )
@@ -821,7 +840,7 @@ async def collect_facts(
     today_keys = {task_key for run in today_runs for task_key in _run_task_keys(run)}
 
     async def add_pending(task_key: str, note: str) -> None:
-        if task_key in completed_keys or task_key in pending_keys:
+        if task_key in completed_keys or task_key in pending_keys or task_key in waiting_keys:
             return
         task = await snapshot(task_key)
         pending.append(
@@ -835,7 +854,11 @@ async def collect_facts(
         pending_keys.add(task_key)
 
     async def add_active(task_key: str, note: str) -> None:
-        if task_key in completed_keys or any(item.task_key == task_key for item in active):
+        if (
+            task_key in completed_keys
+            or task_key in waiting_keys
+            or any(item.task_key == task_key for item in active)
+        ):
             return
         task = await snapshot(task_key)
         active.append(
@@ -851,6 +874,37 @@ async def collect_facts(
     pending_keys.update(item.task_key for item in slack_pending)
 
     active_links = await asyncio.to_thread(store.active_jira_task_agent_links)
+    waiting: list[DigestItem] = []
+    waiting_keys: set[str] = set()
+    if reader is not None:
+        for link in active_links:
+            task_key = str(link["task_key"])
+            if task_key in completed_keys or task_key in waiting_keys:
+                continue
+            task = await snapshot(task_key)
+            if task is None or str(getattr(task, "status", "")).casefold() in FINAL_STATUSES:
+                continue
+            try:
+                request = await reader.clarification_request(task_key)
+            except Exception:
+                LOGGER.warning("Daily digest could not read Jira comments of %s", task_key)
+                continue
+            if request is None:
+                continue
+            waiting.append(
+                DigestItem(
+                    task_key,
+                    _task_title(task, task_key),
+                    f"{settings.jira_url.rstrip('/')}/browse/{task_key}",
+                    (
+                        f"задал вопрос в задаче, жду ответа от {request.requested_from}"
+                        if request.requested_from
+                        else "задал вопрос в задаче, жду ответа автора"
+                    ),
+                )
+            )
+            waiting_keys.add(task_key)
+
     for link in active_links:
         task_key = str(link["task_key"])
         if task_key not in today_keys:
@@ -916,6 +970,7 @@ async def collect_facts(
         tuple(completed),
         tuple(pending),
         active=tuple(active),
+        waiting=tuple(waiting),
         continuation_title=_continuation_title(current),
         quota_note=quota_note,
         queue_notes=tuple(queue_notes),
@@ -956,6 +1011,11 @@ def render_fallback(facts: DigestFacts) -> str:
             lines.append(f"- {title} — {item.note}.")
     elif not facts.quota_note and not facts.queue_notes:
         lines.append("- Застрявших задач и очереди сейчас нет.")
+    if facts.waiting:
+        lines.extend(("", f"*{WAITING_TITLE}*"))
+        for item in facts.waiting:
+            title = f"[{item.title}]({item.jira_url})" if item.jira_url else item.title
+            lines.append(f"- {title} — {item.note}.")
     return "\n".join(lines)
 
 
@@ -983,6 +1043,10 @@ def is_valid_agent_digest(text: str, draft: str) -> bool:
     ):
         return False
     if "не удалось надёжно проверить" in draft and "не удалось" not in stripped:
+        return False
+    if WAITING_TITLE in draft and WAITING_TITLE not in stripped:
+        return False
+    if not all(name in stripped for name in re.findall(r"жду ответа от ([^.\n]+)", draft)):
         return False
     if "нет задачи по итогам, проходящей все фильтры" in draft and not all(
         phrase in stripped for phrase in ("нет", "задач", "итог")
@@ -1107,13 +1171,80 @@ async def run_once(
     return message, used_agent
 
 
+def _created_at(value: object) -> dt.datetime | None:
+    if not value:
+        return None
+    with suppress(ValueError, TypeError):
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=dt.UTC)
+    return None
+
+
+async def discard_stale_runs(store: DigestStore, *, now: dt.datetime | None = None) -> int:
+    """Abandon interrupted digest stages whose day has passed or whose digest is already out.
+
+    A digest describes one working day. Resuming it after midnight, or after the deterministic
+    fallback was already published for the same run, would post a duplicate for the wrong day.
+    """
+    current = now or dt.datetime.now(dt.UTC)
+    timezone = ZoneInfo(TIMEZONE)
+    rows = [
+        row
+        for job_name in (JOB_NAME, FINALIZATION_FORECAST_JOB_NAME)
+        for row in await asyncio.to_thread(store.list_interrupted_scheduled_agent_runs, job_name)
+    ]
+    created = {str(row["run_id"]): _created_at(row.get("created_at")) for row in rows}
+    known = [value for value in created.values() if value is not None]
+    posts: list[dict[str, Any]] = []
+    if known:
+        try:
+            posts = await asyncio.to_thread(
+                store.bot_channel_messages, [CHANNEL_ID], min(known).timestamp()
+            )
+        except Exception:
+            LOGGER.warning("Daily digest could not read its published posts")
+    post_times = [
+        float(post["message_ts"])
+        for post in posts
+        if any(marker in str(post.get("text", "")) for marker in DIGEST_POST_MARKERS)
+    ]
+    discarded = 0
+    for row in rows:
+        run_id = str(row["run_id"])
+        started = created[run_id]
+        if started is None:
+            continue
+        if started.astimezone(timezone).date() != current.astimezone(timezone).date():
+            reason = "stale digest run from a previous day; not resumed"
+        elif any(posted >= started.timestamp() for posted in post_times):
+            reason = "digest already published for this run; not resumed"
+        else:
+            continue
+        await asyncio.to_thread(
+            store.finish_scheduled_agent_run,
+            run_id,
+            status="abandoned",
+            external_session_id=(
+                str(row["external_session_id"]) if row.get("external_session_id") else None
+            ),
+            result_text=str(row["result_text"]) if row.get("result_text") is not None else None,
+            last_error=reason,
+        )
+        LOGGER.warning("Abandoned interrupted %s run %s: %s", row.get("job_name"), run_id, reason)
+        discarded += 1
+    return discarded
+
+
 async def resume_interrupted(
     client: AsyncWebClient,
     agent: AgentSubmitter,
     settings: Settings,
     store: DigestStore,
+    *,
+    now: dt.datetime | None = None,
 ) -> int:
     """Resume the interrupted agent stage and finish the digest workflow."""
+    await discard_stale_runs(store, now=now)
     recovered_digests = await agent.resume_interrupted_headless(
         TIMEOUT_SECONDS,
         job_name=JOB_NAME,

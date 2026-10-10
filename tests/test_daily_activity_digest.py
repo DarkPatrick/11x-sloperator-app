@@ -529,3 +529,193 @@ async def test_published_automation_failure_is_reported_in_done_today(
     )
     rendered = render_fallback(result)
     assert rendered.index("не удалось собрать дизайн") < rendered.index("*Продолжу")
+
+
+def _stale_store(rows_by_job, posts):
+    finished = []
+    return SimpleNamespace(
+        list_interrupted_scheduled_agent_runs=lambda job_name=None: rows_by_job.get(job_name, []),
+        bot_channel_messages=lambda channels, since: [
+            post for post in posts if float(post["message_ts"]) >= since
+        ],
+        finish_scheduled_agent_run=lambda run_id, **values: finished.append((run_id, values)),
+    ), finished
+
+
+async def test_previous_day_digest_run_is_abandoned_not_republished() -> None:
+    from sloperator.daily_activity_digest import discard_stale_runs
+
+    saturday = dt.datetime(2026, 10, 10, 13, 37, tzinfo=dt.UTC)
+    store, finished = _stale_store(
+        {"daily-activity-digest": [{
+            "run_id": "friday", "job_name": "daily-activity-digest", "status": "running",
+            "external_session_id": "s1", "result_text": None,
+            "created_at": "2026-10-09 16:17:02",
+        }]},
+        [],
+    )
+
+    assert await discard_stale_runs(store, now=saturday) == 1
+    assert finished[0][0] == "friday"
+    assert finished[0][1]["status"] == "abandoned"
+
+
+async def test_same_day_run_is_abandoned_once_its_digest_was_published() -> None:
+    from sloperator.daily_activity_digest import discard_stale_runs
+
+    evening = dt.datetime(2026, 10, 9, 17, 0, tzinfo=dt.UTC)
+    started = dt.datetime(2026, 10, 9, 16, 17, 2, tzinfo=dt.UTC)
+    store, finished = _stale_store(
+        {"daily-activity-digest": [
+            {"run_id": "timed-out", "job_name": "daily-activity-digest", "status": "running",
+             "external_session_id": None, "result_text": None,
+             "created_at": started.strftime("%Y-%m-%d %H:%M:%S")},
+        ]},
+        [{"message_ts": str(started.timestamp() + 180), "text": "_Сделано сегодня_\n• ..."}],
+    )
+
+    assert await discard_stale_runs(store, now=evening) == 1
+    assert finished[0][1]["last_error"] == "digest already published for this run; not resumed"
+
+
+async def test_same_day_unpublished_run_is_kept_for_resume() -> None:
+    from sloperator.daily_activity_digest import discard_stale_runs
+
+    evening = dt.datetime(2026, 10, 9, 17, 0, tzinfo=dt.UTC)
+    store, finished = _stale_store(
+        {FINALIZATION_FORECAST_JOB_NAME: [{
+            "run_id": "forecast", "job_name": FINALIZATION_FORECAST_JOB_NAME,
+            "status": "running", "external_session_id": None, "result_text": None,
+            "created_at": "2026-10-09 16:00:01",
+        }]},
+        [{"message_ts": str(dt.datetime(2026, 10, 9, 10, tzinfo=dt.UTC).timestamp()),
+          "text": "unrelated bot post"}],
+    )
+
+    assert await discard_stale_runs(store, now=evening) == 0
+    assert finished == []
+
+
+def _digest_store(**overrides):
+    values = {
+        "list_scheduled_agent_runs": lambda _limit: [],
+        "list_agent_sessions": lambda _limit: [],
+        "active_jira_task_agent_links": lambda: [],
+        "thread_messages": lambda *_args: [],
+        "bot_channel_messages": lambda *_args: [],
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _patch_queues(monkeypatch, reader) -> None:
+    monkeypatch.setattr("sloperator.daily_activity_digest.JiraTaskReader", lambda *_: reader)
+    monkeypatch.setattr("sloperator.daily_activity_digest.select_design", AsyncMock(
+        return_value=None))
+    monkeypatch.setattr("sloperator.daily_activity_digest.select_analytics", AsyncMock(
+        return_value=None))
+    monkeypatch.setattr("sloperator.daily_activity_digest.read_usage", AsyncMock(
+        return_value=ClaudeUsage(0, 0, "", "")))
+
+
+async def test_no_eligible_finalizer_thread_is_not_reported_as_done(
+    monkeypatch, tmp_path
+) -> None:
+    from sloperator.daily_activity_digest import collect_facts
+
+    now = dt.datetime(2026, 10, 9, 16, 0, tzinfo=dt.UTC)
+    session = {
+        "channel_id": "C07A9FDQ14P", "channel_name": "ug-experiments",
+        "thread_ts": "1791536598.030719", "agent_name": "experiment-finalizer/slack",
+        "status": "idle", "turn_count": 1,
+        "created_at": "2026-10-09 09:03:18", "updated_at": "2026-10-09 09:03:30",
+    }
+    store = _digest_store(
+        list_agent_sessions=lambda _limit: [session],
+        thread_messages=lambda *_args: [{
+            "message_ts": "1791536598.030719",
+            "text": "No eligible experiment was found for calculation today.",
+        }],
+    )
+    reader = SimpleNamespace(queued_tasks=AsyncMock(return_value=[]))
+    _patch_queues(monkeypatch, reader)
+    current = replace(settings(tmp_path), jira_username="user", jira_api_token="token")
+
+    result, _usage = await collect_facts(current, store, now=now)
+
+    assert result.completed == ()
+    assert "итогами" not in render_fallback(result)
+
+
+async def test_task_waiting_for_author_gets_its_own_final_block(monkeypatch, tmp_path) -> None:
+    from sloperator.daily_activity_digest import collect_facts
+    from sloperator.jira_task_automation import ClarificationRequest
+
+    now = dt.datetime(2026, 10, 9, 16, 0, tzinfo=dt.UTC)
+    run = {
+        "channel_name": "jira-task-reviewer", "status": "running",
+        "updated_at": "2026-10-09 15:28:56",
+        "messages": [{"text": "You own Jira task UMN-12379"}],
+    }
+    store = _digest_store(
+        list_scheduled_agent_runs=lambda _limit: [run],
+        active_jira_task_agent_links=lambda: [{"task_key": "UMN-12379"}],
+    )
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=SimpleNamespace(
+            summary="Выводы - First session: Official tabs promo",
+            status="В работе",  # noqa: RUF001
+        )),
+        queued_tasks=AsyncMock(return_value=[]),
+        clarification_request=AsyncMock(
+            return_value=ClarificationRequest("UMN-12379", "Elzira Badretdinova")
+        ),
+    )
+    _patch_queues(monkeypatch, reader)
+    current = replace(settings(tmp_path), jira_username="user", jira_api_token="token")
+
+    result, _usage = await collect_facts(current, store, now=now)
+
+    assert result.active == ()
+    (item,) = result.waiting
+    assert item.note == "задал вопрос в задаче, жду ответа от Elzira Badretdinova"
+    rendered = render_fallback(result)
+    assert rendered.rindex("*Жду разъяснений*") > rendered.index("*Продолжу")
+    assert rendered.rstrip().endswith("жду ответа от Elzira Badretdinova.")
+    assert is_valid_agent_digest(rendered, rendered)
+    assert not is_valid_agent_digest(
+        rendered.replace("Elzira Badretdinova", "автора"), rendered
+    )
+
+
+async def test_clarification_request_needs_latest_service_account_question() -> None:
+    from sloperator.jira_task_automation import SERVICE_ACCOUNT_ID, JiraTaskReader
+
+    def comment(account: str, text: str) -> dict:
+        return {
+            "author": {"accountId": account},
+            "body": {"type": "doc", "content": [{"type": "paragraph", "content": [
+                {"type": "text", "text": text}]}]},
+        }
+
+    reader = JiraTaskReader("https://jira", "user", "token")
+    reader.assigned_by = AsyncMock(return_value="Elzira Badretdinova")  # type: ignore[method-assign]
+
+    reader.recent_comments = AsyncMock(  # type: ignore[method-assign]
+        return_value=[comment(SERVICE_ACCOUNT_ID, "Which result do you need here?")]
+    )
+    request = await reader.clarification_request("UMN-12389")
+    assert request is not None and request.requested_from == "Elzira Badretdinova"
+
+    reader.recent_comments = AsyncMock(  # type: ignore[method-assign]
+        return_value=[
+            comment(SERVICE_ACCOUNT_ID, "Which result do you need here?"),
+            comment("human", "Option 1, please."),
+        ]
+    )
+    assert await reader.clarification_request("UMN-12389") is None
+
+    reader.recent_comments = AsyncMock(  # type: ignore[method-assign]
+        return_value=[comment(SERVICE_ACCOUNT_ID, "Done: results are on the page.")]
+    )
+    assert await reader.clarification_request("UMN-12389") is None

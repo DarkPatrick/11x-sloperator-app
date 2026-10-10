@@ -651,6 +651,12 @@ class JiraTaskCandidate:
     description: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class ClarificationRequest:
+    task_key: str
+    requested_from: str | None
+
+
 def weekly_quota_allows_launch(usage: ClaudeUsage, *, now: dt.datetime) -> bool:
     """Require >50% five-hour headroom and enough weekly headroom for remaining days."""
     if usage.session_remaining_percent <= 50:
@@ -740,6 +746,44 @@ class JiraTaskReader:
                     raise RuntimeError(f"Jira comment read failed with HTTP {response.status}")
                 payload: dict[str, Any] = json.loads(await response.text())
         return list(reversed([item for item in payload.get("comments", []) if isinstance(item, dict)]))
+
+    async def clarification_request(self, task_key: str) -> ClarificationRequest | None:
+        """Return the open question when the service account's comment is the latest one.
+
+        The reviewer asks the author in Jira and leaves the task in progress, so the ball is on
+        the author's side until a human replies.
+        """
+        comments = await self.recent_comments(task_key)
+        if not comments:
+            return None
+        latest = comments[-1]
+        if str((latest.get("author") or {}).get("accountId", "")) != SERVICE_ACCOUNT_ID:
+            return None
+        if "?" not in _adf_text(latest.get("body")):
+            return None
+        return ClarificationRequest(task_key, await self.assigned_by(task_key))
+
+    async def assigned_by(self, task_key: str) -> str | None:
+        """Return the display name of whoever last handed the task to the service account."""
+        async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
+            async with session.get(
+                f"{self.base_url}/rest/api/3/issue/{task_key}",
+                params={"expand": "changelog", "fields": "assignee"},
+            ) as response:
+                if response.status >= 400:
+                    return None
+                payload: dict[str, Any] = json.loads(await response.text())
+        histories = payload.get("changelog", {}).get("histories", [])
+        newest_first = sorted(histories, key=lambda item: str(item.get("created", "")), reverse=True)
+        for history in newest_first:
+            author = history.get("author") or {}
+            if str(author.get("accountId", "")) == SERVICE_ACCOUNT_ID:
+                continue
+            for item in history.get("items", []):
+                if item.get("field") == "assignee" and item.get("to") == SERVICE_ACCOUNT_ID:
+                    name = str(author.get("displayName", "")).strip()
+                    return name or None
+        return None
 
     async def was_returned_to_work(self, task_key: str, since: str | None = None) -> bool:
         async with ClientSession(auth=self.auth, timeout=self.timeout) as session:

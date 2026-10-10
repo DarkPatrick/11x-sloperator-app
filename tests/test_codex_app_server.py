@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from sloperator.codex_app_server import CodexAppServer, CodexAppServerError
+from sloperator.workspace_lock import workspace_lock_path
 
 
 def test_command_makes_git_metadata_writable_inside_workspace_sandbox() -> None:
@@ -22,14 +23,14 @@ def test_command_makes_git_metadata_writable_inside_workspace_sandbox() -> None:
     assert command[-3:] == ["app-server", "--listen", "stdio://"]
 
 
-def test_command_locks_the_same_git_directory() -> None:
+def test_command_takes_the_shared_workspace_lock() -> None:
     workspace = Path("/srv/agent")
     server = CodexAppServer(Path("/usr/bin/codex"), workspace, "model", 60)
 
     assert server._command()[:3] == [
         "/usr/bin/flock",
         "-x",
-        "/srv/agent/.git/sloperator-agent.lock",
+        str(workspace_lock_path(workspace)),
     ]
 
 

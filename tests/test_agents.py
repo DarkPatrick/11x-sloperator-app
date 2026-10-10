@@ -21,6 +21,7 @@ from sloperator.agents import (
     AgentAuthenticationError,
     AgentExecutionError,
     AgentInfrastructureError,
+    AgentLaunchError,
     AgentOrchestrator,
     AgentRunResult,
     AgentSessionNotFoundError,
@@ -98,6 +99,42 @@ async def test_missing_claude_session_is_replaced_without_service_backoff(
     assert replacement_id != "vanished-session"
     assert result.session_id == replacement_id
     assert store.get_agent_session("C123", "100.1").external_session_id == replacement_id
+
+
+async def test_lock_failure_stops_without_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider = AsyncMock(
+        return_value=(
+            1,
+            "",
+            "flock: cannot open lock file /srv/.git/sloperator-agent.lock: Read-only file system",
+        )
+    )
+    monkeypatch.setattr("sloperator.agents._run_process", provider)
+    database = tmp_path / "events.sqlite3"
+    store = EventStore(database)
+    store.initialize()
+    store.create_agent_session("C123", "100.2", "claude", "claude-opus-5-5", None)
+    session = store.get_agent_session("C123", "100.2")
+    assert session is not None
+    settings = Settings(
+        slack_user_id="UOWNER",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+        database_path=database,
+    )
+
+    with pytest.raises(AgentLaunchError, match="Read-only file system"):
+        await retry_agent_service_errors(
+            lambda: run_claude(settings, session, "Audit", ActiveAgentRun("claude")),
+            context="test",
+            delays=(0, 0),
+        )
+
+    provider.assert_awaited_once()
 
 
 async def test_missing_session_error_bypasses_generic_retries() -> None:

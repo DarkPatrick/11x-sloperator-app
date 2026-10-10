@@ -56,6 +56,7 @@ from sloperator.operations_store import observed
 from sloperator.slack_files import attachment_prompt
 from sloperator.store import AgentSession, EventStore
 from sloperator.vpn import VpnManager, VpnState
+from sloperator.workspace_lock import is_lock_failure, with_workspace_lock
 
 LOGGER = logging.getLogger(__name__)
 TURN_ARTIFACT_POLICY = """\
@@ -358,6 +359,10 @@ class AgentSessionNotFoundError(AgentExecutionError):
     """Raised when a provider can no longer resume its persisted session."""
 
 
+class AgentLaunchError(AgentExecutionError):
+    """Raised when the agent CLI could not be started at all; a retry hits the same wall."""
+
+
 class AgentTimeoutError(AgentExecutionError):
     """Raised when an agent turn reaches its configured work-time limit."""
 
@@ -388,6 +393,7 @@ async def retry_agent_service_errors[AgentResult](
             AgentTimeoutError,
             AgentAuthenticationError,
             AgentInfrastructureError,
+            AgentLaunchError,
             AgentSessionNotFoundError,
         ):
             raise
@@ -1008,11 +1014,8 @@ def authentication_failure_notice(provider: str, owner_user_id: str) -> str:
 
 
 def _with_workspace_lock(settings: Settings, command: list[str]) -> list[str]:
-    """Serialize agents and automatic updates that share one working tree."""
-    git_directory = settings.agent_workspace / ".git"
-    if not git_directory.is_dir():
-        return command
-    return ["/usr/bin/flock", "-x", str(git_directory / "sloperator-agent.lock"), *command]
+    """Serialize agents that share one working tree."""
+    return with_workspace_lock(settings.agent_workspace, command)
 
 
 @observed("Claude CLI")
@@ -1084,6 +1087,8 @@ async def _run_claude(
     else:
         return_code, stdout, stderr = await operation()
     diagnostic = f"{stdout}\n{stderr}"
+    if return_code != 0 and is_lock_failure(stderr):
+        raise AgentLaunchError(f"Claude was not started: {_tail(stderr)}")
     if is_authentication_failure(diagnostic):
         raise AgentAuthenticationError("claude", _tail(diagnostic))
     if not new_session and "no conversation found with session id" in diagnostic.casefold():

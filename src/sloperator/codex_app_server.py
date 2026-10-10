@@ -14,6 +14,7 @@ from typing import Any
 
 from sloperator.agent_usage import TokenUsage, parse_codex_usage
 from sloperator.operations_store import observed
+from sloperator.workspace_lock import with_workspace_lock
 
 LOGGER = logging.getLogger(__name__)
 
@@ -80,8 +81,7 @@ class CodexAppServer:
             "stdio://",
         ]
         if self.lock_workspace:
-            lock_path = git_dir / "sloperator-agent.lock"
-            return ["/usr/bin/flock", "-x", str(lock_path), *command]
+            return with_workspace_lock(self.workspace, command)
         return command
 
     async def connect(self) -> None:

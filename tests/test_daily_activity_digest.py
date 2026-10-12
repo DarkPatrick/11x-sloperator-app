@@ -350,6 +350,7 @@ async def test_successful_agent_digest_is_sent_to_channel(monkeypatch, tmp_path)
         "claude", "claude-opus-5-5", "session", draft
     )
     client = AsyncMock()
+    client.chat_postMessage.return_value = {"channel": CHANNEL_ID, "ts": "100.2"}
 
     message, used_agent = await run_once(client, agent, settings(tmp_path), AsyncMock())
 
@@ -359,6 +360,58 @@ async def test_successful_agent_digest_is_sent_to_channel(monkeypatch, tmp_path)
     assert "AUTOMATED RESPONSE STYLE" in agent.execute_once.await_args.args[0]
     client.conversations_open.assert_not_awaited()
     assert client.chat_postMessage.await_args.kwargs["channel"] == CHANNEL_ID
+    agent.attach_session.assert_awaited_once()
+    channel_id, thread_ts, thread_run = agent.attach_session.await_args.args
+    assert channel_id == CHANNEL_ID
+    assert thread_ts == "100.2"
+    assert thread_run.session_id == "session"
+    assert thread_run.text == draft
+
+
+@pytest.mark.asyncio
+async def test_fallback_digest_still_gets_a_thread_session(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.collect_facts",
+        AsyncMock(return_value=(facts(), ClaudeUsage(0, 0, "", "Oct 2, 10:00PM"))),
+    )
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest._add_finalization_forecast",
+        AsyncMock(return_value=facts()),
+    )
+    agent = AsyncMock()
+    agent.execute_once.side_effect = RuntimeError("provider unavailable")
+    client = AsyncMock()
+    client.chat_postMessage.return_value = {"channel": CHANNEL_ID, "ts": "100.3"}
+
+    message, used_agent = await run_once(client, agent, settings(tmp_path), AsyncMock())
+
+    assert not used_agent
+    channel_id, thread_ts, thread_run = agent.attach_session.await_args.args
+    assert (channel_id, thread_ts) == (CHANNEL_ID, "100.3")
+    assert thread_run.text == message
+    assert thread_run.job_name == "daily-activity-digest"
+
+
+@pytest.mark.asyncio
+async def test_attach_failure_does_not_break_published_digest(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.collect_facts",
+        AsyncMock(return_value=(facts(), ClaudeUsage(0, 0, "", "Oct 2, 10:00PM"))),
+    )
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest._add_finalization_forecast",
+        AsyncMock(return_value=facts()),
+    )
+    agent = AsyncMock()
+    agent.execute_once.side_effect = RuntimeError("provider unavailable")
+    agent.attach_session.side_effect = RuntimeError("db locked")
+    client = AsyncMock()
+    client.chat_postMessage.return_value = {"channel": CHANNEL_ID, "ts": "100.4"}
+
+    message, _used_agent = await run_once(client, agent, settings(tmp_path), AsyncMock())
+
+    assert message == render_fallback(facts())
+    client.chat_postMessage.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -371,7 +424,7 @@ async def test_interrupted_forecast_resumes_and_finishes_digest(monkeypatch, tmp
     formatted = render_fallback(current_facts)
     monkeypatch.setattr(
         "sloperator.daily_activity_digest._format_draft",
-        AsyncMock(return_value=(formatted, True)),
+        AsyncMock(return_value=(formatted, True, None)),
     )
     recovered = HeadlessAgentRun(
         "claude",
@@ -426,6 +479,8 @@ async def test_interrupted_formatter_resumes_and_publishes_directly(tmp_path) ->
 
     assert count == 1
     agent.resume_interrupted_headless.assert_awaited_once()
+    agent.attach_session.assert_awaited_once()
+    assert agent.attach_session.await_args.args[2].session_id == "digest-session"
     client.chat_postMessage.assert_awaited_once_with(
         channel=CHANNEL_ID,
         markdown_text=message,

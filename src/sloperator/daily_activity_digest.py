@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import logging
 import re
+import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -169,6 +170,13 @@ class AgentSubmitter(Protocol):
         accept_result: Callable[[str], bool] = lambda _: True,
         max_interim_results: int = 2,
     ) -> HeadlessAgentRun: ...
+
+    async def attach_session(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        run: HeadlessAgentRun,
+    ) -> None: ...
 
     async def submit(
         self,
@@ -1088,14 +1096,38 @@ async def build_digest(
         return render_fallback(facts), False
     facts = await _add_finalization_forecast(facts, settings, agent, now=current)
     draft = render_fallback(facts)
-    return await _format_draft(settings, agent, draft)
+    message, used_agent, _run = await _format_draft(settings, agent, draft)
+    return message, used_agent
+
+
+async def _attach_thread_session(
+    agent: AgentSubmitter,
+    settings: Settings,
+    response: Any,
+    message: str,
+    run: HeadlessAgentRun | None,
+) -> None:
+    """Make replies under the published digest reach an agent, like other bot posts."""
+    try:
+        thread_ts = str(response["ts"])
+        channel_id = str(response.get("channel") or CHANNEL_ID)
+        thread_run = (
+            replace(run, text=message)
+            if run is not None
+            else HeadlessAgentRun(
+                "claude", settings.claude_model, str(uuid.uuid4()), message, job_name=JOB_NAME
+            )
+        )
+        await agent.attach_session(channel_id, thread_ts, thread_run)
+    except Exception:
+        LOGGER.exception("Daily activity digest was posted but its thread session was not attached")
 
 
 async def _format_draft(
     settings: Settings,
     agent: AgentSubmitter,
     draft: str,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, HeadlessAgentRun | None]:
     prompt = f"{DIGEST_PROMPT}\n\nAuthoritative draft:\n{draft}"
     try:
         run = await asyncio.wait_for(
@@ -1111,8 +1143,10 @@ async def _format_draft(
         )
     except Exception:
         LOGGER.exception("Daily activity digest formatter failed; using deterministic fallback")
-        return draft, False
-    return (run.text.strip(), True) if is_valid_agent_digest(run.text, draft) else (draft, False)
+        return draft, False, None
+    if is_valid_agent_digest(run.text, draft):
+        return run.text.strip(), True, run
+    return draft, False, None
 
 
 async def run_once(
@@ -1171,13 +1205,14 @@ async def run_once(
             recovered_forecast,
             now=current,
         )
-    message, used_agent = await _format_draft(settings, agent, render_fallback(facts))
-    await client.chat_postMessage(
+    message, used_agent, run = await _format_draft(settings, agent, render_fallback(facts))
+    response = await client.chat_postMessage(
         channel=channel_id,
         markdown_text=message,
         unfurl_links=False,
         unfurl_media=False,
     )
+    await _attach_thread_session(agent, settings, response, message, run)
     return message, used_agent
 
 
@@ -1276,12 +1311,13 @@ async def resume_interrupted(
                     last_error="recovered digest failed output validation",
                 )
             continue
-        await client.chat_postMessage(
+        response = await client.chat_postMessage(
             channel=CHANNEL_ID,
             markdown_text=message,
             unfurl_links=False,
             unfurl_media=False,
         )
+        await _attach_thread_session(agent, settings, response, message, run)
         if run.run_id is not None:
             await asyncio.to_thread(
                 store.finish_scheduled_agent_run,

@@ -36,6 +36,7 @@ from sloperator.experiment_finalizer import (
 from sloperator.experiment_finalizer import next_run_at as next_finalization_run_at
 from sloperator.jira_task_automation import (
     JiraTaskReader,
+    is_reassigned_away,
     is_reserved_experiment_task,
 )
 
@@ -843,6 +844,8 @@ async def collect_facts(
         if task_key in completed_keys or task_key in pending_keys or task_key in waiting_keys:
             return
         task = await snapshot(task_key)
+        if is_reassigned_away(task):
+            return
         pending.append(
             DigestItem(
                 task_key,
@@ -882,7 +885,11 @@ async def collect_facts(
             if task_key in completed_keys or task_key in waiting_keys:
                 continue
             task = await snapshot(task_key)
-            if task is None or str(getattr(task, "status", "")).casefold() in FINAL_STATUSES:
+            if (
+                task is None
+                or str(getattr(task, "status", "")).casefold() in FINAL_STATUSES
+                or is_reassigned_away(task)
+            ):
                 continue
             try:
                 request = await reader.clarification_request(task_key)
@@ -910,7 +917,10 @@ async def collect_facts(
         if task_key not in today_keys:
             continue
         task = await snapshot(task_key)
-        if str(getattr(task, "status", "")).casefold() in FINAL_STATUSES:
+        if (
+            str(getattr(task, "status", "")).casefold() in FINAL_STATUSES
+            or is_reassigned_away(task)
+        ):
             continue
         await add_active(task_key, "уже в работе; завершаю")
 

@@ -303,3 +303,64 @@ async def test_hourly_starts_reviewer_before_worker_and_resumes_owner(monkeypatc
     ]
     assert calls[2].kwargs["existing_session_id"] == "owner"
     assert "Private result" in calls[2].args[0]
+
+
+async def test_poll_closes_link_and_sessions_of_reassigned_task(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    import pytest
+
+    from sloperator import jira_task_automation as automation
+
+    link = {
+        "task_key": "UMN-13632", "phase": "waiting",
+        "worker_session_id": "worker-1", "reviewer_session_id": "owner-1",
+        "last_jira_updated_at": "2026-10-12T07:00:00+00:00",
+    }
+    task = SimpleNamespace(
+        key="UMN-13632", summary="Выводы", description="", status="В работе",  # noqa: RUF001
+        updated_at=dt.datetime(2026, 10, 12, 9, 0, tzinfo=dt.UTC),
+        assignee_account_id="human-account",
+    )
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=task),
+        recent_comments=AsyncMock(return_value=[]),
+        was_returned_to_work=AsyncMock(return_value=False),
+    )
+    store = Mock()
+    store.active_jira_task_agent_links.return_value = [link]
+    store.jira_task_agent_link.return_value = link
+    store.sync_completed_planner_tasks.return_value = 0
+    agent = SimpleNamespace(store=store, execute_once=AsyncMock())
+    settings = SimpleNamespace(jira_username="bot", jira_api_token="test",
+                               jira_url="https://jira.invalid", agent_workspace=None)
+    monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
+    monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))
+    monkeypatch.setattr(automation, "weekly_quota_allows_launch", lambda *a, **kw: True)
+    monkeypatch.setattr(automation.asyncio, "sleep",
+                        AsyncMock(side_effect=asyncio.CancelledError))
+
+    with pytest.raises(asyncio.CancelledError):
+        await automation.poll_active_tasks(settings, agent)
+
+    agent.execute_once.assert_not_called()
+    reader.recent_comments.assert_not_called()
+    (call,) = store.upsert_jira_task_agent_link.call_args_list
+    assert call.args == ("UMN-13632",)
+    assert call.kwargs["phase"] == "reassigned"
+    assert call.kwargs["terminal_at"]
+    store.close_agent_sessions_by_external_ids.assert_called_once_with(["worker-1", "owner-1"])
+
+
+def test_is_reassigned_away() -> None:
+    from types import SimpleNamespace
+
+    from sloperator.jira_task_automation import SERVICE_ACCOUNT_ID, is_reassigned_away
+
+    assert not is_reassigned_away(SimpleNamespace())
+    assert not is_reassigned_away(SimpleNamespace(assignee_account_id=None))
+    assert not is_reassigned_away(SimpleNamespace(assignee_account_id=SERVICE_ACCOUNT_ID))
+    assert is_reassigned_away(SimpleNamespace(assignee_account_id=""))
+    assert is_reassigned_away(SimpleNamespace(assignee_account_id="human"))

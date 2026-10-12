@@ -457,3 +457,19 @@ def test_stale_unfinished_scheduled_runs_are_abandoned(tmp_path) -> None:
     assert sorted(abandoned) == ["jira-task-worker old-recovered", "jira-task-worker old-running"]
     remaining = {row["run_id"] for row in store.list_interrupted_scheduled_agent_runs()}
     assert remaining == {"fresh-running"}
+
+
+def test_store_closes_agent_sessions_by_external_ids(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "archive.sqlite3")
+    store.initialize()
+    store.create_agent_session("D1", "1.0", "claude", "opus", "owner-1")
+    store.create_agent_session("D1", "2.0", "claude", "opus", "other")
+
+    assert store.close_agent_sessions_by_external_ids([None, "owner-1", "owner-1", "missing"]) == 1
+    assert store.close_agent_sessions_by_external_ids(["owner-1"]) == 0
+    assert store.close_agent_sessions_by_external_ids([]) == 0
+
+    closed = store.get_agent_session("D1", "1.0")
+    kept = store.get_agent_session("D1", "2.0")
+    assert closed is not None and closed.status == "closed"
+    assert kept is not None and kept.status != "closed"

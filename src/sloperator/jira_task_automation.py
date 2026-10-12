@@ -459,6 +459,18 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     if task.status == "Done":
                         agent.store.upsert_jira_task_agent_link(task.key, phase="done", terminal_at=dt.datetime.now(dt.UTC).isoformat())
                         continue
+                    if is_reassigned_away(task):
+                        # Someone took the task over: stop tracking it and never resume its agents.
+                        LOGGER.info("Jira task %s was reassigned away; closing its link", task.key)
+                        agent.store.upsert_jira_task_agent_link(
+                            task.key,
+                            phase="reassigned",
+                            terminal_at=dt.datetime.now(dt.UTC).isoformat(),
+                        )
+                        agent.store.close_agent_sessions_by_external_ids(
+                            [link.get("worker_session_id"), link.get("reviewer_session_id")]
+                        )
+                        continue
                     comments = await reader.recent_comments(task.key)
                     returned_to_work = await reader.was_returned_to_work(task.key, since=link.get("last_jira_updated_at"))
                     comment_context = json.dumps(comments[-5:], ensure_ascii=False)[:8000]
@@ -649,6 +661,14 @@ class JiraTaskCandidate:
     updated_at: dt.datetime
     project_url: str | None = None
     description: str = ""
+    # None = not read (queue search); "" = unassigned; otherwise the Jira account id.
+    assignee_account_id: str | None = None
+
+
+def is_reassigned_away(task: Any) -> bool:
+    """True when Jira shows the task is no longer on the service account."""
+    assignee = getattr(task, "assignee_account_id", None)
+    return assignee is not None and assignee != SERVICE_ACCOUNT_ID
 
 
 @dataclass(frozen=True, slots=True)
@@ -722,7 +742,7 @@ class JiraTaskReader:
         async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
             async with session.get(
                 f"{self.base_url}/rest/api/3/issue/{task_key}",
-                params={"fields": "summary,status,updated,description"},
+                params={"fields": "summary,status,updated,description,assignee"},
             ) as response:
                 if response.status >= 400:
                     raise RuntimeError(f"Jira task read failed with HTTP {response.status}")
@@ -734,6 +754,7 @@ class JiraTaskReader:
             status=str(fields["status"]["name"]),
             updated_at=dt.datetime.fromisoformat(str(fields["updated"]).replace("Z", "+00:00")),
             description=_adf_text(fields.get("description")),
+            assignee_account_id=str((fields.get("assignee") or {}).get("accountId") or ""),
         )
 
     async def recent_comments(self, task_key: str) -> list[dict[str, Any]]:

@@ -688,6 +688,42 @@ async def test_task_waiting_for_author_gets_its_own_final_block(monkeypatch, tmp
     )
 
 
+async def test_task_reassigned_away_is_not_mentioned(monkeypatch, tmp_path) -> None:
+    from sloperator.daily_activity_digest import collect_facts
+    from sloperator.jira_task_automation import ClarificationRequest
+
+    now = dt.datetime(2026, 10, 12, 16, 0, tzinfo=dt.UTC)
+    run = {
+        "channel_name": "jira-task-reviewer", "status": "failed",
+        "updated_at": "2026-10-12 15:28:56",
+        "messages": [{"text": "You own Jira task UMN-13632"}],
+    }
+    store = _digest_store(
+        list_scheduled_agent_runs=lambda _limit: [run],
+        active_jira_task_agent_links=lambda: [{"task_key": "UMN-13632"}],
+    )
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=SimpleNamespace(
+            summary="Выводы - UG WEB: Display prices without VAT on the paywall",
+            status="В работе",  # noqa: RUF001
+            assignee_account_id="human-account",
+        )),
+        queued_tasks=AsyncMock(return_value=[]),
+        clarification_request=AsyncMock(
+            return_value=ClarificationRequest("UMN-13632", "Yana Bykouskaya")
+        ),
+    )
+    _patch_queues(monkeypatch, reader)
+    current = replace(settings(tmp_path), jira_username="user", jira_api_token="token")
+
+    result, _usage = await collect_facts(current, store, now=now)
+
+    assert result.waiting == ()
+    assert result.active == ()
+    assert all(item.task_key != "UMN-13632" for item in result.pending)
+    reader.clarification_request.assert_not_called()
+
+
 async def test_clarification_request_needs_latest_service_account_question() -> None:
     from sloperator.jira_task_automation import SERVICE_ACCOUNT_ID, JiraTaskReader
 

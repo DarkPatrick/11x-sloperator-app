@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 from urllib.parse import unquote_plus
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1423,6 +1423,22 @@ class EventStore:
                 (session_id,),
             )
         return cursor.rowcount == 1
+
+    def close_agent_sessions_by_external_ids(self, external_ids: Iterable[str | None]) -> int:
+        """Close every open session whose provider session id is in ``external_ids``."""
+        ids = [value for value in dict.fromkeys(external_ids) if value]
+        if not ids:
+            return 0
+        closed = 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT channel_id, thread_ts FROM agent_sessions "
+                f"WHERE status != 'closed' AND external_session_id IN ({','.join('?' * len(ids))})",
+                ids,
+            ).fetchall()
+        for channel_id, thread_ts in rows:
+            closed += self.close_agent_session(channel_id, thread_ts)
+        return closed
 
     def close_agent_session(self, channel_id: str, thread_ts: str) -> bool:
         """Permanently close a session while retaining its audit history."""

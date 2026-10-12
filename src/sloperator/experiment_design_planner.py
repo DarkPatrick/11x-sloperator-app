@@ -54,8 +54,9 @@ PREPARATION_PROMPT = f"""\
 This is the authorised daily autonomous UG experiment-design preparation job. You cannot
 communicate with a human in this session: do not ask questions, wait for approval, or offer choices.
 Complete the work autonomously. When evidence is uncertain, use explicit, internally consistent
-assumptions and, where useful, publish a small set of carefully labelled scenarios such as
-Realistic and Pessimistic. Never invent measured data.
+assumptions and publish exactly one modelled scenario in Reach & Impact: one table, no
+Realistic / Pessimistic / Optimistic variants, because several scenarios confuse readers.
+State the key assumption behind B in one line. Never invent measured data.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 
@@ -182,8 +183,9 @@ builder, and rendered-page verification. The scheduled job explicitly authorises
 Confluence, Jira comment, and Jira transition writes for this exact task. Do not trust the first
 agent's calculations merely because they are already on the page: open and run the linked sources,
 reconcile every cell, verify cohort denominators and maturity, and correct the page when needed.
-When uncertainty cannot be eliminated, preserve clearly labelled, internally consistent scenarios
-such as Realistic and Pessimistic rather than inventing certainty.
+Reach & Impact must contain exactly one modelled scenario (one table). If the page has several
+(Realistic / Pessimistic / Optimistic), keep the one whose B matches the design Lift, %, remove the
+others and every prose reference to them. State uncertainty in one line, not as extra tables.
 
 Session ownership after publication:
 - On success Sloperator attaches this same session to the Slack thread containing your notification.

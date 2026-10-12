@@ -63,7 +63,8 @@ def test_preparation_prompt_captures_selection_pairing_and_autonomy() -> None:
     assert "No need" in PREPARATION_PROMPT
     assert "now minus one calendar month" in PREPARATION_PROMPT
     assert "Do not use issue `updated`" in PREPARATION_PROMPT
-    assert "Realistic and Pessimistic" in PREPARATION_PROMPT
+    assert "exactly one modelled scenario" in PREPARATION_PROMPT
+    assert "Realistic and Pessimistic" not in PREPARATION_PROMPT
     assert "Reach & Impact" in PREPARATION_PROMPT
     assert "Experiment design" in PREPARATION_PROMPT
     assert "Jira is read-only for you" in PREPARATION_PROMPT

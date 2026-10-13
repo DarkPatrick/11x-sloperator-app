@@ -17,6 +17,7 @@ from sloperator.experiment_finalizer import (
     FINALIZATION_PROMPT,
     MATURITY_FORECAST_COMMENT_PREFIX,
     MATURITY_FORECAST_POLICY,
+    MATURITY_FORECAST_RESULT_PREFIX,
     NO_OP_NOTIFICATION,
     PENDING_TRIALS_SMALL_COUNT_LIMIT,
     REVIEW_PROMPT,
@@ -26,13 +27,20 @@ from sloperator.experiment_finalizer import (
     is_finalization_failure,
     is_finalization_notification,
     is_preparation_result,
+    is_start_result,
     is_transient_clickhouse_failure,
     next_run_at,
     normalize_finalization_notification,
     recover_missing_project_page,
     run_once,
     run_preparation_from_started_run,
+    split_maturity_forecasts,
     validate_started_page,
+)
+
+FORECAST_LINE = (
+    f"{MATURITY_FORECAST_RESULT_PREFIX} 7991 | UMN-13112 | 2026-10-15 | "
+    "comment: added | dates: set | -"
 )
 
 VALID_NOTIFICATION = (
@@ -182,13 +190,53 @@ def test_reviewer_forecasts_pending_trial_maturity_once_on_results_task() -> Non
     assert "all comments" in START_PROMPT
     assert "comments <KEY> --as-bot --limit 1000 --json" in START_PROMPT
     assert "returned count with `total`" in START_PROMPT
-    assert "do not change either date field" in START_PROMPT
+    assert "do not change\n  either date field" in START_PROMPT
     assert "`set-start-date <KEY> --as-bot --date YYYY-MM-DD`" in START_PROMPT
     assert "`set-due-date <KEY> --as-bot --date YYYY-MM-DD`" in START_PROMPT
-    assert "without\n  repeating a field write" in START_PROMPT
-    assert "`add-comment <KEY> --as-bot --text ...`" in START_PROMPT
-    assert "Only after both fields are verified" in START_PROMPT
     assert "do not authorise assignment, a status transition" in START_PROMPT
+
+
+def test_forecast_comment_is_never_blocked_by_dates_and_mentions_epic_author() -> None:
+    assert "must never block, delay, or replace the comment" in START_PROMPT
+    assert "does not stop the comment" in START_PROMPT
+    assert "Never move a Start date that is later than the forecast date" in START_PROMPT
+    assert "`add-comment <KEY> --as-bot --adf-file <file>`" in START_PROMPT
+    assert "`reporter.accountId`" in START_PROMPT
+    assert '{"type": "mention", "attrs": {"id": "<accountId>"' in START_PROMPT
+    assert "Never invent an account id" in START_PROMPT
+    assert "earlier than today" in START_PROMPT
+    expected_shape = f"`{MATURITY_FORECAST_RESULT_PREFIX} <experiment id> | <Results task key>"
+    assert expected_shape in START_PROMPT
+
+
+def test_start_result_accepts_and_splits_trailing_forecast_lines() -> None:
+    forecast = FORECAST_LINE
+    text = f"{NO_OP_NOTIFICATION}\n{forecast}"
+    assert is_start_result(text)
+    assert split_maturity_forecasts(text) == (NO_OP_NOTIFICATION, (forecast,))
+    started = "FINALIZATION_STARTED: 7991 | https://alice.mu.se/x | Iteration 1 | UMN-13112"
+    assert is_start_result(f"{started}\n{forecast}")
+
+
+async def test_no_op_with_forecast_lines_publishes_only_no_op(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    forecast = FORECAST_LINE
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(
+            return_value=HeadlessAgentRun(
+                "claude", "opus", "owner", f"{NO_OP_NOTIFICATION}\n{forecast}"
+            )
+        ),
+        attach_session=AsyncMock(),
+    )
+    client = SimpleNamespace(chat_postMessage=AsyncMock(return_value={"channel": "C", "ts": "1"}))
+    settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
+    with caplog.at_level("INFO", logger="sloperator.experiment_finalizer"):
+        assert await run_once(client, agent, settings) == NO_OP_NOTIFICATION
+    assert forecast in caplog.text
+    for call in client.chat_postMessage.await_args_list:
+        assert MATURITY_FORECAST_RESULT_PREFIX not in str(call.kwargs)
 
 
 def test_only_finalization_failures_are_classified_as_failed() -> None:

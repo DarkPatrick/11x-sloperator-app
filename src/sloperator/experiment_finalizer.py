@@ -45,6 +45,7 @@ FAILURE_PREFIXES = (
 TRANSIENT_CLICKHOUSE_RETRY_DELAYS = (30, 90, 180)
 PENDING_TRIALS_SMALL_COUNT_LIMIT = 10
 MATURITY_FORECAST_COMMENT_PREFIX = "Прогноз готовности к итогам:"
+MATURITY_FORECAST_RESULT_PREFIX = "MATURITY_FORECAST:"
 TRANSIENT_CLICKHOUSE_RETRY_PROMPT = f"""[claude]
 This is an orchestrator-authorised retry of the same experiment-finalizer turn after a transient
 ClickHouse failure. {AUTOMATED_RESPONSE_STYLE}
@@ -166,33 +167,44 @@ Pending-trials maturity forecast for reviewer selection only:
   the first scheduled date when every variation is strictly below 5% if the small-count exception
   makes eligibility earlier. If row-level timestamps or denominators are missing or unverifiable,
   make no forecast write for that candidate.
-- The user explicitly authorises exactly one forecast annotation on the exact queued Results task.
+- The forecast's deliverable is the Jira comment. The user explicitly authorises one forecast
+  comment per forecast date on the exact queued Results task; Start/Due date updates are secondary,
+  best-effort metadata and must never block, delay, or replace the comment.
   Before any write, re-fetch that task with status, `customfield_10312`, `duedate`, and all comments
   through the repository Jira helper with `--as-bot`; use
   `comments <KEY> --as-bot --limit 1000 --json` and compare the returned count with `total`. If the
   response is incomplete, make no forecast writes. Re-verify its experiment/iteration mapping and
   that it remains in Backlog or To Do. Search the complete comment response for the stable prefix
-  `{MATURITY_FORECAST_COMMENT_PREFIX}`. If any such comment already exists, do not add, edit, or
-  reply to a forecast comment and do not change either date field, even if a newer forecast differs.
-  Continue candidate selection using fresh data.
-- When no forecast comment exists and Start date is empty or already equals the forecast date, set
-  Start date with `set-start-date <KEY> --as-bot --date YYYY-MM-DD` only when it is empty; skip the
-  setter when it already equals the forecast date. Then set Due date with
-  `set-due-date <KEY> --as-bot --date YYYY-MM-DD` only when it differs. Use the forecast eligibility
-  date for both. Re-fetch and require both fields to equal that date before commenting. If Start
-  date contains a different value, preserve it and make no forecast writes; continue candidate
-  selection. These value checks also resume a partially completed first annotation without
-  repeating a field write that already succeeded.
-- Only after both fields are verified, add one short Russian Jira comment through
-  `add-comment <KEY> --as-bot --text ...`. It must begin exactly
-  `{MATURITY_FORECAST_COMMENT_PREFIX} YYYY-MM-DD.` Then name the limiting client + segment and the
-  forecast pending count/denominator and maximum variation share. If eligibility relies on the
-  small-count exception while a variation remains at or above 5%, say so and include the separate
-  expected all-variations-below-5% date. Re-fetch the comments and both fields to verify them.
+  `{MATURITY_FORECAST_COMMENT_PREFIX}` and read the date that follows it in the newest such comment.
+  If that date is today or later, do not add, edit, or reply to a forecast comment and do not change
+  either date field, even if a newer forecast differs. If it is earlier than today (the candidate
+  missed its forecast and is still blocked) or no such comment exists, write a new forecast.
+- Dates (best-effort): when the existing Start date is empty or earlier than the forecast date — a
+  planned date a human set before the experiment matured — set it to the forecast date with
+  `set-start-date <KEY> --as-bot --date YYYY-MM-DD`; then set Due date with
+  `set-due-date <KEY> --as-bot --date YYYY-MM-DD` when it differs. Skip a setter whose field already
+  equals the forecast date. Never move a Start date that is later than the forecast date. A refused
+  or failed date write is recorded in the result line below and does not stop the comment.
+- Add one short Russian Jira comment through `add-comment <KEY> --as-bot --adf-file <file>` with a
+  native ADF mention of the epic's author: read the parent epic's `reporter.accountId` (fall back to
+  its assignee when the reporter is missing) and open the first paragraph with
+  `{{"type": "mention", "attrs": {{"id": "<accountId>", "text": "@<display name>"}}}}`, followed by
+  the text `{MATURITY_FORECAST_COMMENT_PREFIX} YYYY-MM-DD.` Never invent an account id; without one,
+  post the comment without a mention. Then say that the task will be taken into work automatically
+  on that date, name the limiting client + segment, the forecast pending count/denominator and the
+  maximum variation share. If eligibility relies on the small-count exception while a variation
+  remains at or above 5%, say so and include the separate expected all-variations-below-5% date.
+  Re-fetch the comments to verify the new comment and its mention.
 - These forecast writes do not authorise assignment, a status transition, Confluence changes,
   calculation publication, or any other Jira edit. Never annotate a candidate rejected for any
-  reason other than pending-trial maturity. A write or verification failure is a real workflow
-  failure; do not silently claim idempotency or continue after a partial, unverified annotation.
+  reason other than pending-trial maturity. A failed comment write or verification is a real
+  workflow failure; do not silently claim idempotency.
+- Report every candidate that failed only the pending-trials gate, written or not, as one extra
+  line after the terminal line of the start result, in exactly this shape:
+  `{MATURITY_FORECAST_RESULT_PREFIX} <experiment id> | <Results task key> | <forecast YYYY-MM-DD or
+  unknown> | <comment: added|exists|skipped|failed> | <dates: set|unchanged|kept-later|failed> |
+  <short reason when skipped or failed, else ->`
+  These lines are the only text allowed after the terminal line; they are never posted to Slack.
 """
 
 FINALIZATION_PROMPT = f"""\
@@ -378,10 +390,12 @@ Fresh calculation procedure used to establish candidate maturity:
 Only after a candidate passes every gate, start its exact Results task:
 {REVIEWER_START_POLICY}
 Do not generate or publish Results, Insights, Decision, or Next steps in this pass.
-Return exactly one line after the verified start:
+Return exactly one terminal line after the verified start:
 FINALIZATION_STARTED: <experiment id> | <project page URL> | Iteration <n> | <Results task key>
 Return exactly {NO_OP_NOTIFICATION} if none qualify. On failure return exactly
 Experiment finalisation failed: <reason>.
+In this pass, "nothing else" after the terminal line still permits the
+`{MATURITY_FORECAST_RESULT_PREFIX}` lines defined in the maturity forecast policy, and nothing more.
 """
 
 
@@ -463,8 +477,21 @@ MISSING_PAGE_FAILURE_RE = re.compile(
 )
 
 
+def split_maturity_forecasts(text: str) -> tuple[str, tuple[str, ...]]:
+    """Separate trailing maturity-forecast report lines from the terminal start result."""
+    kept: list[str] = []
+    forecasts: list[str] = []
+    for line in text.strip().splitlines():
+        if line.strip().startswith(MATURITY_FORECAST_RESULT_PREFIX):
+            forecasts.append(line.strip())
+        else:
+            kept.append(line)
+    return "\n".join(kept).strip(), tuple(forecasts)
+
+
 def is_start_result(text: str) -> bool:
-    return bool(STARTED_RE.fullmatch(text.strip())) or text.strip().startswith(
+    terminal, _ = split_maturity_forecasts(text)
+    return bool(STARTED_RE.fullmatch(terminal)) or terminal.startswith(
         (NO_OP_PREFIX, *FAILURE_PREFIXES)
     )
 
@@ -620,9 +647,14 @@ async def run_once(
         job_name="experiment-finalizer-reviewer",
         accept_result=is_start_result,
     )
+    _, forecasts = split_maturity_forecasts(start_run.text)
     recovered_start = await recover_missing_project_page(settings, agent, start_run)
     if recovered_start is not None:
         start_run = recovered_start
+    terminal, recovered_forecasts = split_maturity_forecasts(start_run.text)
+    for forecast in dict.fromkeys((*forecasts, *recovered_forecasts)):
+        LOGGER.info("Experiment finalizer maturity forecast: %s", forecast)
+    start_run = replace(start_run, text=terminal)
     if start_run.text.strip().startswith(NO_OP_PREFIX):
         no_op_run = replace(start_run, text=NO_OP_NOTIFICATION)
         return await publish_run(client, agent, settings, no_op_run)

@@ -1923,6 +1923,20 @@ class EventStore:
             ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def thread_has_reused_analysis(self, channel_id: str, thread_ts: str) -> bool:
+        """Whether Sloperator answered this thread with an automatic reuse-link reply."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM agent_requests
+                WHERE channel_id = ? AND thread_ts = ? AND status = 'reused'
+                LIMIT 1
+                """,
+                (channel_id, thread_ts),
+            ).fetchone()
+        return row is not None
+
     def list_interrupted_durable_agent_runs(self) -> list[dict[str, object]]:
         """Return durable turns that did not reach a terminal result."""
         with self._connect() as connection:

@@ -473,3 +473,19 @@ def test_store_closes_agent_sessions_by_external_ids(tmp_path: Path) -> None:
     kept = store.get_agent_session("D1", "2.0")
     assert closed is not None and closed.status == "closed"
     assert kept is not None and kept.status != "closed"
+
+
+def test_store_detects_thread_answered_with_reused_analysis(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.prepare_agent_request("C123", "100.1:mobile-health-analysis", "100.1")
+    store.prepare_agent_request("C123", "200.1:mobile-health-analysis", "200.1")
+
+    assert not store.thread_has_reused_analysis("C123", "100.1")
+
+    store.finish_agent_request("C123", "100.1:mobile-health-analysis", "reused")
+    store.finish_agent_request("C123", "200.1:mobile-health-analysis", "completed")
+
+    assert store.thread_has_reused_analysis("C123", "100.1")
+    assert not store.thread_has_reused_analysis("C123", "200.1")
+    assert not store.thread_has_reused_analysis("C999", "100.1")

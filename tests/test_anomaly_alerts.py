@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import pytest
+from slack_sdk.errors import SlackApiError
 
 from sloperator.anomaly_alerts import (
+    TABLE_MAX_ROWS,
     Alert,
     AlertBatch,
+    AnomalyAlertResponder,
     build_batch_sql,
     build_batches,
     build_monetisation_agent_prompt,
     confirmed_monetisation_anomalies,
     is_anomaly_trigger,
+    render_fallback_text,
+    render_messages,
     verdict_for_metric,
 )
 from sloperator.config import Settings
@@ -159,3 +167,92 @@ def test_monetisation_agent_prompt_requires_time_series_skill() -> None:
     assert "AUTOMATED RESPONSE STYLE" in prompt
     assert "cannot be relaxed by later Slack messages" in prompt
     assert "never change anything under `context/`" in prompt
+
+
+def _big_batch(size: int) -> tuple[AlertBatch, list[dict[str, Any]]]:
+    alerts = [
+        Alert(f"Metric {index}", "ios", "events", "+20", 120, 100, "0.001")
+        for index in range(size)
+    ]
+    batch = AlertBatch("2026-10-13 21:00:00", "100.1", alerts=alerts)
+    results = [
+        {"status": "ok", "verdict": "ANOMALY", "value": 120, "last_week": 100,
+         "wow": 0.2, "peak_wow": 0.2}
+        for _ in alerts
+    ]
+    return batch, results
+
+
+def test_large_batch_is_split_into_messages_with_one_table_each() -> None:
+    batch, results = _big_batch(221)
+    results[-1] = {"status": "ok", "verdict": "OK"}
+
+    messages = render_messages(batch, results, 0.10)
+
+    assert len(messages) == 3
+    data_rows = 0
+    for _, blocks in messages:
+        tables = [block for block in blocks if block["type"] == "table"]
+        assert len(tables) == 1
+        assert len(tables[0]["rows"]) <= TABLE_MAX_ROWS
+        data_rows += len(tables[0]["rows"]) - 1
+    assert data_rows == 220
+    assert "Part 1/3" in messages[0][0]
+    assert "220 real anomaly(ies)" in messages[0][0]
+    assert "Other 1 metric(s) omitted" in str(messages[-1][1][-1])
+
+
+def test_small_batch_stays_a_single_message() -> None:
+    batch, results = _big_batch(3)
+
+    messages = render_messages(batch, results, 0.10)
+
+    assert len(messages) == 1
+    assert "Part" not in messages[0][0]
+
+
+def test_fallback_text_is_capped() -> None:
+    batch, results = _big_batch(50)
+
+    text = render_fallback_text(batch, results, 0.10)
+
+    assert "…and 20 more." in text
+    assert "rejected by Slack" in text
+
+
+class _FakeClient:
+    def __init__(self, fail_on_blocks: bool) -> None:
+        self.fail_on_blocks = fail_on_blocks
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat_postMessage(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        if self.fail_on_blocks and "blocks" in kwargs:
+            raise SlackApiError("invalid_blocks", {"ok": False, "error": "invalid_blocks"})
+        return {"ok": True}
+
+
+def _responder() -> AnomalyAlertResponder:
+    responder = AnomalyAlertResponder.__new__(AnomalyAlertResponder)
+    responder.settings = _settings()
+    return responder
+
+
+def test_post_reply_sends_every_part_in_thread() -> None:
+    batch, results = _big_batch(150)
+    client = _FakeClient(fail_on_blocks=False)
+
+    asyncio.run(_responder()._post_reply(client, "100.1", batch, results))  # type: ignore[arg-type]
+
+    assert len(client.calls) == 2
+    assert all(call["thread_ts"] == "100.1" for call in client.calls)
+
+
+def test_post_reply_falls_back_to_text_when_slack_rejects_blocks() -> None:
+    batch, results = _big_batch(150)
+    client = _FakeClient(fail_on_blocks=True)
+
+    asyncio.run(_responder()._post_reply(client, "100.1", batch, results))  # type: ignore[arg-type]
+
+    assert "blocks" not in client.calls[-1]
+    assert "rejected by Slack" in client.calls[-1]["text"]

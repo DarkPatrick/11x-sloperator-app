@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from urllib.parse import quote
 
 import aiohttp
+from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.analysis_reuse import recent_analysis_reuse_policy
@@ -60,6 +61,9 @@ TABLE_COLUMNS = [
     "verdict",
     "redash",
 ]
+# Slack table block limit: one table per message, at most 100 rows incl. the header.
+TABLE_MAX_ROWS = 100
+FALLBACK_MAX_LINES = 30
 # Pinned from analytics-airflow-dags@feff00a5:
 # monitorings/ug_anomalies/cfg_consts.py -> mention_groups["ug_monetisation"]["metrics"].
 MONETISATION_METRICS = frozenset(
@@ -247,14 +251,7 @@ class AnomalyAlertResponder:
                 verdict_for_metric(rows, alert, batch.alert_dt, self.settings)
                 for alert in batch.alerts
             ]
-            text, blocks = render_blocks(batch, results, self.settings.anomaly_threshold)
-            await client.chat_postMessage(
-                channel=self.settings.anomaly_alert_channel,
-                thread_ts=trigger_ts,
-                text=text,
-                blocks=blocks,
-                unfurl_links=False,
-            )
+            await self._post_reply(client, trigger_ts, batch, results)
             monetisation = confirmed_monetisation_anomalies(batch, results)
             if monetisation:
                 claimed = await asyncio.to_thread(
@@ -283,6 +280,40 @@ class AnomalyAlertResponder:
                 )
         finally:
             self._in_flight.discard(trigger_ts)
+
+    async def _post_reply(
+        self,
+        client: AsyncWebClient,
+        trigger_ts: str,
+        batch: AlertBatch,
+        results: list[dict[str, Any]],
+    ) -> None:
+        threshold = self.settings.anomaly_threshold
+        try:
+            for text, blocks in render_messages(batch, results, threshold):
+                await client.chat_postMessage(
+                    channel=self.settings.anomaly_alert_channel,
+                    thread_ts=trigger_ts,
+                    text=text,
+                    blocks=blocks,
+                    unfurl_links=False,
+                )
+        except SlackApiError:
+            LOGGER.exception(
+                "Slack rejected the table reply for anomaly alert %s; posting text fallback",
+                trigger_ts,
+            )
+            try:
+                await client.chat_postMessage(
+                    channel=self.settings.anomaly_alert_channel,
+                    thread_ts=trigger_ts,
+                    text=render_fallback_text(batch, results, threshold),
+                    unfurl_links=False,
+                )
+            except SlackApiError:
+                LOGGER.exception(
+                    "Text fallback reply also failed for anomaly alert %s", trigger_ts
+                )
 
     async def _find_batch(
         self,
@@ -511,11 +542,14 @@ def _redash_url(alert: Alert) -> str:
     )
 
 
-def render_blocks(
+def _classify_results(
     batch: AlertBatch,
     results: list[dict[str, Any]],
-    threshold: float,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[
+    list[tuple[Alert, dict[str, Any], str]],
+    list[Alert],
+    list[tuple[Alert, dict[str, Any], str]],
+]:
     anomalies: list[tuple[Alert, dict[str, Any], str]] = []
     false_alarms: list[Alert] = []
     undetermined: list[tuple[Alert, dict[str, Any], str]] = []
@@ -533,19 +567,62 @@ def render_blocks(
             false_alarms.append(alert)
         else:
             undetermined.append((alert, result, "⚠️ no last-week data"))
+    return anomalies, false_alarms, undetermined
 
-    intro = (
+
+def _intro(
+    batch: AlertBatch,
+    threshold: float,
+    anomalies: list[Any],
+    false_alarms: list[Any],
+    undetermined: list[Any],
+) -> str:
+    return (
         f"Week-over-week sanity check for this alert ({batch.alert_dt or 'UNKNOWN'} UTC) — "
         f"threshold ±{threshold * 100:.0f}%. {len(anomalies)} real anomaly(ies), "
         f"{len(false_alarms)} false alarm(s)"
         + (f", {len(undetermined)} undetermined" if undetermined else "")
         + f" of {len(batch.alerts)} alerted metric(s)."
     )
-    blocks: list[dict[str, Any]] = [_cell(intro)]
+
+
+def render_messages(
+    batch: AlertBatch,
+    results: list[dict[str, Any]],
+    threshold: float,
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Render the thread reply as one or more messages, each with at most one table.
+
+    Slack accepts a single table block per message and at most
+    ``TABLE_MAX_ROWS`` rows per table (header included), so a large batch is
+    split into consecutive messages that each carry one part of the table.
+    """
+    anomalies, false_alarms, undetermined = _classify_results(batch, results)
+    intro = _intro(batch, threshold, anomalies, false_alarms, undetermined)
     table_rows = anomalies + undetermined
-    if table_rows:
+    if not table_rows:
+        return [
+            (
+                intro,
+                [
+                    _cell(intro),
+                    _cell(
+                        "All alerted metrics are within the week-over-week tolerance — "
+                        "no action needed."
+                    ),
+                ],
+            )
+        ]
+
+    chunk_size = TABLE_MAX_ROWS - 1
+    chunks = [
+        table_rows[index : index + chunk_size]
+        for index in range(0, len(table_rows), chunk_size)
+    ]
+    messages: list[tuple[str, list[dict[str, Any]]]] = []
+    for number, chunk in enumerate(chunks, start=1):
         rows = [[_cell(column) for column in TABLE_COLUMNS]]
-        for alert, result, verdict in table_rows:
+        for alert, result, verdict in chunk:
             rows.append(
                 [
                     _cell(alert.metric),
@@ -560,22 +637,46 @@ def render_blocks(
                     _link_cell(_redash_url(alert)),
                 ]
             )
+        part = f"Part {number}/{len(chunks)}" if len(chunks) > 1 else ""
+        if number == 1:
+            text = intro + (f" {part}." if part else "")
+            blocks: list[dict[str, Any]] = [_cell(text)]
+        else:
+            text = f"{part} — continued."
+            blocks = [_cell(text)]
         blocks.append({"type": "table", "rows": rows})
-        if false_alarms:
+        if number == len(chunks) and false_alarms:
             blocks.append(
                 _cell(
                     f"Other {len(false_alarms)} metric(s) omitted — "
                     f"all within ±{threshold * 100:.0f}% WoW."
                 )
             )
-    else:
-        blocks.append(
-            _cell(
-                "All alerted metrics are within the week-over-week tolerance — "
-                "no action needed."
+        messages.append((text, blocks))
+    return messages
+
+
+def render_fallback_text(
+    batch: AlertBatch,
+    results: list[dict[str, Any]],
+    threshold: float,
+) -> str:
+    """Plain-text summary posted when Slack rejects the table reply."""
+    anomalies, false_alarms, undetermined = _classify_results(batch, results)
+    lines = [_intro(batch, threshold, anomalies, false_alarms, undetermined)]
+    if anomalies:
+        lines.append("Real anomalies:")
+        shown = anomalies[:FALLBACK_MAX_LINES]
+        for alert, result, verdict in shown:
+            lines.append(
+                f"• {alert.metric} · {alert.platform} · {alert.metric_type}: "
+                f"{alert.diff}% vs prophet, WoW {_percent(result.get('wow'))}, "
+                f"peak WoW {_percent(result.get('peak_wow'))} — {verdict}"
             )
-        )
-    return intro, blocks
+        if len(anomalies) > len(shown):
+            lines.append(f"…and {len(anomalies) - len(shown)} more.")
+    lines.append("(The table reply was rejected by Slack, so this is the text summary.)")
+    return "\n".join(lines)
 
 
 def confirmed_monetisation_anomalies(

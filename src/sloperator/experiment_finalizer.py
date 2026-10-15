@@ -46,6 +46,13 @@ TRANSIENT_CLICKHOUSE_RETRY_DELAYS = (30, 90, 180)
 PENDING_TRIALS_SMALL_COUNT_LIMIT = 10
 MATURITY_FORECAST_COMMENT_PREFIX = "Прогноз готовности к итогам:"
 MATURITY_FORECAST_RESULT_PREFIX = "MATURITY_FORECAST:"
+MATURITY_UNKNOWN_COMMENT_PREFIX = "Итоги пока не взяты в работу:"
+MATURITY_UNKNOWN_REPEAT_DAYS = 7
+CALC_API_COMMAND = ".venv/bin/python .claude/skills/ug-experiment-calculator/scripts/calc_api.py"
+# Above the API default (100) and cron (0): the finalizer's calculation goes first in the queue.
+FINALIZER_CALC_PRIORITY = 500
+FINALIZER_CALC_SOURCE = "sloperator:experiment-finalizer"
+FINALIZER_CALC_MAX_HOURS = 3
 TRANSIENT_CLICKHOUSE_RETRY_PROMPT = f"""[claude]
 This is an orchestrator-authorised retry of the same experiment-finalizer turn after a transient
 ClickHouse failure. {AUTOMATED_RESPONSE_STYLE}
@@ -53,7 +60,9 @@ ClickHouse failure. {AUTOMATED_RESPONSE_STYLE}
 Retry only the failed calculation for the exact same candidate. Reuse all successfully completed
 selection and calculation evidence from this session; do not recalculate earlier candidates and do
 not select a different candidate unless the original selection rules require continuing after this
-candidate is conclusively ineligible. Start the retry in a fresh Python process and disable
+candidate is conclusively ineligible. Re-enqueue the calculation through the calculator API queue
+exactly as the original turn requires; never call `calculate_exp_info(...)` in-process. Run any
+verification reads in a fresh Python process and disable
 clickhouse-connect server sessions before importing clickhouse-worker or the calculator with
 `clickhouse_connect.common.set_setting("autogenerate_session_id", False)`. This workflow uses
 short-lived clients and package-managed physical tables, so it must not share a ClickHouse session
@@ -117,7 +126,7 @@ Selection rules:
    that successful calculation window. A same-day `updated_at` value by itself is not proof: mixed
    old/new rows or rows touched after the success marker make the cache unverifiable. If all these
    checks pass, use those rows and do not invoke the calculator. Otherwise recalculate once using
-   the direct-library procedure below and verify the fresh rows.
+   the queued calculation procedure below and verify the fresh rows.
    Never determine eligibility from stale cached results, partial results, or merely same-day rows.
    Apply a strict, fail-closed pending-trials gate to that candidate. Evaluate every configured
    client and segment independently across all of its applicable variation rows. That client +
@@ -165,20 +174,26 @@ Pending-trials maturity forecast for reviewer selection only:
   production gate: either every applicable variation is strictly below 5%, or that client +
   segment's summed pending count is strictly below {PENDING_TRIALS_SMALL_COUNT_LIMIT}. Also compute
   the first scheduled date when every variation is strictly below 5% if the small-count exception
-  makes eligibility earlier. If row-level timestamps or denominators are missing or unverifiable,
-  make no forecast write for that candidate.
+  makes eligibility earlier. If row-level timestamps or denominators are missing, unverifiable or
+  contradict the fresh calculation (for example a segment larger than its Total, or a re-run that
+  disagrees with the calculator), the forecast is unknown: never invent a date and never touch Start
+  or Due date, but still leave the status comment defined below.
 - The forecast's deliverable is the Jira comment. The user explicitly authorises one forecast
   comment per forecast date on the exact queued Results task; Start/Due date updates are secondary,
   best-effort metadata and must never block, delay, or replace the comment.
   Before any write, re-fetch that task with status, `customfield_10312`, `duedate`, and all comments
   through the repository Jira helper with `--as-bot`; use
   `comments <KEY> --as-bot --limit 1000 --json` and compare the returned count with `total`. If the
-  response is incomplete, make no forecast writes. Re-verify its experiment/iteration mapping and
+  response is incomplete, make no forecast writes and report `comment: failed`. Re-verify its experiment/iteration mapping and
   that it remains in Backlog or To Do. Search the complete comment response for the stable prefix
   `{MATURITY_FORECAST_COMMENT_PREFIX}` and read the date that follows it in the newest such comment.
   If that date is today or later, do not add, edit, or reply to a forecast comment and do not change
   either date field, even if a newer forecast differs. If it is earlier than today (the candidate
   missed its forecast and is still blocked) or no such comment exists, write a new forecast.
+  An unknown forecast is written as a status comment beginning exactly
+  `{MATURITY_UNKNOWN_COMMENT_PREFIX}`. Add it when no comment with either prefix exists, when the
+  newest dated forecast is earlier than today, or when the newest status comment is older than
+  {MATURITY_UNKNOWN_REPEAT_DAYS} days; otherwise report `comment: exists`.
 - Dates (best-effort): when the existing Start date is empty or earlier than the forecast date — a
   planned date a human set before the experiment matured — set it to the forecast date with
   `set-start-date <KEY> --as-bot --date YYYY-MM-DD`; then set Due date with
@@ -195,6 +210,12 @@ Pending-trials maturity forecast for reviewer selection only:
   maximum variation share. If eligibility relies on the small-count exception while a variation
   remains at or above 5%, say so and include the separate expected all-variations-below-5% date.
   Re-fetch the comments to verify the new comment and its mention.
+- For an unknown forecast, add the same kind of ADF comment (same epic-author mention rule) that
+  opens with `{MATURITY_UNKNOWN_COMMENT_PREFIX}` and says, in plain Russian, that the experiment
+  did not pass the pending-trials maturity check today, names the limiting client + segment and the
+  pending share the fresh calculation shows, gives the short reason no forecast date can be named
+  (state a data contradiction as a contradiction, with both numbers), and that the check repeats on
+  the next scheduled run. Re-fetch the comments to verify it.
 - These forecast writes do not authorise assignment, a status transition, Confluence changes,
   calculation publication, or any other Jira edit. Never annotate a candidate rejected for any
   reason other than pending-trial maturity. A failed comment write or verification is a real
@@ -202,8 +223,8 @@ Pending-trials maturity forecast for reviewer selection only:
 - Report every candidate that failed only the pending-trials gate, written or not, as one extra
   line after the terminal line of the start result, in exactly this shape:
   `{MATURITY_FORECAST_RESULT_PREFIX} <experiment id> | <Results task key> | <forecast YYYY-MM-DD or
-  unknown> | <comment: added|exists|skipped|failed> | <dates: set|unchanged|kept-later|failed> |
-  <short reason when skipped or failed, else ->`
+  unknown> | <comment: added|exists|failed> | <dates: set|unchanged|kept-later|failed> |
+  <short reason when the forecast is unknown or the comment failed, else ->`
   These lines are the only text allowed after the terminal line; they are never posted to Slack.
 """
 
@@ -243,24 +264,29 @@ Execution for the selected experiment:
 {WORKER_JIRA_POLICY}
 2. State the selected title, id, end timestamp, clients, segments, target project page, iteration,
    configured table prefix, and affected package-managed tables.
-3. Use the `ug-experiment-calculator` skill and the installed repository `.venv` library directly;
-   do not use the calculator HTTP API in this job. First run the repository freshness preflight and
-   perform the skill's mandatory installed-commit versus git `main` check. If the installed
-   `ug-experiment-calculator` is stale, update it through the repository's supported
-   internal-library update flow before calculating. Before importing clickhouse-worker or the
-   calculator, disable clickhouse-connect server sessions with
-   `clickhouse_connect.common.set_setting("autogenerate_session_id", False)`. Then run the
-   synchronous in-process `calculate_exp_info(exp_id, config=cfg, update_rollout=True)` with the
-   standard
-   `ExperimentCalculatorConfig.from_env()` configuration and the
-   `ug_monetization_sloperator_` table prefix. This direct calculation is explicitly authorised for
+3. Use the `ug-experiment-calculator` skill and calculate through the calculator API queue. Never
+   call `calculate_exp_info(...)` in-process in this job: a direct run bypasses the queue and can
+   read the shared subscription source tables while a queued calculation is rebuilding them
+   (exp 7994 on 2026-10-15 got iOS Free trials without their charges that way). First run the
+   repository freshness preflight. Enqueue with
+   `{CALC_API_COMMAND} calculate <exp_id> --priority {FINALIZER_CALC_PRIORITY} --source {FINALIZER_CALC_SOURCE} --wait --timeout 3300`;
+   on this server it reaches the API through the corporate bridge. A higher priority puts the job
+   ahead of queued ones, but a running calculation is never pre-empted, so it may wait first.
+   Exit 0 means the calculation succeeded; exit 3 means it is still queued or running — continue
+   with `{CALC_API_COMMAND} wait <request_id> --timeout 3300` until it ends, for at most
+   {FINALIZER_CALC_MAX_HOURS} hours in total. If the enqueue answer says `"duplicate": true`, the
+   experiment is already queued or running: wait for that request id, do not enqueue another.
+   Before importing clickhouse-worker for verification reads, disable clickhouse-connect server
+   sessions with `clickhouse_connect.common.set_setting("autogenerate_session_id", False)`, and use
+   the standard `ExperimentCalculatorConfig.from_env()` configuration with the
+   `ug_monetization_sloperator_` table prefix. This queued calculation is explicitly authorised for
    this scheduled job, including its documented writes and subscription-source refresh. During
    selection, run this procedure once for each preliminary candidate in rule 7 until one passes the
    maturity gate; do not calculate the selected experiment a second time when its verified
-   calculation is still fresh. Wait for each call to finish and verify fresh successful rows in
-   every expected result/stat/funnel and raw users table before continuing. Do not silently use
-   stale results. If a direct calculation fails or times out, stop without publishing partial
-   итогов and report the exact failure.
+   calculation is still fresh. Wait for each calculation to finish and verify fresh successful rows
+   in every expected result/stat/funnel and raw users table before continuing. Do not silently use
+   stale results. If the calculation fails, is lost, runs past the limit, or the API or the bridge
+   is unreachable, stop without publishing partial итогов and report the exact failure.
 3. Run the complete Results → Insights → Decision / Next steps pipeline in this exact order:
    a. Generate the full publishable Results/Итоги block through `ug-experiment-calculator`,
       including its required finished-experiment Forecast/audience workflow and maturity checks.
@@ -368,24 +394,29 @@ status does not determine eligibility for experiment 7940. This binding establis
 identity only, not data maturity or permission to publish results.
 
 Fresh calculation procedure used to establish candidate maturity:
-3. Use the `ug-experiment-calculator` skill and the installed repository `.venv` library directly;
-   do not use the calculator HTTP API in this job. First run the repository freshness preflight and
-   perform the skill's mandatory installed-commit versus git `main` check. If the installed
-   `ug-experiment-calculator` is stale, update it through the repository's supported
-   internal-library update flow before calculating. Before importing clickhouse-worker or the
-   calculator, disable clickhouse-connect server sessions with
-   `clickhouse_connect.common.set_setting("autogenerate_session_id", False)`. Then run the
-   synchronous in-process `calculate_exp_info(exp_id, config=cfg, update_rollout=True)` with the
-   standard
-   `ExperimentCalculatorConfig.from_env()` configuration and the
-   `ug_monetization_sloperator_` table prefix. This direct calculation is explicitly authorised for
+3. Use the `ug-experiment-calculator` skill and calculate through the calculator API queue. Never
+   call `calculate_exp_info(...)` in-process in this job: a direct run bypasses the queue and can
+   read the shared subscription source tables while a queued calculation is rebuilding them
+   (exp 7994 on 2026-10-15 got iOS Free trials without their charges that way). First run the
+   repository freshness preflight. Enqueue with
+   `{CALC_API_COMMAND} calculate <exp_id> --priority {FINALIZER_CALC_PRIORITY} --source {FINALIZER_CALC_SOURCE} --wait --timeout 3300`;
+   on this server it reaches the API through the corporate bridge. A higher priority puts the job
+   ahead of queued ones, but a running calculation is never pre-empted, so it may wait first.
+   Exit 0 means the calculation succeeded; exit 3 means it is still queued or running — continue
+   with `{CALC_API_COMMAND} wait <request_id> --timeout 3300` until it ends, for at most
+   {FINALIZER_CALC_MAX_HOURS} hours in total. If the enqueue answer says `"duplicate": true`, the
+   experiment is already queued or running: wait for that request id, do not enqueue another.
+   Before importing clickhouse-worker for verification reads, disable clickhouse-connect server
+   sessions with `clickhouse_connect.common.set_setting("autogenerate_session_id", False)`, and use
+   the standard `ExperimentCalculatorConfig.from_env()` configuration with the
+   `ug_monetization_sloperator_` table prefix. This queued calculation is explicitly authorised for
    this scheduled job, including its documented writes and subscription-source refresh. During
    selection, run this procedure once for each preliminary candidate in rule 7 until one passes the
    maturity gate; do not calculate the selected experiment a second time when its verified
-   calculation is still fresh. Wait for each call to finish and verify fresh successful rows in
-   every expected result/stat/funnel and raw users table before continuing. Do not silently use
-   stale results. If a direct calculation fails or times out, stop without publishing partial
-   итогов and report the exact failure.
+   calculation is still fresh. Wait for each calculation to finish and verify fresh successful rows
+   in every expected result/stat/funnel and raw users table before continuing. Do not silently use
+   stale results. If the calculation fails, is lost, runs past the limit, or the API or the bridge
+   is unreachable, stop without publishing partial итогов and report the exact failure.
 
 Only after a candidate passes every gate, start its exact Results task:
 {REVIEWER_START_POLICY}

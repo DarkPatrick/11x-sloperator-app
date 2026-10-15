@@ -18,10 +18,15 @@ from sloperator.experiment_finalizer import (
     MATURITY_FORECAST_COMMENT_PREFIX,
     MATURITY_FORECAST_POLICY,
     MATURITY_FORECAST_RESULT_PREFIX,
+    MATURITY_UNKNOWN_COMMENT_PREFIX,
+    CALC_API_COMMAND,
+    FINALIZER_CALC_PRIORITY,
+    FINALIZER_CALC_SOURCE,
     NO_OP_NOTIFICATION,
     PENDING_TRIALS_SMALL_COUNT_LIMIT,
     REVIEW_PROMPT,
     START_PROMPT,
+    TRANSIENT_CLICKHOUSE_RETRY_PROMPT,
     InvalidFinalizationNotification,
     execute_finalizer_turn,
     is_finalization_failure,
@@ -162,8 +167,8 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "direct message" not in FINALIZATION_PROMPT
     assert "Produce exactly one Slack-facing notification" in FINALIZATION_PROMPT
     assert "DRI / Project owner" in FINALIZATION_PROMPT
-    assert "calculate_exp_info(exp_id, config=cfg, update_rollout=True)" in FINALIZATION_PROMPT
-    assert "do not use the calculator HTTP API" in FINALIZATION_PROMPT
+    assert "calculate through the calculator API queue" in FINALIZATION_PROMPT
+    assert "Never\n   call `calculate_exp_info(...)` in-process" in FINALIZATION_PROMPT
     assert "Do not include a separate Project page line" in FINALIZATION_PROMPT
     assert "Do not return `SLOPERATOR_ARTIFACT`" in FINALIZATION_PROMPT
     assert "components/ab/experiment/view?id=<id>" in FINALIZATION_PROMPT
@@ -207,6 +212,34 @@ def test_forecast_comment_is_never_blocked_by_dates_and_mentions_epic_author() -
     assert "earlier than today" in START_PROMPT
     expected_shape = f"`{MATURITY_FORECAST_RESULT_PREFIX} <experiment id> | <Results task key>"
     assert expected_shape in START_PROMPT
+
+
+
+def test_unknown_forecast_still_leaves_a_status_comment_without_dates() -> None:
+    # UMN-13051 / exp 7994 on 2026-10-15: the forecast was unverifiable, so the
+    # task got no comment at all although the digest had promised to take it.
+    assert MATURITY_UNKNOWN_COMMENT_PREFIX == "Итоги пока не взяты в работу:"
+    assert "make no forecast write for that candidate" not in START_PROMPT
+    assert "never invent a date and never touch Start" in START_PROMPT
+    assert f"opens with `{MATURITY_UNKNOWN_COMMENT_PREFIX}`" in START_PROMPT
+    assert "older than\n  7 days" in START_PROMPT or "older than 7 days" in START_PROMPT
+    assert "comment: added|exists|failed>" in START_PROMPT
+    assert "skipped" not in START_PROMPT.split("Pending-trials maturity forecast")[1]
+
+def test_calculations_go_through_the_api_queue_with_high_priority() -> None:
+    # 2026-10-15: a direct in-process run of 7994 read the shared subscription sources while a
+    # queued calculation of 8027 was rebuilding them, and iOS Free lost its charges.
+    expected = (
+        f"{CALC_API_COMMAND} calculate <exp_id> --priority {FINALIZER_CALC_PRIORITY} "
+        f"--source {FINALIZER_CALC_SOURCE} --wait"
+    )
+    assert FINALIZER_CALC_PRIORITY > 100
+    for prompt in (START_PROMPT, FINALIZATION_PROMPT):
+        assert expected in prompt
+        assert "do not use the calculator HTTP API" not in prompt
+        assert "calculate_exp_info(exp_id, config=cfg" not in prompt
+        assert '"duplicate": true' in prompt
+    assert "never call `calculate_exp_info(...)` in-process" in TRANSIENT_CLICKHOUSE_RETRY_PROMPT
 
 
 def test_start_result_accepts_and_splits_trailing_forecast_lines() -> None:

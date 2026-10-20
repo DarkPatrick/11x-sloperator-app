@@ -730,6 +730,10 @@ Distinguish a persistent/product or technical issue from a one-off fluctuation. 
 Slack thread with a concise, self-contained investigation: findings, confidence, likely cause,
 and concrete recommended next action. If evidence points to a transient deviation, say so
 plainly instead of forcing a root cause. Do not merely repeat the auto-reply calculation.
+When the anomaly lines up with a release or looks like a tracking change (an event dropping to
+zero, a rename, a parameter change), finding the code change is part of this investigation, not a
+recommendation for another team: read the emitting code and the diff between the suspect
+releases yourself and name the commit/PR and file in the answer.
 
 This is a routine automated Analytics Bot investigation. Prioritise a correct, timely Slack
 answer while keeping the usual useful charts and visual-review workflow. Perfect visual polish

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from sloperator.agents import CompletionGateRejection
 from sloperator.config import Settings
 from sloperator.experiment_config_check import (
     ExperimentConfigResponder,
@@ -404,3 +405,57 @@ async def test_same_starter_gets_separate_messages_and_provider_sessions() -> No
         assert str(experiment["id"]) in sent and str(other["id"]) not in sent
         attached = agent.attach_session.await_args_list[index].args
         assert attached == ("DSTARTER", f"200.{index + 1}", runs[index])
+
+
+def _issue_run(text: str, session_id: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        text=f"[Проект](https://alice.mu.se/pages/123)\nНужно исправить\n{text}\n"
+        "EXPERIMENT_CONFIG_VERDICT: ISSUES",
+        session_id=session_id,
+        run_id=f"run-{session_id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_gate_rejection_returns_review_to_same_worker_session() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    agent.execute_once.side_effect = [
+        _issue_run("Скорее всего C, но это не проверить.", "s1"),
+        _issue_run("Не хватает вариации C (сундук).", "s1"),
+    ]
+    agent.communication.render.side_effect = [
+        CompletionGateRejection("says it cannot be verified"),
+        "Нужно исправить\nНе хватает вариации C (сундук).",
+    ]
+    client = AsyncMock()
+    client.conversations_open.return_value = {"channel": {"id": "DSTARTER"}}
+    client.chat_postMessage.return_value = {"ts": "200.1"}
+    payload = experiment_config_payload(_event())
+    assert payload is not None
+    assert await ExperimentConfigResponder(settings, agent).review_and_publish(
+        payload, client, timeout_seconds=300
+    )
+    recovery = agent.execute_once.await_args_list[1]
+    assert "says it cannot be verified" in recovery.args[0]
+    assert recovery.kwargs["existing_session_id"] == "s1"
+    assert "сундук" in client.chat_postMessage.await_args.kwargs["text"]
+    assert agent.attach_session.await_args.args[2].text.count("сундук") == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_gate_rejection_still_delivers_found_issue() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    agent.execute_once.side_effect = [_issue_run("В админке 2 вариации, в проекте 3.", "s1")] * 3
+    agent.communication.render.side_effect = CompletionGateRejection("style")
+    client = AsyncMock()
+    client.conversations_open.return_value = {"channel": {"id": "DSTARTER"}}
+    client.chat_postMessage.return_value = {"ts": "200.1"}
+    payload = experiment_config_payload(_event())
+    assert payload is not None
+    assert await ExperimentConfigResponder(settings, agent).review_and_publish(
+        payload, client, timeout_seconds=300
+    )
+    assert agent.execute_once.await_count == 3
+    assert "2 вариации, в проекте 3" in client.chat_postMessage.await_args.kwargs["text"]

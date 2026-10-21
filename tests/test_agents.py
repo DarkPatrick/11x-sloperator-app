@@ -1275,6 +1275,17 @@ async def test_completion_gate_cannot_publish_generated_text(monkeypatch, decisi
         await gate.render("Могу сократить — скажи, и сокращу.", "")
 
 
+async def test_completion_gate_rejection_carries_its_reason(monkeypatch):
+    gate = object.__new__(SlackCommunicationLayer)
+    monkeypatch.setattr(
+        gate, "_run", AsyncMock(return_value="RETURN_TO_WORKER: asks a team to check the code")
+    )
+    with pytest.raises(AgentExecutionError) as error:
+        await gate.render("Скорее всего C, но это не проверить.", "")
+    assert error.value.reason == "asks a team to check the code"
+    assert "asks a team to check the code" in str(error.value)
+
+
 async def test_completion_rejection_resumes_author_before_publication(monkeypatch, tmp_path):
     worker = AsyncMock(side_effect=[
         AgentRunResult(session_id="same-session", text="Сейчас проверю."),

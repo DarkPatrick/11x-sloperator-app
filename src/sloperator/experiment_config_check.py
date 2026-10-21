@@ -9,7 +9,7 @@ from typing import Any
 
 from slack_sdk.web.async_client import AsyncWebClient
 
-from sloperator.agents import HeadlessAgentRun
+from sloperator.agents import CompletionGateRejection, HeadlessAgentRun, gate_rejection_note
 from sloperator.automated_session_policy import (
     AUTOMATED_RESPONSE_STYLE,
     AUTOMATED_SESSION_REPOSITORY_POLICY,
@@ -20,6 +20,17 @@ LOGGER = logging.getLogger(__name__)
 
 METADATA_EVENT_TYPE = "ug_experiment_config_check"
 VERDICT_MARKER = "EXPERIMENT_CONFIG_VERDICT:"
+# A rejected answer goes back to the same worker session this many times before the worker's own
+# text is published as is: the ISSUES verdict already proves the review finished, and a dropped
+# notification leaves a misconfigured experiment collecting data unnoticed.
+MAX_GATE_RECOVERIES = 2
+GATE_RECOVERY_PROMPT = """\
+Sloperator did not publish your previous review: the completion gate returned it to you. Correct
+the response and return the complete review again in exactly the required format, ending with the
+verdict line. Do not repeat checks you already finished unless the reason below requires it; if a
+statement depended on something you have not verified, verify it in the source code now or leave
+the statement out.
+"""
 ISSUE_SECTION_MARKERS = ("Нужно исправить", "Рекомендуемые добавления в segments")
 FORBIDDEN_OUTPUT_FRAGMENTS = (
     "Что сошлось",
@@ -116,6 +127,8 @@ relevant application source/release history. Perform all of these checks:
    exposure/activation point. Distinguish assignment from real exposure and flag uncertainty.
 4. Check that the number and identifiers of test branches/variations in the admin configuration
    match the project table. Treat control as a branch and detect missing, extra, or duplicated ids.
+   When a branch is missing or extra, read the implementation yourself to find which mechanic each
+   variation id serves, and name the affected branch from that code.
 5. Decide whether there is a material, actionable configuration/project mismatch that the starter
    should fix. This is not an experiment-health report: do not analyse early SRM, reach pace,
    experiment overlaps, metric movement, subscriptions, rendered-price evidence, or runtime data.
@@ -131,7 +144,9 @@ they should make, never an audit trail. Apply these output rules strictly:
   needed to answer the project's stated decision; give only the additions and a concise reason,
   not a catalogue of alternatives or field-validation notes.
 - Do not report minor observations, early-data health signals, normal running state such as an
-  empty end date, or anything that could not be verified. Uncertainty means silence, not a caveat.
+  empty end date, or anything that could not be verified. Uncertainty means silence, not a caveat:
+  never write that something "cannot be verified" or ask the recipient or a team to check code;
+  either check it in the source yourself or leave that detail out of an otherwise valid issue.
 - Do not include skill/context disclosure lines in the Slack-facing content; Sloperator strips any
   mandatory internal disclosure lines before publication.
 - Keep the visible result under 2,500 characters and use at most four bullets total.
@@ -337,7 +352,7 @@ class ExperimentConfigResponder:
             job_name="experiment-config-check",
         )
         try:
-            return await self._publish_review(normalized, client, run)
+            return await self._publish_review(normalized, client, run, timeout_seconds)
         except Exception as error:
             # A completed provider turn is not a completed notification workflow.
             if isinstance(getattr(run, "run_id", None), str):
@@ -355,36 +370,44 @@ class ExperimentConfigResponder:
         normalized: dict[str, Any],
         client: AsyncWebClient,
         run: HeadlessAgentRun,
+        timeout_seconds: int,
     ) -> bool:
         recipient_id = str(normalized["recipient_id"])
-        verdict, visible_text = normalize_experiment_config_result(run.text)
-        if verdict == "OK":
-            LOGGER.info("Experiment config audit passed; suppressing Slack notification")
-            return False
-        issue_experiments, project_urls, clean_body = extract_project_links_and_clean_body(
-            visible_text,
-            normalized["experiments"],
-        )
-        communication = getattr(self.agent, "communication", None)
-        if communication is not None:
-            rendered = await communication.render(
-                clean_body,
-                "No prior Slack message.",
-                output_requirements=AUTOMATED_RESPONSE_STYLE
-                + "\nAutomated experiment configuration notification. "
-                "No attachment will be uploaded. Return only the Russian issue body, "
-                "under 2,500 characters, with at most four bullets. Preserve the complete "
-                "copy-paste configuration code verbatim. Do not add an introduction or "
-                "experiment links: the publisher adds them separately. "
-                "Remove evidence walkthroughs, passed checks and archive claims.",
+        for recovery in range(MAX_GATE_RECOVERIES + 1):
+            verdict, visible_text = normalize_experiment_config_result(run.text)
+            if verdict == "OK":
+                LOGGER.info("Experiment config audit passed; suppressing Slack notification")
+                return False
+            issue_experiments, project_urls, clean_body = extract_project_links_and_clean_body(
+                visible_text,
+                normalized["experiments"],
             )
-            original_code = re.findall(r"```[^\n]*\n(.*?)```", clean_body, re.DOTALL)
-            rendered_code = re.findall(r"```[^\n]*\n(.*?)```", rendered, re.DOTALL)
-            if original_code != rendered_code:
-                raise ValueError("communication layer changed experiment configuration code")
-            _, clean_body = normalize_experiment_config_result(
-                f"{rendered}\n{VERDICT_MARKER} ISSUES"
-            )
+            try:
+                clean_body = await self._render(clean_body)
+                break
+            except CompletionGateRejection as rejection:
+                if recovery == MAX_GATE_RECOVERIES:
+                    LOGGER.warning(
+                        "Completion gate rejected the experiment config review %d times; "
+                        "publishing the worker's own text for %s: %s",
+                        recovery + 1,
+                        recipient_id,
+                        rejection,
+                    )
+                    break
+                LOGGER.warning(
+                    "Returning rejected experiment config review to worker for %s (%d/%d): %s",
+                    recipient_id,
+                    recovery + 1,
+                    MAX_GATE_RECOVERIES,
+                    rejection,
+                )
+                run = await self.agent.execute_once(
+                    GATE_RECOVERY_PROMPT + gate_rejection_note(rejection),
+                    timeout_seconds,
+                    job_name="experiment-config-check",
+                    existing_session_id=run.session_id,
+                )
         message_text = (
             f"{build_notification_intro(recipient_id, issue_experiments, project_urls)}"
             f"\n\n{format_slack_mrkdwn(clean_body)}"
@@ -401,3 +424,25 @@ class ExperimentConfigResponder:
             run,
         )
         return True
+
+    async def _render(self, clean_body: str) -> str:
+        communication = getattr(self.agent, "communication", None)
+        if communication is None:
+            return clean_body
+        rendered = await communication.render(
+            clean_body,
+            "No prior Slack message.",
+            output_requirements=AUTOMATED_RESPONSE_STYLE
+            + "\nAutomated experiment configuration notification. "
+            "No attachment will be uploaded. Return only the Russian issue body, "
+            "under 2,500 characters, with at most four bullets. Preserve the complete "
+            "copy-paste configuration code verbatim. Do not add an introduction or "
+            "experiment links: the publisher adds them separately. "
+            "Remove evidence walkthroughs, passed checks and archive claims.",
+        )
+        original_code = re.findall(r"```[^\n]*\n(.*?)```", clean_body, re.DOTALL)
+        rendered_code = re.findall(r"```[^\n]*\n(.*?)```", rendered, re.DOTALL)
+        if original_code != rendered_code:
+            raise ValueError("communication layer changed experiment configuration code")
+        _, clean_body = normalize_experiment_config_result(f"{rendered}\n{VERDICT_MARKER} ISSUES")
+        return clean_body

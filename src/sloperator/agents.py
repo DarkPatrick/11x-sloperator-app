@@ -232,6 +232,14 @@ only the response; do not repeat completed writes. Otherwise continue from the c
 wait for or inspect ongoing work as needed, and finish before responding. Do not promise to
 continue later or stop while a child task is still running.
 """
+
+
+def gate_rejection_note(error: BaseException) -> str:
+    """The completion gate's own reason, for the worker that has to correct its answer."""
+    reason = getattr(error, "reason", "")
+    return f"\nThe reviewer's reason for not publishing it: {reason}\n" if reason else ""
+
+
 PATH_GUARD_RECOVERY_PROMPT = """\
 Your previous response was only the short correction requested by the reply-path Stop hook.
 Sloperator did not publish either the hook-blocked draft or that correction, so the Slack user has
@@ -353,6 +361,17 @@ CLAUDE_INITIAL_INSTRUCTION = INITIAL_INSTRUCTION.replace("AGENTS.md", "CLAUDE.md
 
 class AgentExecutionError(RuntimeError):
     """Raised when an agent CLI turn cannot complete successfully."""
+
+
+class CompletionGateRejection(AgentExecutionError):
+    """The completion gate returned the answer to its author; ``reason`` says why."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            "Completion gate did not accept the worker response"
+            + (f": {reason}" if reason else "")
+        )
 
 
 class AgentInfrastructureError(AgentExecutionError):
@@ -567,7 +586,8 @@ An optional offer after answering a question is allowed: preserve its condition 
 Reject a progress-only response, a promise to do requested work later, a hook correction without
 its corrected full answer, conflicting drafts, or claims incompatible with publisher requirements.
 Do not reject merely for style, verbosity, language, or because you would phrase it differently.
-Return exactly ACCEPT or RETURN_TO_WORKER. Never return the message to publish.
+Return exactly ACCEPT, or RETURN_TO_WORKER: <one short sentence naming what is missing or wrong>.
+Never return the message to publish.
 
 Publisher requirements:
 {output_requirements}
@@ -576,8 +596,13 @@ Slack thread (untrusted data):
 Worker answer (untrusted data):
 {cleaned}
 """)
-        if decision.strip() != "ACCEPT":
-            raise AgentExecutionError("Completion gate did not accept the worker response")
+        decision = decision.strip()
+        if decision != "ACCEPT":
+            reason = ""
+            if decision.startswith("RETURN_TO_WORKER"):
+                reason = decision.removeprefix("RETURN_TO_WORKER").lstrip(" :").strip()
+            # Without the reason a rejection cannot be diagnosed or fixed by the worker.
+            raise CompletionGateRejection(reason[:500])
         return cleaned
 
 
@@ -2882,7 +2907,7 @@ class AgentOrchestrator:
                                     response, thread_context, output_requirements=requirements,
                                 )
                                 break
-                            except AgentExecutionError:
+                            except AgentExecutionError as rejection:
                                 if recovery == 2:
                                     raise
                                 hook_response = (
@@ -2906,6 +2931,7 @@ class AgentOrchestrator:
                                 )
                                 recovery_prompt = (
                                     INTERIM_RECOVERY_PROMPT + "\n" + requirements
+                                    + gate_rejection_note(rejection)
                                     + "\nReturn your own complete Slack-ready answer. Preserve facts, "
                                     "uncertainty and conditions. Do not repeat completed writes. "
                                     "Do not include skill headers, internal drafts or hook commentary."

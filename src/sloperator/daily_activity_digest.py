@@ -32,7 +32,9 @@ from sloperator.experiment_design_planner import select_from_jira as select_desi
 from sloperator.experiment_finalizer import FAILURE_PREFIXES as FINALIZATION_FAILURE_PREFIXES
 from sloperator.experiment_finalizer import NO_OP_PREFIX as FINALIZATION_NO_OP_PREFIX
 from sloperator.experiment_finalizer import (
+    QUEUE_FORECAST_RESULT_PREFIX,
     SELECTION_RULES as FINALIZATION_SELECTION_RULES,
+    UPCOMING_QUEUE_FORECAST_POLICY,
 )
 from sloperator.experiment_finalizer import next_run_at as next_finalization_run_at
 from sloperator.jira_task_automation import (
@@ -105,9 +107,12 @@ expose technical error details. Return only the Slack-ready message.
 FINALIZATION_FORECAST_PROMPT = f"""\
 [claude:claude-opus-5-5]
 This is an authorised automated forecast for tomorrow's UG monetisation experiment-finalisation
-run. Apply the production selector below, but do not claim or transition a Jira task, edit Jira or
-Confluence, publish results, or send Slack messages. This pass may run the standard calculator and
-refresh only its normal calculation tables so that pending-trials evidence is current.
+run. Apply the production selector below, but do not claim or transition a Jira task, edit
+Confluence, publish results, or send Slack messages. The only Jira writes allowed are the dated
+forecast comment and Start/Due dates of the upcoming-queue forecast below, which this pass applies
+every time. This pass may run the standard calculator and refresh only its normal calculation
+tables so that pending-trials evidence is current; the upcoming-queue forecast itself never
+calculates.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 
@@ -116,6 +121,8 @@ refresh only its normal calculation tables so that pending-trials evidence is cu
 {AUTOMATED_RESPONSE_STYLE}
 
 {FINALIZATION_SELECTION_RULES}
+
+{UPCOMING_QUEUE_FORECAST_POLICY}
 
 Forecast rules:
 1. Evaluate immutable time gates at the supplied next scheduled run time, not merely at the
@@ -130,10 +137,17 @@ Forecast rules:
    `FINALIZATION_FORECAST: {{"id":"<id>","task":"UMN-<n>","title":"<Jira summary>"}}`
    If no candidate is likely, return exactly `FINALIZATION_FORECAST_NONE`.
    If authoritative selection or calculation cannot be completed, return exactly one line starting
-   `FINALIZATION_FORECAST_FAILED:` followed by a concise reason. Return no audit or other text.
+   `FINALIZATION_FORECAST_FAILED:` followed by a concise reason.
+5. A candidate likely for the next run is the nearest task of the upcoming-queue forecast, with
+   the next run's date. When none is likely but the upcoming-queue forecast dated a later task,
+   return instead exactly one line
+   `FINALIZATION_FORECAST_NEXT: {{"id":"<id>","task":"UMN-<n>","title":"<Jira summary>","date":"YYYY-MM-DD"}}`
+   with that task and its forecast date. After the marker line add the one
+   `{QUEUE_FORECAST_RESULT_PREFIX}` line of that policy. Return no audit or other text.
 """
 
 FINALIZATION_FORECAST_PREFIX = "FINALIZATION_FORECAST: "
+FINALIZATION_FORECAST_NEXT_PREFIX = "FINALIZATION_FORECAST_NEXT: "
 FINALIZATION_FORECAST_NONE = "FINALIZATION_FORECAST_NONE"
 FINALIZATION_FORECAST_FAILED = "FINALIZATION_FORECAST_FAILED:"
 
@@ -359,7 +373,8 @@ def _finalization_forecast_marker(text: str) -> str | None:
         for line in text.splitlines()
         if line.strip() == FINALIZATION_FORECAST_NONE
         or line.strip().startswith(
-            (FINALIZATION_FORECAST_PREFIX, FINALIZATION_FORECAST_FAILED)
+            (FINALIZATION_FORECAST_PREFIX, FINALIZATION_FORECAST_NEXT_PREFIX,
+             FINALIZATION_FORECAST_FAILED)
         )
     ]
     return markers[0] if len(markers) == 1 else None
@@ -373,10 +388,12 @@ def _parse_finalization_forecast(text: str, settings: Settings) -> DigestItem | 
         return None
     if stripped.startswith(FINALIZATION_FORECAST_FAILED):
         raise ValueError(stripped)
-    if not stripped.startswith(FINALIZATION_FORECAST_PREFIX):
+    later = stripped.startswith(FINALIZATION_FORECAST_NEXT_PREFIX)
+    prefix = FINALIZATION_FORECAST_NEXT_PREFIX if later else FINALIZATION_FORECAST_PREFIX
+    if not stripped.startswith(prefix):
         raise ValueError("Finalization forecast returned an invalid marker")
     try:
-        payload = json.loads(stripped.removeprefix(FINALIZATION_FORECAST_PREFIX))
+        payload = json.loads(stripped.removeprefix(prefix))
     except json.JSONDecodeError as error:
         raise ValueError("Finalization forecast returned invalid JSON") from error
     if not isinstance(payload, dict):
@@ -386,11 +403,17 @@ def _parse_finalization_forecast(text: str, settings: Settings) -> DigestItem | 
     task_title = " ".join(str(payload.get("title", "")).split())
     if not experiment_id.isdigit() or TASK_RE.fullmatch(task_key) is None or not task_title:
         raise ValueError("Finalization forecast payload is incomplete")
+    when = "завтра"
+    if later:
+        try:
+            when = f"{dt.date.fromisoformat(str(payload.get('date', ''))):%d.%m}"
+        except ValueError as error:
+            raise ValueError("Finalization forecast payload has no valid date") from error
     return DigestItem(
         task_key,
         task_title,
         f"{settings.jira_url.rstrip('/')}/browse/{task_key}",
-        f"итоги эксперимента {experiment_id}; по текущей оценке возьму в работу завтра",
+        f"итоги эксперимента {experiment_id}; по текущей оценке возьму в работу {when}",
     )
 
 
@@ -402,11 +425,15 @@ def _is_finalization_forecast(text: str) -> bool:
         FINALIZATION_FORECAST_FAILED
     ):
         return True
-    if not stripped.startswith(FINALIZATION_FORECAST_PREFIX):
+    later = stripped.startswith(FINALIZATION_FORECAST_NEXT_PREFIX)
+    prefix = FINALIZATION_FORECAST_NEXT_PREFIX if later else FINALIZATION_FORECAST_PREFIX
+    if not stripped.startswith(prefix):
         return False
     try:
-        payload = json.loads(stripped.removeprefix(FINALIZATION_FORECAST_PREFIX))
+        payload = json.loads(stripped.removeprefix(prefix))
     except json.JSONDecodeError:
+        return False
+    if later and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(payload.get("date", ""))):
         return False
     return (
         isinstance(payload, dict)
@@ -438,6 +465,9 @@ async def forecast_finalization(
         accept_result=_is_finalization_forecast,
         max_interim_results=0,
     )
+    for line in run.text.splitlines():
+        if line.strip().startswith(QUEUE_FORECAST_RESULT_PREFIX):
+            LOGGER.info("Finalization forecast: %s", line.strip())
     return _parse_finalization_forecast(run.text, settings)
 
 
@@ -479,13 +509,14 @@ def _add_finalization_forecast_item(
     experiment_id_match = re.search(r"\d+", item.note)
     if experiment_id_match is None:  # pragma: no cover - guarded by forecast parsing
         raise ValueError("Finalization forecast item has no experiment id")
-    item = replace(
-        item,
-        note=(
-            f"итоги эксперимента {experiment_id_match.group()}; "
-            f"по текущей оценке возьму в работу {_next_weekday_label(now)}"
-        ),
-    )
+    if item.note.endswith("завтра"):  # tomorrow's candidate; a dated queue forecast keeps its date
+        item = replace(
+            item,
+            note=(
+                f"итоги эксперимента {experiment_id_match.group()}; "
+                f"по текущей оценке возьму в работу {_next_weekday_label(now)}"
+            ),
+        )
     if item.task_key in {entry.task_key for entry in (*facts.completed, *facts.pending)}:
         return facts
     return replace(facts, pending=(*facts.pending, item))

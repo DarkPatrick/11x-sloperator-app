@@ -11,6 +11,7 @@ import pytest
 from sloperator.agents import HeadlessAgentRun
 from sloperator.claude_usage import ClaudeUsage
 from sloperator.config import Settings
+from sloperator.experiment_finalizer import UPCOMING_QUEUE_FORECAST_POLICY
 from sloperator.daily_activity_digest import (
     CHANNEL_ID,
     DIGEST_PROMPT,
@@ -19,6 +20,8 @@ from sloperator.daily_activity_digest import (
     DigestFacts,
     DigestItem,
     _activity_refs,
+    _add_finalization_forecast_item,
+    _is_finalization_forecast,
     _continuation_title,
     _experiment_config_ids,
     _general_queue,
@@ -128,6 +131,29 @@ def test_finalization_forecast_is_one_linked_jira_task(tmp_path) -> None:
             'FINALIZATION_FORECAST: {"id":"7983","task":"UMN-14001","title":"Second"}',
             settings(tmp_path),
         )
+
+
+def test_forecast_names_the_nearest_later_task_with_its_date(tmp_path) -> None:
+    # 2026-10-20/21: every ended experiment was inside the age gate, so the letter said only that
+    # nothing qualified tomorrow and no Results task heard when it would be taken.
+    text = (
+        'FINALIZATION_FORECAST_NEXT: {"id":"8057","task":"UMN-14100",'
+        '"title":"Итоги - US checkout zip autofill","date":"2026-10-23"}\n'
+        "QUEUE_FORECAST: 8057 | UMN-14100 | 2026-10-23 | comment: added | dates: set | "
+        "post-stop wait ends 2026-10-22"
+    )
+    item = _parse_finalization_forecast(text, settings(tmp_path))
+
+    assert item is not None
+    assert item.task_key == "UMN-14100"
+    assert item.note.endswith("возьму в работу 23.10")
+    now = dt.datetime(2026, 10, 21, 13, tzinfo=dt.UTC)
+    added = _add_finalization_forecast_item(facts(), item, now=now)
+    assert any(entry.note.endswith("23.10") for entry in added.pending)
+    assert _is_finalization_forecast(text)
+    assert not _is_finalization_forecast(text.replace('"date":"2026-10-23"', '"date":""'))
+    assert UPCOMING_QUEUE_FORECAST_POLICY in FINALIZATION_FORECAST_PROMPT
+    assert "The only Jira writes allowed are the dated" in FINALIZATION_FORECAST_PROMPT
 
 
 @pytest.mark.asyncio

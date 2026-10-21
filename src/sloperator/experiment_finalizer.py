@@ -46,6 +46,7 @@ TRANSIENT_CLICKHOUSE_RETRY_DELAYS = (30, 90, 180)
 PENDING_TRIALS_SMALL_COUNT_LIMIT = 10
 MATURITY_FORECAST_COMMENT_PREFIX = "Прогноз готовности к итогам:"
 MATURITY_FORECAST_RESULT_PREFIX = "MATURITY_FORECAST:"
+QUEUE_FORECAST_RESULT_PREFIX = "QUEUE_FORECAST:"
 MATURITY_UNKNOWN_COMMENT_PREFIX = "Итоги пока не взяты в работу:"
 MATURITY_UNKNOWN_REPEAT_DAYS = 7
 CALC_API_COMMAND = ".venv/bin/python .claude/skills/ug-experiment-calculator/scripts/calc_api.py"
@@ -114,8 +115,9 @@ Selection rules:
 7. The experiments remaining after rules 1-6 form the preliminary candidate pool. Order the whole
    pool by actual end timestamp, then by experiment id as a deterministic tie-breaker. If the pool
    is empty, stop immediately: do not invoke the calculator, do not inspect fallback experiments
-   outside these rules, make no Confluence or Jira writes, and return exactly
-   `{NO_OP_NOTIFICATION}` and nothing else.
+   outside these rules, make no Confluence or Jira writes other than the forecast annotations
+   this pass's own forecast policy defines, and return exactly `{NO_OP_NOTIFICATION}` plus only
+   the report lines that policy allows.
 8. Walk the ordered preliminary candidate pool from oldest to newest. For each candidate, obtain
    demonstrably fresh maturity data. Before recalculating, check whether the package already has a
    complete successful calculation from the current calendar date in Asia/Nicosia. Reuse it only
@@ -226,6 +228,54 @@ Pending-trials maturity forecast for reviewer selection only:
   unknown> | <comment: added|exists|failed> | <dates: set|unchanged|kept-later|failed> |
   <short reason when the forecast is unknown or the comment failed, else ->`
   These lines are the only text allowed after the terminal line; they are never posted to Slack.
+"""
+
+UPCOMING_QUEUE_FORECAST_POLICY = f"""\
+Upcoming-queue forecast (a dated Jira annotation on the next Results task to be taken):
+- Purpose: when no Results task is started today, the nearest one a later scheduled run will
+  take still gets a dated forecast in Jira, so its author knows when to expect итоги. An empty
+  candidate pool (for example every ended experiment still inside the age gate) is exactly the
+  case this covers; it is not a reason to skip it.
+- Queue: every experiment that passes rule 1 (allowlist and title markers), rule 4 (configured
+  segments) and rule 6 (its exact Results task is in Backlog or To Do) and that is either still
+  running or ended within the last calendar month. Only the end and age gates of rules 2-3 are
+  ignored here. This forecast never calculates: it reads existing calculation rows only (the
+  daily cron keeps them fresh), and a running or under-age experiment is never sent to the
+  calculator for it.
+- Earliest eligibility of each queued experiment is the latest of: (a) its actual end, or for a
+  running experiment its planned end — the verified due date of the epic's "Остановить
+  эксперимент" task, else the admin start plus the planned duration from the project page's
+  Experiment design; with neither verifiable the experiment gets no date and no write; (b) that
+  end plus the rule-3 age threshold; (c) for an ended experiment with existing fresh rows, the
+  pending-trials eligibility date computed as in the maturity forecast (row-level
+  `first_charge_expected_dt` against the strict gate of rule 8). When (c) cannot be computed the
+  date is the earliest possible one and the comment says "не раньше".
+- Take date: simulate the scheduled runs (weekdays, 12:00 Asia/Nicosia) from the next one on.
+  Each run takes exactly one task: the oldest-ended experiment whose earliest eligibility has
+  passed (running experiments ordered by planned end). The first task the simulation takes is
+  the nearest task, and its run date is its forecast date. Annotate only that task; tasks blocked
+  by pending trials keep the maturity forecast policy when the pass defines it.
+- Before writing, re-fetch the task with status, `customfield_10312`, `duedate`, and all comments
+  through `.claude/jira/jira_issue.py` with `--as-bot` (`comments <KEY> --as-bot --limit 1000
+  --json`, count equal to `total`; incomplete → no writes) and re-verify Backlog or To Do. Read the
+  date in the newest comment starting `{MATURITY_FORECAST_COMMENT_PREFIX}`. Add a new comment
+  only when none exists, when that date is earlier than today, or when the new forecast date is
+  later than it (the queue slipped); otherwise report `comment: exists`.
+- Dates, best effort and never blocking the comment: set Start date (`set-start-date <KEY>
+  --as-bot --date YYYY-MM-DD`) when it is empty or earlier than the forecast date, and Due date
+  (`set-due-date`) when it differs; never move a Start date that is later than the forecast date.
+- The comment is short Russian ADF via `add-comment <KEY> --as-bot --adf-file <file>`, opening
+  with a native mention of the epic's reporter (assignee when the reporter is missing; never an
+  invented account id), then `{MATURITY_FORECAST_COMMENT_PREFIX} YYYY-MM-DD.` and one sentence:
+  "по текущей оценке возьму в работу в этот день" (or "не раньше этого дня"), followed by what
+  sets the date — the experiment runs until <date>, the post-stop wait ends <date>, pending trials,
+  or <n> tasks ahead in the queue. Re-fetch the comments to verify it.
+- These writes do not authorise assignment, a status transition, a calculation, Confluence edits,
+  or any other Jira edit. Report the result as one line after the terminal line:
+  `{QUEUE_FORECAST_RESULT_PREFIX} <experiment id or none> | <Results task key or -> | <forecast
+  YYYY-MM-DD or none> | <comment: added|exists|failed|none> | <dates: set|unchanged|kept-later|
+  failed|none> | <what sets the date, or why there is no forecast>`
+  It is never posted to Slack.
 """
 
 FINALIZATION_PROMPT = f"""\
@@ -374,6 +424,8 @@ Select exactly one experiment using all of these gates before any finalisation o
 write. The maturity-forecast metadata exception is defined separately below:
 {SELECTION_RULES}
 {MATURITY_FORECAST_POLICY}
+{UPCOMING_QUEUE_FORECAST_POLICY}
+Apply the upcoming-queue forecast only when this pass ends without starting a Results task.
 Before the project-page check in rule 5, identify the exact Results task and its parent epic using
 rule 6. Resolve its project page from the experiment admin object's `project` value and
 independently verify it against the Results task's parent epic. For the Jira check, request
@@ -426,7 +478,8 @@ FINALIZATION_STARTED: <experiment id> | <project page URL> | Iteration <n> | <Re
 Return exactly {NO_OP_NOTIFICATION} if none qualify. On failure return exactly
 Experiment finalisation failed: <reason>.
 In this pass, "nothing else" after the terminal line still permits the
-`{MATURITY_FORECAST_RESULT_PREFIX}` lines defined in the maturity forecast policy, and nothing more.
+`{MATURITY_FORECAST_RESULT_PREFIX}` lines defined in the maturity forecast policy and the one
+`{QUEUE_FORECAST_RESULT_PREFIX}` line of the upcoming-queue forecast, and nothing more.
 """
 
 
@@ -513,7 +566,7 @@ def split_maturity_forecasts(text: str) -> tuple[str, tuple[str, ...]]:
     kept: list[str] = []
     forecasts: list[str] = []
     for line in text.strip().splitlines():
-        if line.strip().startswith(MATURITY_FORECAST_RESULT_PREFIX):
+        if line.strip().startswith((MATURITY_FORECAST_RESULT_PREFIX, QUEUE_FORECAST_RESULT_PREFIX)):
             forecasts.append(line.strip())
         else:
             kept.append(line)
@@ -684,7 +737,7 @@ async def run_once(
         start_run = recovered_start
     terminal, recovered_forecasts = split_maturity_forecasts(start_run.text)
     for forecast in dict.fromkeys((*forecasts, *recovered_forecasts)):
-        LOGGER.info("Experiment finalizer maturity forecast: %s", forecast)
+        LOGGER.info("Experiment finalizer forecast: %s", forecast)
     start_run = replace(start_run, text=terminal)
     if start_run.text.strip().startswith(NO_OP_PREFIX):
         no_op_run = replace(start_run, text=NO_OP_NOTIFICATION)

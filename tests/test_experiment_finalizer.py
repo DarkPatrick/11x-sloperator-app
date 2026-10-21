@@ -19,6 +19,8 @@ from sloperator.experiment_finalizer import (
     MATURITY_FORECAST_POLICY,
     MATURITY_FORECAST_RESULT_PREFIX,
     MATURITY_UNKNOWN_COMMENT_PREFIX,
+    QUEUE_FORECAST_RESULT_PREFIX,
+    UPCOMING_QUEUE_FORECAST_POLICY,
     CALC_API_COMMAND,
     FINALIZER_CALC_PRIORITY,
     FINALIZER_CALC_SOURCE,
@@ -240,6 +242,19 @@ def test_calculations_go_through_the_api_queue_with_high_priority() -> None:
         assert "calculate_exp_info(exp_id, config=cfg" not in prompt
         assert '"duplicate": true' in prompt
     assert "never call `calculate_exp_info(...)` in-process" in TRANSIENT_CLICKHOUSE_RETRY_PROMPT
+
+
+def test_empty_pool_still_annotates_the_nearest_upcoming_task() -> None:
+    # 2026-10-20/21: every ended candidate was still inside the age gate, the pool was empty, and
+    # rule 7 forbade any Jira write, so no Results task learnt when it would be taken.
+    assert UPCOMING_QUEUE_FORECAST_POLICY in START_PROMPT
+    assert "make no Confluence or Jira writes other than the forecast annotations" in START_PROMPT
+    assert "Apply the upcoming-queue forecast only when this pass ends without starting" in START_PROMPT
+    assert "never calculates" in UPCOMING_QUEUE_FORECAST_POLICY
+    assert "Остановить" in UPCOMING_QUEUE_FORECAST_POLICY
+    line = f"{QUEUE_FORECAST_RESULT_PREFIX} 8057 | UMN-14100 | 2026-10-23 | comment: added | dates: set | wait"
+    assert split_maturity_forecasts(f"{NO_OP_NOTIFICATION}\n{line}") == (NO_OP_NOTIFICATION, (line,))
+    assert is_start_result(f"{NO_OP_NOTIFICATION}\n{line}")
 
 
 def test_start_result_accepts_and_splits_trailing_forecast_lines() -> None:

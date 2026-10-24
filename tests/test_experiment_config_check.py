@@ -1,6 +1,7 @@
 # ruff: noqa: RUF001
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -459,3 +460,77 @@ async def test_repeated_gate_rejection_still_delivers_found_issue() -> None:
     )
     assert agent.execute_once.await_count == 3
     assert "2 вариации, в проекте 3" in client.chat_postMessage.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_resubmission_joins_running_review_instead_of_starting_second_agent() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    agent.communication = None
+    release = asyncio.Event()
+
+    async def slow_review(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        await release.wait()
+        return SimpleNamespace(text="Всё проверено.\nEXPERIMENT_CONFIG_VERDICT: OK")
+
+    agent.execute_once.side_effect = slow_review
+    client = AsyncMock()
+    payload = experiment_config_payload(_event())
+    assert payload is not None
+    responder = ExperimentConfigResponder(settings, agent)
+
+    first = asyncio.create_task(responder.review_and_publish(payload, client, timeout_seconds=300))
+    await asyncio.sleep(0)
+    # The timer gave up on the first request (read timeout) and re-submitted.
+    first.cancel()
+    second = asyncio.create_task(responder.review_and_publish(payload, client, timeout_seconds=300))
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await second is False
+    agent.execute_once.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resubmission_after_completion_reuses_outcome_without_new_dm() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    agent.communication = None
+    agent.execute_once.return_value = SimpleNamespace(
+        text=(
+            "Проект: https://alice.mu.se/pages/123\n"
+            "*Нужно исправить*\nWrong activation event.\n"
+            "EXPERIMENT_CONFIG_VERDICT: ISSUES"
+        )
+    )
+    client = AsyncMock()
+    client.conversations_open.return_value = {"channel": {"id": "DSTARTER"}}
+    client.chat_postMessage.return_value = {"ts": "200.1"}
+    payload = experiment_config_payload(_event())
+    assert payload is not None
+    responder = ExperimentConfigResponder(settings, agent)
+
+    assert await responder.review_and_publish(payload, client, timeout_seconds=300) is True
+    assert await responder.review_and_publish(payload, client, timeout_seconds=300) is True
+
+    agent.execute_once.assert_awaited_once()
+    client.chat_postMessage.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_review_is_not_reused_and_can_be_resubmitted() -> None:
+    settings = Settings(slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test")
+    agent = AsyncMock()
+    agent.communication = None
+    agent.execute_once.side_effect = [
+        RuntimeError("provider down"),
+        SimpleNamespace(text="Всё проверено.\nEXPERIMENT_CONFIG_VERDICT: OK"),
+    ]
+    payload = experiment_config_payload(_event())
+    assert payload is not None
+    responder = ExperimentConfigResponder(settings, agent)
+
+    with pytest.raises(RuntimeError):
+        await responder.review_and_publish(payload, AsyncMock(), timeout_seconds=300)
+    assert await responder.review_and_publish(payload, AsyncMock(), timeout_seconds=300) is False
+    assert agent.execute_once.await_count == 2

@@ -284,6 +284,24 @@ async def serve(settings: Settings) -> None:
                 len(abandoned_runs),
                 ", ".join(abandoned_runs),
             )
+        # Config checks are not resumed here: the hourly exp-segment timer re-submits every
+        # experiment whose review never returned completed, so resuming as well would review and
+        # notify twice. Close the orphaned turns instead of leaving them "running".
+        orphaned_config_checks = await asyncio.to_thread(
+            store.list_interrupted_scheduled_agent_runs, "experiment-config-check"
+        )
+        for row in orphaned_config_checks:
+            await asyncio.to_thread(
+                store.finish_scheduled_agent_run,
+                str(row["run_id"]),
+                status="abandoned",
+                last_error="interrupted by a service restart; the exp-segment timer re-submits it",
+            )
+        if orphaned_config_checks:
+            LOGGER.warning(
+                "Closed %d interrupted experiment-config-check run(s); the timer re-submits them",
+                len(orphaned_config_checks),
+            )
         recovered_headless = await orchestrator.resume_interrupted_headless(
             settings.experiment_finalizer_timeout_seconds,
             job_name="experiment-finalizer-reviewer",

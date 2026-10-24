@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
+from functools import partial
 from typing import Any
 
 from slack_sdk.web.async_client import AsyncWebClient
@@ -24,6 +26,11 @@ VERDICT_MARKER = "EXPERIMENT_CONFIG_VERDICT:"
 # text is published as is: the ISSUES verdict already proves the review finished, and a dropped
 # notification leaves a misconfigured experiment collecting data unnoticed.
 MAX_GATE_RECOVERIES = 2
+# The hourly exp-segment timer is the retry mechanism: it re-submits an experiment until one
+# request returns completed. A request it gave up on (read timeout while the review waited for the
+# Claude limit) may still finish here, so a re-submission joins the running review or reuses its
+# recent outcome instead of launching a second agent and sending a second DM.
+COMPLETED_REUSE_SECONDS = 24 * 60 * 60
 GATE_RECOVERY_PROMPT = """\
 Sloperator did not publish your previous review: the completion gate returned it to you. Correct
 the response and return the complete review again in exactly the required format, ending with the
@@ -308,6 +315,8 @@ class ExperimentConfigResponder:
     def __init__(self, settings: Settings, agent: Any) -> None:
         self.settings = settings
         self.agent = agent
+        self._in_flight: dict[int, asyncio.Task[bool]] = {}
+        self._completed: dict[int, tuple[float, bool]] = {}
 
     async def handle(self, event: dict[str, Any], client: AsyncWebClient) -> None:
         payload = experiment_config_payload(event)
@@ -344,6 +353,36 @@ class ExperimentConfigResponder:
             raise ValueError("invalid experiment config payload")
         if len(normalized["experiments"]) != 1:
             raise ValueError("submit one experiment per review for separate Slack sessions")
+        experiment_id = int(normalized["experiments"][0]["id"])
+        completed = self._completed.get(experiment_id)
+        if completed is not None and time.monotonic() - completed[0] < COMPLETED_REUSE_SECONDS:
+            LOGGER.info("Experiment config review for %s already completed", experiment_id)
+            return completed[1]
+        task = self._in_flight.get(experiment_id)
+        if task is None:
+            task = asyncio.create_task(
+                self._review_and_publish(normalized, client, timeout_seconds),
+                name=f"experiment-config-check-{experiment_id}",
+            )
+            self._in_flight[experiment_id] = task
+            task.add_done_callback(partial(self._finish_in_flight, experiment_id))
+        else:
+            LOGGER.info("Joining the running experiment config review for %s", experiment_id)
+        # A dropped HTTP request must not cancel a review another submission may join.
+        return await asyncio.shield(task)
+
+    def _finish_in_flight(self, experiment_id: int, task: asyncio.Task[bool]) -> None:
+        if self._in_flight.get(experiment_id) is task:
+            self._in_flight.pop(experiment_id, None)
+        if not task.cancelled() and task.exception() is None:
+            self._completed[experiment_id] = (time.monotonic(), task.result())
+
+    async def _review_and_publish(
+        self,
+        normalized: dict[str, Any],
+        client: AsyncWebClient,
+        timeout_seconds: int,
+    ) -> bool:
         recipient_id = str(normalized["recipient_id"])
         interactive = recipient_id in self.settings.conversation_user_ids
         run: HeadlessAgentRun = await self.agent.execute_once(

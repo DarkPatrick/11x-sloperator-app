@@ -28,7 +28,9 @@ from sloperator.experiment_finalizer import (
     PENDING_TRIALS_SMALL_COUNT_LIMIT,
     REVIEW_PROMPT,
     START_PROMPT,
+    SWEEP_JOB_NAME,
     TRANSIENT_CLICKHOUSE_RETRY_PROMPT,
+    WAITING_COMMENT_PREFIX,
     InvalidFinalizationNotification,
     execute_finalizer_turn,
     is_finalization_failure,
@@ -36,12 +38,16 @@ from sloperator.experiment_finalizer import (
     is_preparation_result,
     is_start_result,
     is_transient_clickhouse_failure,
+    is_sweep_result,
     next_run_at,
+    overdue_sweep_jql,
+    overdue_sweep_prompt,
     normalize_finalization_notification,
     recover_missing_project_page,
     run_once,
     run_preparation_from_started_run,
     split_maturity_forecasts,
+    sweep_overdue_results,
     validate_started_page,
 )
 
@@ -630,3 +636,58 @@ async def test_no_candidate_stops_at_reviewer_and_attaches_only_owner() -> None:
     assert await run_once(client, agent, settings) == NO_OP_NOTIFICATION
     assert agent.execute_once.await_count == 1
     assert agent.attach_session.await_args.args[2].session_id == "owner"
+
+
+SWEEP_LINES = (
+    "OVERDUE_SWEEP: UMN-14100 | 8057 | dated | 2026-10-28 | comment: added | dates: set | "
+    "1 task ahead\n"
+    "OVERDUE_SWEEP: UMN-14200 | 8101 | waiting | - | comment: exists | dates: unchanged | "
+    "experiment still running\n"
+    "OVERDUE_SWEEP_DONE: 2"
+)
+
+
+def test_overdue_sweep_covers_overdue_and_parked_service_account_tasks() -> None:
+    # 2026-10-26: overdue Results tasks of ug-ai-analyst kept stale dates; a task whose experiment
+    # had not ended yet must lose its dates and be re-dated only once the experiment stops.
+    jql = overdue_sweep_jql(dt.date(2026, 10, 26))
+    assert 'duedate <= "2026-10-26" OR duedate is EMPTY' in jql
+    assert "712020:e603f3a9-4b70-4ed8-866f-280460a661c5" in jql
+    assert 'status in (Backlog, "To Do")' in jql
+    prompt = overdue_sweep_prompt(dt.date(2026, 10, 26))
+    assert jql in prompt
+    assert UPCOMING_QUEUE_FORECAST_POLICY in prompt
+    assert AUTOMATED_RESPONSE_STYLE in prompt
+    assert "{selection_rules}" not in prompt and "{jql}" not in prompt
+    assert "set-start-date <KEY> --as-bot --clear" in prompt
+    assert "set-due-date <KEY> --as-bot --clear" in prompt
+    assert "--date YYYY-MM-DD --replace" in prompt
+    assert f"already starts with `{WAITING_COMMENT_PREFIX}`, write nothing" in prompt
+    assert "Never calculate in this sweep" in prompt
+    assert "today's run has already happened" in prompt
+
+
+def test_sweep_result_requires_one_line_per_counted_task() -> None:
+    assert is_sweep_result(SWEEP_LINES)
+    assert is_sweep_result("OVERDUE_SWEEP_DONE: 0")
+    assert is_sweep_result("OVERDUE_SWEEP_FAILED: Jira search returned 401")
+    assert not is_sweep_result(SWEEP_LINES.replace("DONE: 2", "DONE: 3"))
+    assert not is_sweep_result("Working on it\n" + SWEEP_LINES)
+
+
+async def test_sweep_runs_as_its_own_job_and_logs_each_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(
+            return_value=HeadlessAgentRun("claude", "opus", "sweep", SWEEP_LINES)
+        )
+    )
+    settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
+    now = dt.datetime(2026, 10, 26, 22, 30, tzinfo=dt.UTC)  # already the 27th in Cyprus
+    with caplog.at_level("INFO", logger="sloperator.experiment_finalizer"):
+        assert await sweep_overdue_results(agent, settings, now=now) == SWEEP_LINES
+    kwargs = agent.execute_once.await_args.kwargs
+    assert kwargs["job_name"] == SWEEP_JOB_NAME
+    assert 'duedate <= "2026-10-27"' in agent.execute_once.await_args.args[0]
+    assert "UMN-14200" in caplog.text

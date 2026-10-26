@@ -198,7 +198,7 @@ Pending-trials maturity forecast for reviewer selection only:
   {MATURITY_UNKNOWN_REPEAT_DAYS} days; otherwise report `comment: exists`.
 - Dates (best-effort): when the existing Start date is empty or earlier than the forecast date — a
   planned date a human set before the experiment matured — set it to the forecast date with
-  `set-start-date <KEY> --as-bot --date YYYY-MM-DD`; then set Due date with
+  `set-start-date <KEY> --as-bot --date YYYY-MM-DD --replace`; then set Due date with
   `set-due-date <KEY> --as-bot --date YYYY-MM-DD` when it differs. Skip a setter whose field already
   equals the forecast date. Never move a Start date that is later than the forecast date. A refused
   or failed date write is recorded in the result line below and does not stop the comment.
@@ -262,8 +262,9 @@ Upcoming-queue forecast (a dated Jira annotation on the next Results task to be 
   only when none exists, when that date is earlier than today, or when the new forecast date is
   later than it (the queue slipped); otherwise report `comment: exists`.
 - Dates, best effort and never blocking the comment: set Start date (`set-start-date <KEY>
-  --as-bot --date YYYY-MM-DD`) when it is empty or earlier than the forecast date, and Due date
-  (`set-due-date`) when it differs; never move a Start date that is later than the forecast date.
+  --as-bot --date YYYY-MM-DD --replace`) when it is empty or earlier than the forecast date, and
+  Due date (`set-due-date`) when it differs; never move a Start date that is later than the
+  forecast date.
 - The comment is short Russian ADF via `add-comment <KEY> --as-bot --adf-file <file>`, opening
   with a native mention of the epic's reporter (assignee when the reporter is missing; never an
   invented account id), then `{MATURITY_FORECAST_COMMENT_PREFIX} YYYY-MM-DD.` and one sentence:
@@ -277,6 +278,150 @@ Upcoming-queue forecast (a dated Jira annotation on the next Results task to be 
   failed|none> | <what sets the date, or why there is no forecast>`
   It is never posted to Slack.
 """
+
+SWEEP_JOB_NAME = "results-overdue-sweep"
+SWEEP_RESULT_PREFIX = "OVERDUE_SWEEP:"
+SWEEP_DONE_PREFIX = "OVERDUE_SWEEP_DONE"
+SWEEP_FAILED_PREFIX = "OVERDUE_SWEEP_FAILED:"
+WAITING_COMMENT_PREFIX = "Итоги ждут завершения эксперимента:"
+SERVICE_ACCOUNT_ID = "712020:e603f3a9-4b70-4ed8-866f-280460a661c5"
+JIRA_HELPER = ".venv/bin/python .claude/jira/jira_issue.py"
+
+
+def overdue_sweep_jql(today: dt.date) -> str:
+    """Results tasks of the service account that are overdue or parked until the experiment ends."""
+    return (
+        f'project = UMN AND assignee = "{SERVICE_ACCOUNT_ID}" AND summary ~ "Итоги" '
+        'AND status in (Backlog, "To Do") '
+        f'AND (duedate <= "{today.isoformat()}" OR duedate is EMPTY) ORDER BY duedate ASC, key ASC'
+    )
+
+
+OVERDUE_SWEEP_POLICY = f"""\
+Overdue Results sweep (runs after the daily finalizer run has finished):
+- Scope: every Results/Итоги task assigned to the service account whose Due date is today or
+  earlier, plus the tasks this sweep parked earlier by clearing their dates. Fetch them with
+  `{JIRA_HELPER} search --as-bot --json --max-results 200 --fields
+  summary,status,assignee,parent,duedate,customfield_10312 --jql '<the JQL supplied below>'`.
+  A task with an empty Due date is in scope only when the newest of its comments that starts with
+  `{MATURITY_FORECAST_COMMENT_PREFIX}`, `{MATURITY_UNKNOWN_COMMENT_PREFIX}` or
+  `{WAITING_COMMENT_PREFIX}` starts with `{WAITING_COMMENT_PREFIX}`; skip every other undated task
+  without writing anything and without a report line. Never touch a task outside this scope, and
+  never one whose status is not Backlog or To Do.
+- For each task, read it with all comments (`comments <KEY> --as-bot --limit 1000 --json`, count
+  equal to `total`; an incomplete response means no writes for that task) and map it to its exact
+  experiment id with the rule-6 mapping (its epic's launch task for the same iteration, with an
+  explicit experiment-id link). A task that cannot be mapped unambiguously, or whose experiment
+  fails rule 1, gets no writes; report it as `skipped` with the reason.
+- Classify the experiment from the UG experiment admin: `not-started` (no actual start yet),
+  `running` (started, no actual end) or `ended` (has an actual end timestamp).
+- Not started or running — the task waits for the experiment:
+  1. Clear both dates when set: `set-start-date <KEY> --as-bot --clear` and
+     `set-due-date <KEY> --as-bot --clear`. They re-read the fields; verify both are empty.
+  2. Comment only once per wait: when the newest comment carrying one of the three prefixes above
+     already starts with `{WAITING_COMMENT_PREFIX}`, write nothing (`comment: exists`). Otherwise
+     add a short Russian ADF comment (`add-comment <KEY> --as-bot --adf-file <file>`) that opens
+     with a native mention of the epic's reporter (assignee when the reporter is missing; never an
+     invented account id), then `{WAITING_COMMENT_PREFIX}` and says plainly that experiment <id>
+     is still running (or has not started yet), that the start and due dates are removed, and that
+     the dates will be set again automatically once the experiment is stopped. Name the planned end
+     when it is verifiable (the "Остановить эксперимент" task due date, or admin start plus the
+     planned duration). Re-fetch the comments to verify it.
+- Ended — the task gets a dated forecast:
+  1. Compute its take date exactly as the upcoming-queue forecast does: earliest eligibility is
+     the latest of the actual end, the end plus the rule-3 age threshold, and the pending-trials
+     eligibility date from existing fresh rows (row-level `first_charge_expected_dt` against the
+     strict rule-8 gate); when that last date cannot be computed use the earliest possible date and
+     say "не раньше". Then simulate the scheduled runs (weekdays, 12:00 Asia/Nicosia) from the next
+     run after now — today's run has already happened — over the whole upcoming queue of that
+     policy, one task per run, oldest-ended first. The run on which the simulation takes this task
+     is its date. Never calculate in this sweep; read existing calculation rows only.
+  2. Set both dates to that date: `set-start-date <KEY> --as-bot --date YYYY-MM-DD --replace` and
+     `set-due-date <KEY> --as-bot --date YYYY-MM-DD`; verify them. A failed date write is reported
+     and does not stop the comment.
+  3. Add the standard forecast comment unless the newest `{MATURITY_FORECAST_COMMENT_PREFIX}`
+     comment already names the same date (`comment: exists`): short Russian ADF, the same epic
+     mention rule, then `{MATURITY_FORECAST_COMMENT_PREFIX} YYYY-MM-DD.` and one sentence "по
+     текущей оценке возьму в работу в этот день" (or "не раньше этого дня") followed by what sets
+     the date — the post-stop wait ends <date>, pending trials, or <n> tasks ahead in the queue.
+     Re-fetch the comments to verify it.
+- These writes do not authorise assignment, a status transition, a calculation, Confluence edits,
+  Slack messages, or any other Jira edit.
+- Report one line per task in scope, in exactly this shape:
+  `{SWEEP_RESULT_PREFIX} <task key> | <experiment id or -> | <waiting|dated|skipped|failed> |
+  <date YYYY-MM-DD or -> | <comment: added|exists|none|failed> | <dates:
+  set|cleared|unchanged|failed> | <short reason>`
+  then exactly one terminal line `{SWEEP_DONE_PREFIX}: <number of tasks in scope>`. If the task list
+  itself cannot be read, return exactly one line `{SWEEP_FAILED_PREFIX} <reason>`.
+"""
+
+OVERDUE_SWEEP_PROMPT = f"""\
+[claude]
+This is the authorised automated overdue Results sweep of the UG experiment finaliser. The user
+explicitly authorises the Jira comments and Start/Due date changes defined below on the Results
+tasks assigned to the service account, without asking for approval.
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
+{AUTOMATED_ATLASSIAN_IDENTITY}
+{AUTOMATED_RESPONSE_STYLE}
+
+Use the repository Jira helper with `--as-bot` for every Jira command; the service account is
+`{SERVICE_ACCOUNT_ID}`. The finalizer's selection rules and its upcoming-queue forecast define
+the mapping, gates and queue this sweep relies on:
+{{selection_rules}}
+{{queue_policy}}
+{OVERDUE_SWEEP_POLICY}
+Use the current date/time in Asia/Nicosia. Today is {{today}}. JQL:
+{{jql}}
+"""
+
+
+def overdue_sweep_prompt(today: dt.date) -> str:
+    # Plain replacement: the embedded policies contain literal braces (ADF JSON examples).
+    prompt = OVERDUE_SWEEP_PROMPT
+    for token, value in (
+        ("{selection_rules}", SELECTION_RULES),
+        ("{queue_policy}", UPCOMING_QUEUE_FORECAST_POLICY),
+        ("{today}", today.isoformat()),
+        ("{jql}", overdue_sweep_jql(today)),
+    ):
+        prompt = prompt.replace(token, value)
+    return prompt
+
+
+def is_sweep_result(text: str) -> bool:
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return False
+    if len(lines) == 1 and lines[0].startswith(SWEEP_FAILED_PREFIX):
+        return True
+    done = re.fullmatch(rf"{SWEEP_DONE_PREFIX}: (\d+)", lines[-1])
+    return (
+        done is not None
+        and int(done.group(1)) == len(lines) - 1
+        and all(line.startswith(SWEEP_RESULT_PREFIX) for line in lines[:-1])
+    )
+
+
+async def sweep_overdue_results(
+    agent: AgentSubmitter,
+    settings: Settings,
+    now: dt.datetime | None = None,
+) -> str:
+    """Re-date overdue Results tasks, or park them while their experiment is not over."""
+    today = (now or dt.datetime.now(dt.UTC)).astimezone(
+        ZoneInfo(settings.experiment_finalizer_timezone)
+    ).date()
+    run = await agent.execute_once(
+        overdue_sweep_prompt(today),
+        settings.experiment_finalizer_timeout_seconds,
+        job_name=SWEEP_JOB_NAME,
+        accept_result=is_sweep_result,
+        failure_result=lambda text: text.strip().startswith(SWEEP_FAILED_PREFIX),
+    )
+    for line in run.text.strip().splitlines():
+        LOGGER.info("Overdue Results sweep: %s", line.strip())
+    return run.text.strip()
+
 
 FINALIZATION_PROMPT = f"""\
 [claude]
@@ -1003,8 +1148,10 @@ async def run_daily(
                 run_once(client, agent, settings),
                 name="scheduled-experiment-finalizer-run",
             )
-            await run_task
+            result = await run_task
             LOGGER.info("Experiment finalizer run completed")
+            if not is_finalization_failure(result):
+                await sweep_overdue_results(agent, settings)
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
             if current_task is not None and current_task.cancelling():

@@ -794,6 +794,7 @@ async def collect_facts(
                 settings.experiment_design_channel,
                 settings.experiment_analytics_channel,
                 settings.experiment_finalizer_channel,
+                settings.retention_debt_channel,
             )
         )
     )

@@ -34,6 +34,7 @@ from sloperator.jira_agent_policy import (
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
 )
+from sloperator.team_channel import channel_for_task
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_PREFIX = "No eligible experiment"
@@ -902,8 +903,13 @@ async def run_preparation_from_started_run(
     try:
         project_page_id = await validate_started_page(settings, start_run.text)
     except SelectionError as error:
+        started = STARTED_RE.fullmatch(start_run.text.strip())
         await client.chat_postMessage(
-            channel=settings.experiment_finalizer_channel,
+            channel=await channel_for_task(
+                settings,
+                started.group(4) if started else None,
+                settings.experiment_finalizer_channel,
+            ),
             markdown_text=f"Experiment finalisation failed: {error}",
             unfurl_links=False,
             unfurl_media=False,
@@ -1037,7 +1043,10 @@ async def run_review(
         accept_result=is_finalization_notification,
         existing_session_id=reviewer_session_id,
     )
-    return await publish_run(client, agent, settings, review_run)
+    return await publish_run(
+        client, agent, settings, review_run,
+        task_key=task_match.group(1) if task_match else None,
+    )
 
 
 async def publish_run(
@@ -1045,13 +1054,15 @@ async def publish_run(
     agent: AgentSubmitter,
     settings: Settings,
     run: HeadlessAgentRun,
+    task_key: str | None = None,
 ) -> str:
     """Publish and attach a completed or restart-recovered finalizer run."""
     notification = normalize_finalization_notification(run.text)
     published_run = replace(run, text=notification)
+    channel = await channel_for_task(settings, task_key, settings.experiment_finalizer_channel)
     existing_ts = await find_existing_publication(
         client,
-        settings.experiment_finalizer_channel,
+        channel,
         notification,
     )
     if existing_ts is not None:
@@ -1062,12 +1073,12 @@ async def publish_run(
         )
         return notification
     response = await client.chat_postMessage(
-        channel=settings.experiment_finalizer_channel,
+        channel=channel,
         markdown_text=notification,
         unfurl_links=False,
         unfurl_media=False,
     )
-    channel_id = response.get("channel", settings.experiment_finalizer_channel)
+    channel_id = response.get("channel", channel)
     await agent.attach_session(
         channel_id,
         response["ts"],

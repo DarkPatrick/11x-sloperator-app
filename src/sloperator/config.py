@@ -73,6 +73,7 @@ class Settings:
     experiment_analytics_hour: int = 16
     experiment_analytics_timeout_seconds: int = 7_200
     experiment_analytics_channel: str = "C07A9FDQ14P"
+    retention_debt_channel: str = "C0BT7HSVACD"
     automation_alert_channel: str = ""
     jira_task_automation_enabled: bool = True
     jira_url: str = "https://mu--se.atlassian.net"
@@ -192,6 +193,7 @@ class Settings:
         experiment_analytics_channel = os.environ.get(
             "EXPERIMENT_ANALYTICS_CHANNEL", "C07A9FDQ14P"
         ).strip()
+        retention_debt_channel = os.environ.get("RETENTION_DEBT_CHANNEL", "C0BT7HSVACD").strip()
         automation_alert_channel = os.environ.get("AUTOMATION_ALERT_CHANNEL", "").strip()
         jira_task_automation_enabled = os.environ.get(
             "JIRA_TASK_AUTOMATION_ENABLED", "true"
@@ -348,6 +350,8 @@ class Settings:
             ) from error
         if not experiment_analytics_channel.startswith("C"):
             raise ConfigurationError("EXPERIMENT_ANALYTICS_CHANNEL must be a Slack channel ID")
+        if retention_debt_channel and not retention_debt_channel.startswith("C"):
+            raise ConfigurationError("RETENTION_DEBT_CHANNEL must be a Slack channel ID")
         if automation_alert_channel and not automation_alert_channel.startswith("C"):
             raise ConfigurationError("AUTOMATION_ALERT_CHANNEL must be a Slack channel ID")
         if not jira_url.startswith("https://"):
@@ -441,6 +445,7 @@ class Settings:
             experiment_analytics_hour=experiment_analytics_hour,
             experiment_analytics_timeout_seconds=experiment_analytics_timeout_seconds,
             experiment_analytics_channel=experiment_analytics_channel,
+            retention_debt_channel=retention_debt_channel,
             automation_alert_channel=automation_alert_channel,
             jira_task_automation_enabled=jira_task_automation_enabled,
             jira_url=jira_url,

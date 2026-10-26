@@ -184,6 +184,26 @@ class JiraRestReader:
                     )
         return links
 
+    async def epic_labels(self, issue_key: str) -> frozenset[str]:
+        """Labels of the issue when it is an epic, otherwise of its parent epic."""
+        fields = (
+            await self._get(f"/rest/api/3/issue/{issue_key}", {"fields": "labels,issuetype,parent"})
+        ).get("fields")
+        if not isinstance(fields, dict):
+            raise SelectionError(f"Jira issue {issue_key} has no fields object")
+        issue_type = fields.get("issuetype") or {}
+        if _normalize(str(issue_type.get("name", ""))) not in {"epic", "эпик"}:
+            parent = fields.get("parent") or {}
+            if not parent.get("key"):
+                return frozenset()
+            fields = (
+                await self._get(f"/rest/api/3/issue/{parent['key']}", {"fields": "labels"})
+            ).get("fields")
+            if not isinstance(fields, dict):
+                raise SelectionError(f"Jira issue {parent['key']} has no fields object")
+        labels = fields.get("labels") or []
+        return frozenset(str(label) for label in labels if isinstance(label, str))
+
     async def issue_parent_key(self, issue_key: str) -> str:
         issue = await self._get(
             f"/rest/api/3/issue/{issue_key}", {"fields": "parent"}

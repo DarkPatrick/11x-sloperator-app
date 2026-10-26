@@ -36,6 +36,7 @@ from sloperator.jira_agent_policy import (
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
 )
+from sloperator.team_channel import channel_for_task, first_task_key
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_RESULT = "No eligible experiment-design task was found."
@@ -218,7 +219,7 @@ After the page is correct and verified:
    the calculation-task assignee. Deduplicate the mentions. Never guess Slack ids. If a Jira
    assignee cannot be resolved, use their plain display name and keep the notification concise.
 4. Do not send Slack messages yourself. Return exactly one Slack-ready notification for Sloperator
-   to publish in `ug-monetization-pvt`: one compact line containing the resolved mentions/names, a
+   to publish in the epic team's channel: one compact line containing the resolved mentions/names, a
    link to `{task_key}`, and a short statement that both design blocks are ready and asking the
    assignees to check them. Do not include calculations, evidence, Jira-transition details, raw
    URLs, headings, bullets, or an operational appendix.
@@ -367,13 +368,14 @@ async def publish_notification(
     if notification.startswith(FAILURE_PREFIX):
         notification = task_failure(notification, task_key)
     published_run = replace(run, text=notification)
+    channel = await channel_for_task(settings, task_key, settings.experiment_design_channel)
     response = await client.chat_postMessage(
-        channel=settings.experiment_design_channel,
+        channel=channel,
         markdown_text=notification,
         unfurl_links=False,
         unfurl_media=False,
     )
-    channel_id = response.get("channel", settings.experiment_design_channel)
+    channel_id = response.get("channel", channel)
     await agent.attach_session(channel_id, response["ts"], published_run)
     return notification
 
@@ -393,7 +395,9 @@ async def publish_failure(
 ) -> None:
     """Make an actual automation failure visible without treating a no-op as failure."""
     await client.chat_postMessage(
-        channel=settings.experiment_design_channel,
+        channel=await channel_for_task(
+            settings, first_task_key(message), settings.experiment_design_channel
+        ),
         markdown_text=message,
         unfurl_links=False,
         unfurl_media=False,

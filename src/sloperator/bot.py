@@ -109,6 +109,7 @@ def is_trusted_channel_thread(event: Mapping[str, Any], settings: Settings) -> b
                 settings.experiment_finalizer_channel,
                 settings.experiment_design_channel,
                 settings.experiment_analytics_channel,
+                settings.retention_debt_channel,
                 settings.mobile_health_alert_channel,
                 DAILY_ACTIVITY_DIGEST_CHANNEL,
             }

@@ -39,6 +39,7 @@ from sloperator.jira_agent_policy import (
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
 )
+from sloperator.team_channel import channel_for_task, first_task_key
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_RESULT = "No eligible experiment-analytics task was found."
@@ -317,14 +318,15 @@ async def publish_notification(
     notification = normalize_review_notification(run.text, task_key)
     if notification.startswith(FAILURE_PREFIX):
         notification = task_failure(notification, task_key)
+    channel = await channel_for_task(settings, task_key, settings.experiment_analytics_channel)
     response = await client.chat_postMessage(
-        channel=settings.experiment_analytics_channel,
+        channel=channel,
         markdown_text=notification,
         unfurl_links=False,
         unfurl_media=False,
     )
     await agent.attach_session(
-        response.get("channel", settings.experiment_analytics_channel),
+        response.get("channel", channel),
         response["ts"],
         replace(run, text=notification),
     )
@@ -341,7 +343,9 @@ def task_failure(message: str, task_key: str) -> str:
 
 async def publish_failure(client: AsyncWebClient, settings: Settings, message: str) -> None:
     await client.chat_postMessage(
-        channel=settings.experiment_analytics_channel,
+        channel=await channel_for_task(
+            settings, first_task_key(message), settings.experiment_analytics_channel
+        ),
         markdown_text=message,
         unfurl_links=False,
         unfurl_media=False,

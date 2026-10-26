@@ -574,7 +574,7 @@ async def test_published_automation_failure_is_reported_in_done_today(
                 "message_ts": posted,
                 "text": "Experiment finalisation failed: publish hook blocked the write",
             },
-        ] if channels == ["C07A9FDQ14P"] and since <= float(posted) else [],
+        ] if channels == ["C07A9FDQ14P", "C0BT7HSVACD"] and since <= float(posted) else [],
     )
     reader = SimpleNamespace(
         task_snapshot=AsyncMock(return_value=SimpleNamespace(

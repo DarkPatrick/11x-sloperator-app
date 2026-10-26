@@ -234,6 +234,14 @@ continue later or stop while a child task is still running.
 """
 
 
+REQUIRED_ARTIFACT_RECOVERY_NOTE = """\
+This automated run requires a deliverable. End the answer with either a fresh archive marker
+`SLOPERATOR_ARTIFACT: relative/path/to/archive.zip` on its own final line (package the prepared
+evidence if no archive exists yet) or, only if the reviewer did not reject reuse, one
+`SLOPERATOR_REUSE_ANALYSIS: <Slack thread URL>` line. An answer without either is discarded.
+"""
+
+
 def gate_rejection_note(error: BaseException) -> str:
     """The completion gate's own reason, for the worker that has to correct its answer."""
     reason = getattr(error, "reason", "")
@@ -2896,12 +2904,12 @@ class AgentOrchestrator:
                             artifact = None
                             LOGGER.info("Skipping unsolicited follow-up artifact in %s", thread_ts)
                     if self.communication is not None:
-                        requirements = (
-                            "No attachment will be sent. Do not claim a file is attached; "
-                            "the answer must be self-contained."
-                            if artifact is None else ""
-                        )
                         for recovery in range(3):
+                            requirements = (
+                                "No attachment will be sent. Do not claim a file is attached; "
+                                "the answer must be self-contained."
+                                if artifact is None else ""
+                            )
                             try:
                                 response = await self.communication.render(
                                     response, thread_context, output_requirements=requirements,
@@ -2929,8 +2937,12 @@ class AgentOrchestrator:
                                     session, external_session_id=result.session_id,
                                     status="cancelled",
                                 )
+                                worker_requirements = (
+                                    REQUIRED_ARTIFACT_RECOVERY_NOTE
+                                    if require_artifact else requirements
+                                )
                                 recovery_prompt = (
-                                    INTERIM_RECOVERY_PROMPT + "\n" + requirements
+                                    INTERIM_RECOVERY_PROMPT + "\n" + worker_requirements
                                     + gate_rejection_note(rejection)
                                     + "\nReturn your own complete Slack-ready answer. Preserve facts, "
                                     "uncertainty and conditions. Do not repeat completed writes. "
@@ -2979,9 +2991,13 @@ class AgentOrchestrator:
                                 response, recovered_artifact = extract_artifact(
                                     result.text, self.settings.agent_workspace,
                                 )
-                                if require_artifact and recovered_artifact is None:
-                                    raise AgentExecutionError("Recovery omitted required artifact") from None
-                                if recovered_artifact is not None and artifact is not None:
+                                if require_artifact:
+                                    if not has_required_deliverable(result.text):
+                                        raise AgentExecutionError(
+                                            "Recovery omitted required artifact"
+                                        ) from None
+                                    artifact = recovered_artifact
+                                elif recovered_artifact is not None and artifact is not None:
                                     artifact = recovered_artifact
                     await self._reply_prepared(
                         client,

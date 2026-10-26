@@ -1374,3 +1374,51 @@ async def test_completion_repeated_rejection_fails_without_publishing_draft(monk
     assert store.get_agent_session("C123", "100.1").status == "failed"
     client.chat_postMessage.assert_awaited_once()
     assert "Сейчас проверю" not in str(client.chat_postMessage.await_args)
+
+
+async def test_rejected_reuse_recovery_demands_and_sends_required_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def recovered(*args, **kwargs):
+        (tmp_path / "fresh.zip").write_bytes(b"fresh evidence")
+        return AgentRunResult(
+            session_id="same-session",
+            text="Всплеск — краулер.\nSLOPERATOR_ARTIFACT: fresh.zip",
+        )
+
+    calls = iter([
+        AgentRunResult(
+            session_id="same-session",
+            text="SLOPERATOR_REUSE_ANALYSIS: https://mu--se.slack.com/archives/C06FADPMGKT/p1",
+        ),
+    ])
+
+    async def run(*args, **kwargs):
+        try:
+            return next(calls)
+        except StopIteration:
+            return await recovered()
+
+    run_mock = AsyncMock(side_effect=run)
+    monkeypatch.setattr("sloperator.agents.run_claude", run_mock)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890", bot_token="test", app_token="test",
+        agent_workspace=tmp_path,
+    )
+    gate = SimpleNamespace(render=AsyncMock(side_effect=[
+        AgentExecutionError("Reused thread is older than the alert"), "Всплеск — краулер.",
+    ]))
+    agent = AgentOrchestrator(settings, store, communication=gate)
+    client = SimpleNamespace(chat_postMessage=AsyncMock(), files_upload_v2=AsyncMock())
+    await agent.submit(
+        client, channel_id="C123", message_ts="100.1", thread_ts="100.1",
+        text="Разбери алерт", show_status=False, require_artifact=True,
+    )
+    await agent.drain()
+    recovery_prompt = run_mock.await_args.args[2]
+    assert "No attachment will be sent" not in recovery_prompt
+    assert "SLOPERATOR_ARTIFACT:" in recovery_prompt
+    assert gate.render.await_args.kwargs["output_requirements"] == ""
+    client.files_upload_v2.assert_awaited_once()

@@ -51,6 +51,14 @@ from sloperator.experiment_finalizer import (
     validate_started_page,
 )
 
+
+@pytest.fixture(autouse=True)
+def _no_live_confluence(monkeypatch) -> None:
+    """Keep the header-mention check of publish_run away from a real Confluence."""
+    monkeypatch.delenv("CONFLUENCE_PERSONAL_TOKEN", raising=False)
+    monkeypatch.delenv("CONFLUENCE_TOKEN", raising=False)
+
+
 FORECAST_LINE = (
     f"{MATURITY_FORECAST_RESULT_PREFIX} 7991 | UMN-13112 | 2026-10-15 | "
     "comment: added | dates: set | -"

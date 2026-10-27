@@ -34,6 +34,7 @@ from sloperator.jira_agent_policy import (
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
 )
+from sloperator.project_page_people import ensure_header_mentions
 from sloperator.team_channel import channel_for_task
 
 LOGGER = logging.getLogger(__name__)
@@ -1046,6 +1047,7 @@ async def run_review(
     return await publish_run(
         client, agent, settings, review_run,
         task_key=task_match.group(1) if task_match else None,
+        project_page_id=page_match.group(1) if page_match else None,
     )
 
 
@@ -1055,9 +1057,18 @@ async def publish_run(
     settings: Settings,
     run: HeadlessAgentRun,
     task_key: str | None = None,
+    project_page_id: str | None = None,
 ) -> str:
     """Publish and attach a completed or restart-recovered finalizer run."""
     notification = normalize_finalization_notification(run.text)
+    if notification != NO_OP_NOTIFICATION and not notification.startswith(FAILURE_PREFIXES):
+        heading_page_ids = confluence_page_ids(notification.splitlines()[0])
+        page_id = project_page_id or (
+            next(iter(heading_page_ids)) if len(heading_page_ids) == 1 else None
+        )
+        notification = await ensure_header_mentions(
+            client, notification, page_id, settings.agent_workspace
+        )
     published_run = replace(run, text=notification)
     channel = await channel_for_task(settings, task_key, settings.experiment_finalizer_channel)
     existing_ts = await find_existing_publication(

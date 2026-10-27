@@ -186,3 +186,23 @@ def test_default_aliases_path_prefers_env_then_working_directory(tmp_path, monke
     assert slack_identity.default_private_aliases_path() == (
         tmp_path / "data" / "slack-identity-aliases.json"
     )
+
+
+async def test_user_id_for_name_returns_only_exact_unambiguous_names() -> None:
+    resolver = SlackMentionResolver()
+    client = SimpleNamespace(
+        token="xoxb-name-lookup",
+        users_list=AsyncMock(
+            return_value=_page(
+                [
+                    {"id": "UEGOR", "profile": {"real_name": "Egor Semin"}},
+                    {"id": "UTWIN1", "profile": {"real_name": "Same Name"}},
+                    {"id": "UTWIN2", "profile": {"real_name": "Same Name"}},
+                ]
+            )
+        ),
+    )
+
+    assert await resolver.user_id_for_name(client, " Egor  Semin ") == "UEGOR"
+    assert await resolver.user_id_for_name(client, "Same Name") is None
+    assert await resolver.user_id_for_name(client, "Nobody Here") is None

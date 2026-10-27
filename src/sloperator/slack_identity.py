@@ -58,6 +58,14 @@ class SlackMentionResolver:
             parts[index] = self._replace_plain_text(parts[index], aliases)
         return _RESOLUTION_GAP.sub(r"\g<mention>", "".join(parts))
 
+    async def user_id_for_name(self, client: AsyncWebClient, name: str) -> str | None:
+        """Return the Slack user id of an exact, unambiguous profile name."""
+        wanted = " ".join(name.split())
+        for alias, user_id in await self._aliases(client):
+            if alias == wanted:
+                return user_id
+        return None
+
     async def _aliases(self, client: AsyncWebClient) -> tuple[tuple[str, str], ...]:
         token = str(getattr(client, "token", ""))
         cache_key = hashlib.sha256(token.encode()).hexdigest()

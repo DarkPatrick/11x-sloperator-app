@@ -13,10 +13,12 @@ from sloperator.agents import (
     FINAL_ARTIFACT_RECOVERY_PROMPT,
     INTERIM_RECOVERY_PROMPT,
     PATH_GUARD_RECOVERY_PROMPT,
+    REQUIRED_TURN_ARTIFACT_POLICY,
     RESTART_RECOVERY_PROMPT,
     TIME_LIMIT_NOTICE,
     TIMEOUT_RECOVERY_FAILURE_NOTICE,
     TIMEOUT_RECOVERY_PROMPT,
+    TURN_ARTIFACT_POLICY,
     ActiveAgentRun,
     AgentAuthenticationError,
     AgentExecutionError,
@@ -1422,3 +1424,65 @@ async def test_rejected_reuse_recovery_demands_and_sends_required_artifact(
     assert "SLOPERATOR_ARTIFACT:" in recovery_prompt
     assert gate.render.await_args.kwargs["output_requirements"] == ""
     client.files_upload_v2.assert_awaited_once()
+
+
+async def test_required_artifact_text_only_answer_is_asked_to_package_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def packaged(*args, **kwargs):
+        (tmp_path / "evidence.zip").write_bytes(b"zip")
+        return AgentRunResult(
+            session_id="session-1",
+            text="Ложная тревога: бот-трафик.\nSLOPERATOR_ARTIFACT: evidence.zip",
+        )
+
+    calls = iter([
+        AgentRunResult(session_id="session-1", text="Ложная тревога: бот-трафик."),
+    ])
+
+    async def run(*args, **kwargs):
+        try:
+            return next(calls)
+        except StopIteration:
+            return await packaged()
+
+    run_claude = AsyncMock(side_effect=run)
+    monkeypatch.setattr("sloperator.agents.run_claude", run_claude)
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    settings = Settings(
+        slack_user_id="U1234567890",
+        bot_token="xoxb-test",
+        app_token="xapp-test",
+        agent_workspace=tmp_path,
+    )
+    post_message = AsyncMock()
+    upload = AsyncMock()
+    client = SimpleNamespace(chat_postMessage=post_message, files_upload_v2=upload)
+    orchestrator = AgentOrchestrator(settings, store)
+
+    await orchestrator.submit(
+        client,
+        channel_id="C123",
+        message_ts="100.1:analysis",
+        thread_ts="100.1",
+        text="Investigate",
+        show_status=False,
+        require_artifact=True,
+    )
+    await orchestrator.drain()
+
+    first_prompt = run_claude.await_args_list[0].args[2]
+    assert REQUIRED_TURN_ARTIFACT_POLICY.strip() in first_prompt
+    assert TURN_ARTIFACT_POLICY.strip() not in first_prompt
+    recovery_prompt = run_claude.await_args.args[2]
+    assert recovery_prompt == FINAL_ARTIFACT_RECOVERY_PROMPT
+    assert "If no archive exists yet, package" in recovery_prompt
+    assert "existing archive marker" not in recovery_prompt
+    post_message.assert_awaited_once_with(
+        channel="C123",
+        thread_ts="100.1",
+        markdown_text="Ложная тревога: бот-трафик.",
+    )
+    upload.assert_awaited_once()

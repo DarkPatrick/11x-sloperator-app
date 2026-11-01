@@ -742,6 +742,12 @@ but if further review rounds are only producing non-critical cosmetic changes an
 substantial time, publish the current sound version instead of continuing to polish it.
 Reserve enough time to package artifacts and return the final response before the deadline.
 
+REQUIRED DELIVERABLE (overrides any instruction that a text-only answer is enough): a fresh
+investigation must end with a ZIP of its evidence (report, charts, SQL, data extracts) and the
+`SLOPERATOR_ARTIFACT: relative/path/to/archive.zip` line on its own final line, even when the
+conclusion is a false alarm. The only other accepted ending is the reuse line described above.
+An answer with neither is discarded and never reaches Slack.
+
 When no reusable Slack analysis exists, read `.claude/reusable_analyses/README.md` and any linked
 cases that look similar. Reuse relevant metric definitions, diagnostic cuts, queries, report
 structure, and prior findings where they still apply, while validating the current incident

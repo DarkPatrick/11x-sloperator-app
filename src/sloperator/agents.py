@@ -77,6 +77,16 @@ CURRENT TURN ATTACHMENT POLICY (overrides earlier routine packaging instructions
 """
 
 
+REQUIRED_TURN_ARTIFACT_POLICY = """\
+CURRENT TURN ATTACHMENT POLICY (overrides earlier routine packaging instructions):
+- This automated run requires a deliverable; a text-only answer is discarded and never published.
+- End the answer with `SLOPERATOR_ARTIFACT: relative/path/to/archive.zip` on its own final line,
+  packaging the evidence of this investigation (report, charts, SQL, data extracts) even when the
+  conclusion is a false alarm, or with the reuse line this request allows when it allows one.
+- Include only relevant current work products; never repeat an earlier artifact marker.
+"""
+
+
 async def wait_for_claude_quota_reset(settings: Settings, *, context: str) -> None:
     """Wait until five-to-ten minutes after Claude's exhausted allowance resets."""
     while True:
@@ -178,11 +188,14 @@ REUSE_ANALYSIS_RE = re.compile(
     r"(?P<url>https://[A-Za-z0-9.-]+\.slack\.com/archives/[A-Z0-9]+/p\d+(?:\?\S*)?)\s*$"
 )
 FINAL_ARTIFACT_RECOVERY_PROMPT = """\
-Your previous response was an internal review/status note, not the deliverable requested by
-Sloperator. Do not run any more tools, reviews, polls, or analysis. Return the already prepared
-final Slack answer now, followed by the existing archive marker on its own final line:
-`SLOPERATOR_ARTIFACT: relative/path/to/archive.zip`. The response must be self-contained and
-must not mention internal review rounds, approvals, critics, orchestration, or this correction.
+Your previous response did not include the deliverable this automated run requires, so
+Sloperator did not publish it. Do not run any more reviews, polls, or analysis. Return the
+complete final Slack answer now, ending with an archive marker on its own final line:
+`SLOPERATOR_ARTIFACT: relative/path/to/archive.zip`. If no archive exists yet, package the
+evidence you already prepared (report, charts, SQL, data extracts) into a ZIP first; this
+overrides any earlier instruction that a text-only answer is enough. The response must be
+self-contained and must not mention internal review rounds, approvals, critics, orchestration,
+or this correction.
 """
 TIME_LIMIT_NOTICE = "⚠️ Агент исчерпал лимит работы; ниже — всё, что удалось собрать."
 REQUEST_REACTION_BY_STATUS = {
@@ -2587,7 +2600,12 @@ class AgentOrchestrator:
                 parsed = replace(
                     parsed,
                     prompt=slack_identity_instruction(
-                        slack_worker_prompt(parsed.prompt + "\n\n" + TURN_ARTIFACT_POLICY),
+                        slack_worker_prompt(
+                            parsed.prompt + "\n\n" + (
+                                REQUIRED_TURN_ARTIFACT_POLICY
+                                if require_artifact else TURN_ARTIFACT_POLICY
+                            )
+                        ),
                         identity_directory,
                     ),
                 )

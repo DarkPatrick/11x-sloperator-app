@@ -161,6 +161,8 @@ def test_monetisation_agent_prompt_requires_time_series_skill() -> None:
     assert "`metric + platform + type` identities" in prompt
     assert "SLOPERATOR_REUSE_ANALYSIS:" in prompt
     assert "return exactly this one line" in prompt
+    assert "REQUIRED DELIVERABLE" in prompt
+    assert "even when the\nconclusion is a false alarm" in prompt
     assert "Do not add a case or update the index" in prompt
     assert "unless a human explicitly asks" in prompt
     assert "AUTOMATED SESSION REPOSITORY BOUNDARY" in prompt

@@ -158,19 +158,76 @@ async def test_missing_project_page_stops_before_starting_agents(monkeypatch) ->
     )
     selector = AsyncMock(return_value=replace(SELECTED, project_page_id=None))
     resolver = AsyncMock(
-        side_effect=SelectionError("Jira epic UMN-12310 has no Confluence project-page link")
+        side_effect=SelectionError("Confluence page 838613487 could not be read: timeout")
     )
+    author = AsyncMock()
+    monkeypatch.setattr("sloperator.experiment_design_planner.epic_author_mention", author)
     monkeypatch.setattr(
         "sloperator.experiment_design_planner.resolve_selected_project_page", resolver
     )
 
-    with pytest.raises(SelectionError, match="no Confluence project-page link"):
+    with pytest.raises(SelectionError, match="could not be read"):
         await run_once(client, agent, settings, selector)
 
     agent.execute_once.assert_not_awaited()
     client.chat_postMessage.assert_awaited_once()
     assert "UMN-12312" in client.chat_postMessage.await_args.kwargs["markdown_text"]
     agent.attach_session.assert_not_awaited()
+    # An infrastructure failure is not the epic author's to fix.
+    author.assert_not_awaited()
+
+
+async def test_epic_setup_failure_mentions_the_epic_author(monkeypatch) -> None:
+    from dataclasses import replace
+
+    from sloperator.experiment_design_selector import (
+        EpicSetupError,
+        JiraRestReader,
+        SelectionError,
+    )
+    from sloperator.slack_identity import DEFAULT_SLACK_MENTION_RESOLVER
+
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    agent = SimpleNamespace(execute_once=AsyncMock(), attach_session=AsyncMock())
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test",
+        experiment_design_channel="CDESIGN", jira_username="bot", jira_api_token="token",
+    )
+    selector = AsyncMock(return_value=replace(SELECTED, project_page_id=None))
+    monkeypatch.setattr(
+        "sloperator.experiment_design_planner.resolve_selected_project_page",
+        AsyncMock(side_effect=EpicSetupError(
+            "Jira epic UMN-12310 links to multiple Confluence pages, and none references the "
+            "epic in its header table. Link the epic in the project page header."
+        )),
+    )
+    issue_author = AsyncMock(return_value="Anna Petrova")
+    monkeypatch.setattr(JiraRestReader, "issue_author", issue_author)
+    lookup = AsyncMock(return_value="UAUTHOR")
+    monkeypatch.setattr(DEFAULT_SLACK_MENTION_RESOLVER, "user_id_for_name", lookup)
+
+    with pytest.raises(EpicSetupError):
+        await run_once(client, agent, settings, selector)
+
+    issue_author.assert_awaited_once_with("UMN-12310")
+    lookup.assert_awaited_once_with(client, "Anna Petrova")
+    text = client.chat_postMessage.await_args.kwargs["markdown_text"]
+    assert text.startswith("Experiment design automation failed: UMN-12312: Jira epic UMN-12310")
+    assert text.endswith("Epic author: <@UAUTHOR>")
+
+    # No Slack match keeps the plain name; a Jira failure posts without any author.
+    lookup.return_value = None
+    with pytest.raises(EpicSetupError):
+        await run_once(client, agent, settings, selector)
+    assert client.chat_postMessage.await_args.kwargs["markdown_text"].endswith(
+        "Epic author: Anna Petrova"
+    )
+    issue_author.side_effect = SelectionError("Jira GET failed with HTTP 500")
+    with pytest.raises(EpicSetupError):
+        await run_once(client, agent, settings, selector)
+    assert client.chat_postMessage.await_args.kwargs["markdown_text"].endswith(
+        "Link the epic in the project page header."
+    )
 
 
 async def test_preparation_then_independent_review_publishes_once(monkeypatch) -> None:

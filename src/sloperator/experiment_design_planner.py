@@ -25,6 +25,7 @@ from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
 from sloperator.experiment_design_selector import (
     DesignCandidate,
+    EpicSetupError,
     JiraRestReader,
     SelectionError,
     resolve_project_page_id,
@@ -36,6 +37,7 @@ from sloperator.jira_agent_policy import (
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
 )
+from sloperator.slack_identity import DEFAULT_SLACK_MENTION_RESOLVER
 from sloperator.team_channel import channel_for_task, first_task_key
 
 LOGGER = logging.getLogger(__name__)
@@ -443,9 +445,12 @@ async def run_once(
                 project_page_id=await resolve_selected_project_page(settings, selected),
             )
         except SelectionError as error:
-            await publish_failure(
-                client, settings, f"{FAILURE_PREFIX} {selected.task_key}: {error}"
-            )
+            message = f"{FAILURE_PREFIX} {selected.task_key}: {error}"
+            if isinstance(error, EpicSetupError):
+                author = await epic_author_mention(client, settings, selected.epic_key)
+                if author:
+                    message += f" Epic author: {author}"
+            await publish_failure(client, settings, message)
             raise
     start_run = await agent.execute_once(
         start_prompt(selected), settings.experiment_design_timeout_seconds,
@@ -505,6 +510,27 @@ async def resolve_selected_project_page(settings: Settings, selected: DesignCand
         raise SelectionError("Jira credentials are unavailable to project-page resolver")
     jira = JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
     return await resolve_project_page_id(jira, selected.epic_key)
+
+
+async def epic_author_mention(
+    client: AsyncWebClient, settings: Settings, epic_key: str
+) -> str | None:
+    """Mention the epic's author, who can fix its setup; fail open so the failure still posts."""
+    if not settings.jira_username or not settings.jira_api_token:
+        return None
+    try:
+        jira = JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
+        name = await jira.issue_author(epic_key)
+        if not name:
+            return None
+        user_id = await DEFAULT_SLACK_MENTION_RESOLVER.user_id_for_name(client, name)
+    except Exception as error:
+        LOGGER.warning(
+            "Could not resolve the author of epic %s: %s", epic_key, type(error).__name__
+        )
+        return None
+    # An unresolved name stays plain text; the delivery boundary may still turn it into a mention.
+    return f"<@{user_id}>" if user_id else name
 
 
 async def select_from_jira(

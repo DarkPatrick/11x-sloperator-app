@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from sloperator.experiment_design_selector import (
+    EpicSetupError,
     JiraRestReader,
     SelectionError,
     resolve_project_page_id,
@@ -71,7 +72,7 @@ async def test_project_page_requires_one_link_on_epic() -> None:
     jira.epic_page_links.assert_awaited_once_with("UMN-13405")
 
     jira.epic_page_links.return_value = []
-    with pytest.raises(SelectionError, match="no Confluence project-page link"):
+    with pytest.raises(EpicSetupError, match="no Confluence project-page link"):
         await resolve_project_page_id(jira, "UMN-13405")
 
 
@@ -106,7 +107,7 @@ async def test_project_page_with_several_links_uses_epic_in_header_table() -> No
     assert storage.await_count == 3
 
     pages["838626085"] = header("UMN-1340")
-    with pytest.raises(SelectionError, match="none references the epic"):
+    with pytest.raises(EpicSetupError, match="none references the epic"):
         await resolve_project_page_id(jira, "UMN-13405", storage)
 
     pages["838626085"] = header("UMN-13405")
@@ -115,7 +116,7 @@ async def test_project_page_with_several_links_uses_epic_in_header_table() -> No
         "</ac:parameter></ac:structured-macro>",
         '<a href="https://mu--se.atlassian.net/browse/UMN-13405">epic</a>',
     )
-    with pytest.raises(SelectionError, match="multiple Confluence pages that reference"):
+    with pytest.raises(EpicSetupError, match="multiple Confluence pages that reference"):
         await resolve_project_page_id(jira, "UMN-13405", storage)
 
 
@@ -448,3 +449,21 @@ def test_task_failure_names_selected_task_once() -> None:
         f"{FAILURE_PREFIX} UMN-1: selection changed"
     )
     assert task_failure(f"{FAILURE_PREFIX} UMN-1: x", "UMN-1") == f"{FAILURE_PREFIX} UMN-1: x"
+
+
+async def test_issue_author_prefers_reporter_and_falls_back_to_creator(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    jira = JiraRestReader("https://jira.test", "user", "token")
+    get = AsyncMock(return_value={"fields": {
+        "reporter": {"displayName": "Anna  Petrova"}, "creator": {"displayName": "Bot"},
+    }})
+    monkeypatch.setattr(jira, "_get", get)
+    assert await jira.issue_author("UMN-14107") == "Anna Petrova"
+    get.assert_awaited_once_with("/rest/api/3/issue/UMN-14107", {"fields": "reporter,creator"})
+
+    get.return_value = {"fields": {"reporter": None, "creator": {"displayName": "Ivan Ivanov"}}}
+    assert await jira.issue_author("UMN-14107") == "Ivan Ivanov"
+
+    get.return_value = {"fields": {"reporter": None, "creator": None}}
+    assert await jira.issue_author("UMN-14107") is None

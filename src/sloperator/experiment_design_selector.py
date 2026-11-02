@@ -27,6 +27,10 @@ class SelectionError(RuntimeError):
     """Raised when Jira cannot provide an authoritative selection snapshot."""
 
 
+class EpicSetupError(SelectionError):
+    """Raised when the epic's own setup blocks the run, so its author is the one to fix it."""
+
+
 @dataclass(frozen=True, slots=True)
 class Issue:
     key: str
@@ -204,6 +208,20 @@ class JiraRestReader:
         labels = fields.get("labels") or []
         return frozenset(str(label) for label in labels if isinstance(label, str))
 
+    async def issue_author(self, issue_key: str) -> str | None:
+        """Return the display name of the issue's reporter, falling back to its creator."""
+        fields = (
+            await self._get(f"/rest/api/3/issue/{issue_key}", {"fields": "reporter,creator"})
+        ).get("fields")
+        if not isinstance(fields, dict):
+            return None
+        for role in ("reporter", "creator"):
+            person = fields.get(role)
+            name = person.get("displayName") if isinstance(person, dict) else None
+            if isinstance(name, str) and name.strip():
+                return " ".join(name.split())
+        return None
+
     async def issue_parent_key(self, issue_key: str) -> str:
         issue = await self._get(
             f"/rest/api/3/issue/{issue_key}", {"fields": "parent"}
@@ -280,7 +298,7 @@ async def resolve_project_page_id(
     for link in await jira.epic_page_links(epic_key):
         ids.update(confluence_page_ids(link))
     if not ids:
-        raise SelectionError(
+        raise EpicSetupError(
             f"Jira epic {epic_key} has no Confluence project-page link. "
             "Attach the project page to the epic before running experiment design."
         )
@@ -294,11 +312,11 @@ async def resolve_project_page_id(
     if len(matching) == 1:
         return matching[0]
     if not matching:
-        raise SelectionError(
+        raise EpicSetupError(
             f"Jira epic {epic_key} links to multiple Confluence pages, and none references the "
             "epic in its header table. Link the epic in the project page header."
         )
-    raise SelectionError(
+    raise EpicSetupError(
         f"Jira epic {epic_key} links to multiple Confluence pages that reference the epic in "
         f"their header tables ({', '.join(matching)}). Keep the epic in one project page header."
     )

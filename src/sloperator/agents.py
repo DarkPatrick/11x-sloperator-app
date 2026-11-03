@@ -42,6 +42,7 @@ from sloperator.claude_budget import (
     quota_exhausted,
     transcript_directory,
 )
+from sloperator.claude_profiles import claude_profile_options
 from sloperator.claude_usage import (
     ClaudeUsage,
     ClaudeUsageError,
@@ -1308,6 +1309,11 @@ async def run_claude(
         transcript_usage, transcript_directory(settings.agent_workspace), session_id
     )
     context = _usage_context(session, usage_context)
+    # Passed on resumes as well: settings and the appended prompt are per process, not per session.
+    command_options = (
+        *command_options,
+        *await asyncio.to_thread(claude_profile_options, settings, context.workflow),
+    )
 
     async def invoke(current: AgentSession, *, resume: bool) -> AgentRunResult:
         return await _recorded_agent_call(

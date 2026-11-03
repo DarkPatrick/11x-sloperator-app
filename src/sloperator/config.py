@@ -56,6 +56,7 @@ class Settings:
     codex_cli: Path = Path("/usr/bin/codex")
     agent_timeout_seconds: int = 2_700
     agent_max_concurrency: int = 2
+    claude_profile_workflows: frozenset[str] = frozenset()
     automated_claude_input_budget: int = 5_000_000
     automated_claude_output_budget: int = 30_000
     experiment_finalizer_enabled: bool = True
@@ -236,6 +237,13 @@ class Settings:
             "AIRFLOW_OWNER_ACCESS_ROLE", "User_UG_Monetisation"
         ).strip()
         airflow_owner_dbt_owner = os.environ.get("AIRFLOW_OWNER_DBT_OWNER", "Egor Semin").strip()
+        # Workflows whose Claude runs load a reduced instruction profile from the agent workspace
+        # (.claude/profiles/ in ug-ai-analyst). Empty disables profiles everywhere.
+        claude_profile_workflows = frozenset(
+            item.strip()
+            for item in os.environ.get("SLOPERATOR_CLAUDE_PROFILE_WORKFLOWS", "").split(",")
+            if item.strip()
+        )
         clickhouse_host = os.environ.get("CLICKHOUSE_HOST", "").strip() or None
         clickhouse_username = os.environ.get("CLICKHOUSE_USERNAME", "").strip() or None
         clickhouse_password = os.environ.get("CLICKHOUSE_PASSWORD", "")
@@ -444,6 +452,7 @@ class Settings:
             codex_cli=codex_cli,
             agent_timeout_seconds=agent_timeout_seconds,
             agent_max_concurrency=agent_max_concurrency,
+            claude_profile_workflows=claude_profile_workflows,
             experiment_finalizer_enabled=experiment_finalizer_enabled,
             experiment_finalizer_timezone=experiment_finalizer_timezone,
             experiment_finalizer_hour=experiment_finalizer_hour,

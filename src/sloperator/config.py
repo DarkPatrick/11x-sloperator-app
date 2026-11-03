@@ -103,6 +103,9 @@ class Settings:
     alert_dashboard_collection: int = 865
     alert_dashboard_timeout_seconds: int = 3_600
     payment_layer_alert_channel: str = "C06FADPMGKT"
+    airflow_alert_channel: str = "C046ZEC8M71"
+    airflow_owner_access_role: str = "User_UG_Monetisation"
+    airflow_owner_dbt_owner: str = "Egor Semin"
     clickhouse_host: str | None = None
     clickhouse_port: int = 8443
     clickhouse_username: str | None = None
@@ -228,6 +231,11 @@ class Settings:
         payment_layer_alert_channel = os.environ.get(
             "PAYMENT_MONITOR_ALERT_CHANNEL", "C06FADPMGKT"
         ).strip()
+        airflow_alert_channel = os.environ.get("AIRFLOW_ALERT_CHANNEL", "C046ZEC8M71").strip()
+        airflow_owner_access_role = os.environ.get(
+            "AIRFLOW_OWNER_ACCESS_ROLE", "User_UG_Monetisation"
+        ).strip()
+        airflow_owner_dbt_owner = os.environ.get("AIRFLOW_OWNER_DBT_OWNER", "Egor Semin").strip()
         clickhouse_host = os.environ.get("CLICKHOUSE_HOST", "").strip() or None
         clickhouse_username = os.environ.get("CLICKHOUSE_USERNAME", "").strip() or None
         clickhouse_password = os.environ.get("CLICKHOUSE_PASSWORD", "")
@@ -388,6 +396,12 @@ class Settings:
             )
         if not payment_layer_alert_channel.startswith("C"):
             raise ConfigurationError("PAYMENT_MONITOR_ALERT_CHANNEL must be a Slack channel ID")
+        if not airflow_alert_channel.startswith("C"):
+            raise ConfigurationError("AIRFLOW_ALERT_CHANNEL must be a Slack channel ID")
+        if not airflow_owner_access_role or not airflow_owner_dbt_owner:
+            raise ConfigurationError(
+                "AIRFLOW_OWNER_ACCESS_ROLE and AIRFLOW_OWNER_DBT_OWNER must not be empty"
+            )
         if not 1 <= clickhouse_port <= 65_535:
             raise ConfigurationError("CLICKHOUSE_PORT must be between 1 and 65535")
         if bool(clickhouse_host) != bool(clickhouse_username):
@@ -473,6 +487,9 @@ class Settings:
             alert_dashboard_collection=alert_dashboard_collection,
             alert_dashboard_timeout_seconds=alert_dashboard_timeout_seconds,
             payment_layer_alert_channel=payment_layer_alert_channel,
+            airflow_alert_channel=airflow_alert_channel,
+            airflow_owner_access_role=airflow_owner_access_role,
+            airflow_owner_dbt_owner=airflow_owner_dbt_owner,
             clickhouse_host=clickhouse_host,
             clickhouse_port=clickhouse_port,
             clickhouse_username=clickhouse_username,

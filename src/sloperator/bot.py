@@ -13,6 +13,7 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agents import AgentOrchestrator, SubmitResult, thread_key
+from sloperator.airflow_owner_alerts import AirflowOwnerResponder, is_airflow_owner_trigger
 from sloperator.alert_dashboard import AlertDashboardResponder, is_alert_dashboard_trigger
 from sloperator.anomaly_alerts import AnomalyAlertResponder, is_anomaly_trigger
 from sloperator.archive import ArchiveMiddleware
@@ -128,6 +129,7 @@ def create_app(
     subscription_flow_responder: SubscriptionFlowResponder | None = None,
     payment_layer_responder: PaymentLayerResponder | None = None,
     automation_controls: AutomationControls | None = None,
+    airflow_owner_responder: AirflowOwnerResponder | None = None,
 ) -> AsyncApp:
     """Create and configure the Slack Bolt application."""
     app = AsyncApp(client=ObservedSlackClient(token=settings.bot_token), process_before_response=True)
@@ -138,6 +140,10 @@ def create_app(
     web_health_responder = WebHealthResponder(settings, orchestrator)
     alert_dashboard_responder = AlertDashboardResponder(settings, store)
     alert_dashboard_tasks: set[asyncio.Task[None]] = set()
+    airflow_owner_responder = airflow_owner_responder or AirflowOwnerResponder(
+        settings, store
+    )
+    airflow_owner_tasks: set[asyncio.Task[None]] = set()
     subscription_flow_responder = subscription_flow_responder or SubscriptionFlowResponder(
         settings,
         store,
@@ -165,6 +171,13 @@ def create_app(
             task = asyncio.create_task(alert_dashboard_responder.handle(dict(event), client))
             alert_dashboard_tasks.add(task)
             task.add_done_callback(alert_dashboard_tasks.discard)
+        if enabled("airflow-owner") and is_airflow_owner_trigger(dict(event), settings):
+            # Reading the task log and the dbt repository takes tens of seconds; Socket Mode
+            # must acknowledge the event long before that.
+            task = asyncio.create_task(airflow_owner_responder.handle(dict(event), client))
+            airflow_owner_tasks.add(task)
+            task.add_done_callback(airflow_owner_tasks.discard)
+            return
         if enabled("analytics-anomaly") and is_anomaly_trigger(dict(event), settings):
             await anomaly_responder.handle(dict(event), client)
             return

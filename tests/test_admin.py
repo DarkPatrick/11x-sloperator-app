@@ -236,6 +236,7 @@ def test_slack_trigger_definitions_include_all_automatic_investigations() -> Non
         "web-health",
         "alert-dashboard",
         "payment-layer",
+        "airflow-owner",
     ]
     assert definitions[2]["channel_id"] == settings.mobile_health_alert_channel
     assert definitions[2]["limit"] == "at most 5 metrics per report"

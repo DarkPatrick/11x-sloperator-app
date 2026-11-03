@@ -15,6 +15,7 @@ from slack_bolt.async_app import AsyncApp
 
 from sloperator.admin import create_admin_routes
 from sloperator.agents import AgentOrchestrator, SlackCommunicationLayer, validate_agent_runtime
+from sloperator.airflow_owner_alerts import AirflowOwnerResponder, is_airflow_owner_trigger
 from sloperator.archive import periodically_synchronize_archive, synchronize_archive
 from sloperator.automation_controls import AutomationControls
 from sloperator.automation_error_audit import PROJECT_ROOT, TIMEOUT_SECONDS
@@ -182,6 +183,7 @@ async def serve(settings: Settings) -> None:
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
     experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
+    airflow_owner_responder = AirflowOwnerResponder(settings, store)
     app = create_app(
         settings,
         store,
@@ -190,6 +192,7 @@ async def serve(settings: Settings) -> None:
         subscription_flow_responder=subscription_flow_responder,
         payment_layer_responder=payment_layer_responder,
         automation_controls=automation_controls,
+        airflow_owner_responder=airflow_owner_responder,
     )
     orchestrator.set_notification_client(app.client)
 
@@ -210,6 +213,10 @@ async def serve(settings: Settings) -> None:
             "triggers", "experiment-config"
         ) and is_experiment_config_trigger(event):
             await experiment_config_responder.handle(event, app.client)
+        if not automation_controls.disabled(
+            "triggers", "airflow-owner"
+        ) and is_airflow_owner_trigger(event, settings):
+            await airflow_owner_responder.handle(event, app.client)
 
     async def handle_jira_abuse(
         task: JiraTaskCandidate,

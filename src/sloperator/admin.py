@@ -1435,6 +1435,16 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
         "The channel then gets one line: `:bar_chart: Свежий дашборд за <date> по аномалиям "
         "собран`, linking the dashboard from the opening phrase."
     )
+    airflow_owner_summary = (
+        "> No agent runs for this trigger — it executes the deterministic "
+        "`ug-ai-analyst` resolver `scripts/airflow_alert_owner.py`.\n\n"
+        "1. Read DAG, run and task from the alert (the run id comes from the Logs link)\n"
+        "2. dbt task: take the failed models from the task log and read each model's "
+        "`meta.owner` from `muse-tech/analytics-dbt-projects@prod`\n"
+        "3. Plain task: read the DAG source and its `access_control` roles\n\n"
+        "On a match the alert's thread gets one line mentioning the operator with the reason; "
+        "otherwise nothing is posted."
+    )
     preview_note = (
         "> Preview: values in `{{ double braces }}` are filled from the triggering Slack "
         "report. The surrounding instructions are the current production prompt.\n\n"
@@ -1502,6 +1512,20 @@ def _slack_trigger_definitions(settings: Settings) -> list[dict[str, str]]:
             "condition": "New payment error signature or catastrophic path collapse",
             "limit": "one open incident per source/path nature; recovery in the source thread",
             "prompt": preview_note + payment_prompt,
+        },
+        {
+            "key": "airflow-owner",
+            "name": "Airflow failure owner tag",
+            "channel_id": settings.airflow_alert_channel,
+            "channel_name": "a-airflow-monitoring",
+            "source": settings.anomaly_bot_id,
+            "condition": (
+                f"DAG Failed alert whose DAG access_control grants "
+                f"{settings.airflow_owner_access_role}, or whose failed dbt model is owned by "
+                f"{settings.airflow_owner_dbt_owner}"
+            ),
+            "limit": "one thread mention per alert",
+            "prompt": airflow_owner_summary,
         },
     ]
 

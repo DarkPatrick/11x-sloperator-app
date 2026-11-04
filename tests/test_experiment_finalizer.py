@@ -699,3 +699,25 @@ async def test_sweep_runs_as_its_own_job_and_logs_each_task(
     assert kwargs["job_name"] == SWEEP_JOB_NAME
     assert 'duedate <= "2026-10-27"' in agent.execute_once.await_args.args[0]
     assert "UMN-14200" in caplog.text
+
+
+def test_crm_sends_have_their_own_allowlist_identity_and_timing() -> None:
+    # 2026-11-04: CRM (Bloomreach) results tasks live in [UG][CRM] epics as "Experiment results",
+    # the admin rows have no project link and stay running for months after the one-off send.
+    for prompt in (FINALIZATION_PROMPT, START_PROMPT):
+        assert "get_crm_exps_list(config=cfg)" in prompt
+        assert "`provider_id = 1`" in prompt
+        assert "starts with `[UG][CRM]`" in prompt
+        assert "never guess the epic from the campaign name" in prompt
+        assert "summary is `Experiment results`" in prompt
+        assert "7 complete days (7 * 24 hours)" in prompt
+        assert "`crm_send_ts`" in prompt
+        assert "A CRM unit is always `Iteration 1`" in prompt
+        assert "of rule 8 still applies to every send" in " ".join(prompt.split())
+    assert "in place of its `TBU` template" in FINALIZATION_PROMPT
+    assert "or one CRM send unit" in FINALIZATION_PROMPT
+
+
+def test_overdue_sweep_also_covers_crm_results_tasks() -> None:
+    jql = overdue_sweep_jql(dt.date(2026, 11, 4))
+    assert '(summary ~ "Итоги" OR summary ~ "\\"Experiment results\\"")' in jql

@@ -76,7 +76,8 @@ return the exact terminal format required by the original turn.
 
 SELECTION_RULES = f"""\
 Selection rules:
-1. Start exclusively from `ug_experiment_calculator.get_ugm_exps_list(config=cfg)`. Treat the
+1. Start exclusively from `ug_experiment_calculator.get_ugm_exps_list(config=cfg)` (CRM email
+   sends are the one exception, with their own allowlist and gates in rule 10). Treat the
    returned ids as the authoritative allowlist: never inspect, calculate, select, or publish an
    experiment whose id is absent from that list. Do not use the general experiment list and then
    infer the domain from metrics, clients, segments, a project page, or other metadata. If the UGM
@@ -162,6 +163,42 @@ Selection rules:
    eligible, make no finalisation or publication writes and return exactly `{NO_OP_NOTIFICATION}`
    and nothing else. The reviewer-selection pass has one separately defined exception for an
    idempotent maturity forecast on an ineligible Results task. Keep filter/audit details internal.
+10. CRM (Bloomreach) email sends are a second candidate source with their own identity and timing
+   gates; everything not named here (rules 4, 5, 7, 8, 9, the calculation procedure, the forecasts)
+   applies to them unchanged. CRM sends are imported admin rows
+   `Imported experiment [BLOOMREACH/<hex>]` with `provider_id = 1`; the UGM allowlist and the
+   monetisation title markers of rule 1 never apply to them.
+   a. Allowlist: `ug_experiment_calculator.get_crm_exps_list(config=cfg)`. Treat it exactly like the
+      UGM allowlist (authoritative, fail closed when it cannot be read) and require `provider_id = 1`
+      on the admin row.
+   b. Identity: the admin `jira_task` must name a Jira epic (a key or a browse URL) whose summary
+      starts with `[UG][CRM]`. An empty or non-epic `jira_task`, or another summary prefix, makes the
+      send ineligible: never guess the epic from the campaign name. All CRM sends whose `jira_task`
+      names the same epic (the main send, a last-chance resend) form one finalisation unit; the unit
+      takes the place of "one experiment" everywhere in these rules, and its experiment id in every
+      terminal line is the id of its latest send.
+   c. Timing, replacing rules 2-3: the admin date_start, date_end and status of a CRM row are not the
+      send (rows stay running for months). Read each send's window from the calculator:
+      `get_experiment(<id>, config=cfg)` returns `crm_send_ts` (the mass send) and `date_end` (the last
+      `AB Test Start`). The unit is eligible when the latest send's `date_end` lies within the last
+      calendar month and every send of the unit has `date_end` at least 7 complete days (7 * 24 hours)
+      ago: the CRM read is on day 7 after the send, after its 3-day attribution window. An exact
+      threshold value passes; a missing or unverifiable window is ineligible. The pending-trials gate
+      of rule 8 still applies to every send (client `UG_CRM`, every segment): CRM sale offers include
+      trials (5-11% of CRM-attributed web subscriptions in Aug-Oct 2026).
+   d. Results task, replacing the launch-task mapping of rule 6: the unit's Results task is the
+      epic's single child task whose summary is `Experiment results`. None, or more than one, makes
+      the unit ineligible. Only Backlog or To Do may enter the pool. The task may be assigned to a CRM
+      team member; that is not a reason to skip it: the reviewer takes it exactly as a UGM task.
+   e. Project page and iteration: CRM rows carry no project link, so the project page is the epic's
+      unique Confluence remote link (the same `/remotelink` read as for UGM). The unit is already
+      finalised when that page's `Results` section holds filled CRM tables for these sends; a
+      template with `TBU` placeholders is not populated. A CRM unit is always `Iteration 1`.
+   f. Ordering: CRM units join the same preliminary pool as UGM experiments, ordered by the latest
+      send's `date_end`. The upcoming-queue forecast and the overdue sweep treat a unit like an
+      experiment, with the planned end being the latest send's `date_end` plus 7 days.
+   g. Re-check in rule 9 re-fetches the CRM allowlist, the admin `jira_task`, the epic summary and
+      the send windows instead of the UGM allowlist and title markers.
 
 """
 
@@ -293,7 +330,8 @@ JIRA_HELPER = ".venv/bin/python .claude/jira/jira_issue.py"
 def overdue_sweep_jql(today: dt.date) -> str:
     """Results tasks of the service account that are overdue or parked until the experiment ends."""
     return (
-        f'project = UMN AND assignee = "{SERVICE_ACCOUNT_ID}" AND summary ~ "Итоги" '
+        f'project = UMN AND assignee = "{SERVICE_ACCOUNT_ID}" '
+        'AND (summary ~ "Итоги" OR summary ~ "\\"Experiment results\\"") '
         'AND status in (Backlog, "To Do") '
         f'AND (duedate <= "{today.isoformat()}" OR duedate is EMPTY) ORDER BY duedate ASC, key ASC'
     )
@@ -442,7 +480,7 @@ all their data-quality, maturity, verification, language, and publication safegu
 
 {LOCAL_CONFLUENCE_USER_DIRECTORY}
 
-Goal: finalise exactly one eligible UG monetisation experiment.
+Goal: finalise exactly one eligible UG monetisation experiment, or one CRM send unit (rule 10).
 
 {SELECTION_RULES}
 These rules describe selection BEFORE the reviewer claims a task. This preparation pass receives
@@ -489,6 +527,13 @@ Execution for the selected experiment:
       including its required finished-experiment Forecast/audience workflow and maturity checks.
       Insert it into the correct experiment iteration on the existing project page with Decision,
       Next steps, and Insights initially empty.
+      For a CRM unit (rule 10) the calculator produces the block on the CRM team's template on its
+      own (email campaign, landing funnel, After Click, After Split); the finished-experiment
+      Forecast/audience workflow and product metrics do not apply. Generate one block per send of
+      the unit, oldest first, each naming its send date and experiment id, and put them into the
+      page's `Results` section in place of its `TBU` template; keep the section's own heading.
+      Insights follow the CRM section of `experiment-insight-research` (concurrent sends to the same
+      recipients inside the 3-day window, link scanners, the landing funnel by device).
    b. Use `experiment-insight-research` to perform the full evidence-backed insight research.
       Insert the insight summary and supported question blocks into that same Results block.
    c. Only after insights are present, write concise Decision and Next steps grounded in them and
@@ -554,7 +599,7 @@ Final notification (reviewer only):
   only the concise operator-facing failure. Do not put any text before these formats.
 
 Use the current date/time in Asia/Nicosia for all relative-date and completion decisions.
-Never finalise more than one experiment in this run.
+Never finalise more than one experiment (or one CRM send unit) in this run.
 """
 
 FINAL_NOTIFICATION_POLICY = FINALIZATION_PROMPT.split("Final notification (reviewer only):", 1)[1]

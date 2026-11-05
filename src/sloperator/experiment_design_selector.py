@@ -456,8 +456,13 @@ async def select_candidate(
     board_id: int = BOARD_ID,
     task_title: str = CALCULATION_TITLE,
     claimed_task_key: str | None = None,
+    excluded_epic_keys: frozenset[str] = frozenset(),
 ) -> DesignCandidate | None:
-    """Select the oldest eligible calculation task from one authoritative snapshot."""
+    """Select the oldest eligible calculation task from one authoritative snapshot.
+
+    ``excluded_epic_keys`` holds epics whose own setup already failed during this run, so the
+    run moves on to the next eligible task instead of stopping on the broken epic.
+    """
     moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
     configuration = await jira.board_configuration(board_id)
     filter_id = configuration.get("filter", {}).get("id")
@@ -487,7 +492,7 @@ async def select_candidate(
     claimed_statuses = _statuses_for(columns, {"In Progress", "In Review", "Done"})
     normalized_task_title = _normalize(task_title)
     for pitch, calculation in _pair_children(children, normalized_task_title):
-        if calculation.parent_key not in epic_keys:
+        if calculation.parent_key not in epic_keys or calculation.parent_key in excluded_epic_keys:
             continue
         if claimed_task_key is not None and calculation.key != claimed_task_key:
             continue

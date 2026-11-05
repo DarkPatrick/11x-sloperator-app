@@ -678,7 +678,8 @@ def parse_automation_failure(
     for prefix, title, outcome in AUTOMATION_FAILURES:
         if not stripped.startswith(prefix):
             continue
-        detail = stripped.removeprefix(prefix).strip()
+        # Published failures embed Jira links into task keys; attribute by the bare key.
+        detail = re.sub(r"\[(UMN-\d+)\]\([^)]*\)", r"\1", stripped.removeprefix(prefix).strip())
         owned = re.match(r"(UMN-\d+):", detail) or re.search(r"\bResults task (UMN-\d+)", detail)
         reason = next(
             (plain for pattern, plain in FAILURE_REASONS if pattern.search(detail)), None

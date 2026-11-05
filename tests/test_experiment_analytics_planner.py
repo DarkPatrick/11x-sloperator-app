@@ -96,16 +96,52 @@ async def test_missing_project_page_stops_analytics_before_start(monkeypatch) ->
         experiment_analytics_channel="CANALYTICS",
     )
     selector = AsyncMock(return_value=replace(CANDIDATE, project_page_id=None))
-    resolver = AsyncMock(side_effect=SelectionError("Jira epic UMN-13000 has no project-page link"))
+    resolver = AsyncMock(side_effect=SelectionError("Confluence page 1 could not be read: timeout"))
     monkeypatch.setattr(
-        "sloperator.experiment_analytics_planner.resolve_selected_project_page", resolver
+        "sloperator.experiment_design_planner.resolve_selected_project_page", resolver
     )
 
-    with pytest.raises(SelectionError, match="no project-page link"):
+    with pytest.raises(SelectionError, match="could not be read"):
         await run_once(client, agent, settings, selector)
 
     agent.execute_once.assert_not_awaited()
     client.chat_postMessage.assert_awaited_once()
+
+
+async def test_analytics_epic_setup_failure_tags_author_and_moves_on(monkeypatch) -> None:
+    from dataclasses import replace
+
+    from sloperator.experiment_design_selector import EpicSetupError
+
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    agent = SimpleNamespace(execute_once=AsyncMock())
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test",
+        experiment_analytics_channel="CANALYTICS",
+    )
+    selector = AsyncMock(side_effect=[replace(CANDIDATE, project_page_id=None), None])
+    monkeypatch.setattr(
+        "sloperator.experiment_design_planner.resolve_selected_project_page",
+        AsyncMock(side_effect=EpicSetupError(
+            f"Jira epic {CANDIDATE.epic_key} has no Confluence project-page link."
+        )),
+    )
+    author = AsyncMock(return_value="<@UAUTHOR>")
+    monkeypatch.setattr("sloperator.experiment_design_planner.epic_author_mention", author)
+
+    assert await run_once(client, agent, settings, selector) is None
+
+    author.assert_awaited_once_with(client, settings, CANDIDATE.epic_key)
+    text = client.chat_postMessage.await_args.kwargs["markdown_text"]
+    assert text.startswith(
+        "Experiment analytics automation failed: "
+        f"[{CANDIDATE.task_key}](https://mu--se.atlassian.net/browse/{CANDIDATE.task_key}):"
+    )
+    assert text.endswith("Epic author: <@UAUTHOR>")
+    assert selector.await_args_list[1].kwargs == {
+        "excluded_epic_keys": frozenset({CANDIDATE.epic_key})
+    }
+    agent.execute_once.assert_not_awaited()
 
 
 def test_review_notification_rejects_wrong_task() -> None:

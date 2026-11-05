@@ -45,6 +45,8 @@ NO_OP_RESULT = "No eligible experiment-design task was found."
 PREPARED_RE = re.compile(r"DESIGN_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN-\d+)")
 FAILURE_PREFIX = "Experiment design automation failed:"
 TASK_LINK_RE = re.compile(r"mu--se\.atlassian\.net/browse/(?P<task>UMN-\d+)")
+# A bare Jira key (optionally in backticks) that is not already part of a URL or a link label.
+BARE_JIRA_KEY_RE = re.compile(r"`(UMN-\d+)`|(?<![\w/\[|.-])(UMN-\d+)(?![\w\]-])")
 
 SELECTION_RULES = (
     ISSUE_SELECTION_POLICY
@@ -369,6 +371,7 @@ async def publish_notification(
     notification = normalize_review_notification(run.text, task_key)
     if notification.startswith(FAILURE_PREFIX):
         notification = task_failure(notification, task_key)
+    notification = link_jira_keys(notification, settings.jira_url)
     published_run = replace(run, text=notification)
     channel = await channel_for_task(settings, task_key, settings.experiment_design_channel)
     response = await client.chat_postMessage(
@@ -380,6 +383,17 @@ async def publish_notification(
     channel_id = response.get("channel", channel)
     await agent.attach_session(channel_id, response["ts"], published_run)
     return notification
+
+
+def link_jira_keys(text: str, jira_url: str) -> str:
+    """Embed a Jira link into every bare task key so each task in a post is one click away."""
+    base = jira_url.rstrip("/")
+
+    def link(match: re.Match[str]) -> str:
+        key = match.group(1) or match.group(2)
+        return f"[{key}]({base}/browse/{key})"
+
+    return BARE_JIRA_KEY_RE.sub(link, text)
 
 
 def task_failure(message: str, task_key: str) -> str:
@@ -400,7 +414,7 @@ async def publish_failure(
         channel=await channel_for_task(
             settings, first_task_key(message), settings.experiment_design_channel
         ),
-        markdown_text=message,
+        markdown_text=link_jira_keys(message, settings.jira_url),
         unfurl_links=False,
         unfurl_media=False,
     )
@@ -433,25 +447,12 @@ async def run_once(
     selector: Callable[[Settings], Awaitable[DesignCandidate | None]] | None = None,
 ) -> str | None:
     """Run preparation, stay silent on no-op, then run independent review."""
-    choose = selector or select_from_jira
-    selected = await choose(settings)
+    selected = await select_with_project_page(
+        client, settings, selector or select_from_jira, FAILURE_PREFIX, "experiment-design",
+        publish_failure,
+    )
     if selected is None:
-        LOGGER.info("No eligible experiment-design task; finishing silently")
         return None
-    if selected.project_page_id is None:
-        try:
-            selected = replace(
-                selected,
-                project_page_id=await resolve_selected_project_page(settings, selected),
-            )
-        except SelectionError as error:
-            message = f"{FAILURE_PREFIX} {selected.task_key}: {error}"
-            if isinstance(error, EpicSetupError):
-                author = await epic_author_mention(client, settings, selected.epic_key)
-                if author:
-                    message += f" Epic author: {author}"
-            await publish_failure(client, settings, message)
-            raise
     start_run = await agent.execute_once(
         start_prompt(selected), settings.experiment_design_timeout_seconds,
         job_name="experiment-design-reviewer",
@@ -505,6 +506,50 @@ async def run_preparation(
     )
 
 
+async def select_with_project_page(
+    client: AsyncWebClient,
+    settings: Settings,
+    choose: Callable[..., Awaitable[DesignCandidate | None]],
+    failure_prefix: str,
+    job: str,
+    report: Callable[[AsyncWebClient, Settings, str], Awaitable[None]],
+) -> DesignCandidate | None:
+    """Select the next task whose epic resolves to one project page.
+
+    An epic-setup problem is the epic author's to fix: report it with their mention, then move on
+    to the next eligible task instead of ending the run. Anything else still stops the run.
+    """
+    skipped_epics: set[str] = set()
+    while True:
+        selected = await choose(settings, excluded_epic_keys=frozenset(skipped_epics))
+        if selected is None:
+            LOGGER.info("No eligible %s task; finishing silently", job)
+            return None
+        if selected.epic_key in skipped_epics:
+            raise SelectionError(f"Selector returned already skipped epic {selected.epic_key}")
+        if selected.project_page_id is not None:
+            return selected
+        try:
+            return replace(
+                selected,
+                project_page_id=await resolve_selected_project_page(settings, selected),
+            )
+        except EpicSetupError as error:
+            message = f"{failure_prefix} {selected.task_key}: {error}"
+            author = await epic_author_mention(client, settings, selected.epic_key)
+            if author:
+                message += f" Epic author: {author}"
+            await report(client, settings, message)
+            skipped_epics.add(selected.epic_key)
+            LOGGER.info(
+                "Skipping %s task %s: epic %s setup is broken; looking for the next task",
+                job, selected.task_key, selected.epic_key,
+            )
+        except SelectionError as error:
+            await report(client, settings, f"{failure_prefix} {selected.task_key}: {error}")
+            raise
+
+
 async def resolve_selected_project_page(settings: Settings, selected: DesignCandidate) -> str:
     if not settings.jira_username or not settings.jira_api_token:
         raise SelectionError("Jira credentials are unavailable to project-page resolver")
@@ -534,7 +579,10 @@ async def epic_author_mention(
 
 
 async def select_from_jira(
-    settings: Settings, *, claimed_task_key: str | None = None,
+    settings: Settings,
+    *,
+    claimed_task_key: str | None = None,
+    excluded_epic_keys: frozenset[str] = frozenset(),
 ) -> DesignCandidate | None:
     """Build the read-only Jira client and select one candidate."""
     if not settings.jira_username or not settings.jira_api_token:
@@ -542,6 +590,7 @@ async def select_from_jira(
     return await select_candidate(
         JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token),
         claimed_task_key=claimed_task_key,
+        excluded_epic_keys=excluded_epic_keys,
     )
 
 

@@ -23,8 +23,9 @@ from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
 from sloperator.experiment_design_planner import (
     AgentSubmitter,
+    link_jira_keys,
     next_run_at,
-    resolve_selected_project_page,
+    select_with_project_page,
 )
 from sloperator.experiment_design_selector import (
     ANALYTICS_TITLE,
@@ -318,6 +319,7 @@ async def publish_notification(
     notification = normalize_review_notification(run.text, task_key)
     if notification.startswith(FAILURE_PREFIX):
         notification = task_failure(notification, task_key)
+    notification = link_jira_keys(notification, settings.jira_url)
     channel = await channel_for_task(settings, task_key, settings.experiment_analytics_channel)
     response = await client.chat_postMessage(
         channel=channel,
@@ -346,7 +348,7 @@ async def publish_failure(client: AsyncWebClient, settings: Settings, message: s
         channel=await channel_for_task(
             settings, first_task_key(message), settings.experiment_analytics_channel
         ),
-        markdown_text=message,
+        markdown_text=link_jira_keys(message, settings.jira_url),
         unfurl_links=False,
         unfurl_media=False,
     )
@@ -377,22 +379,12 @@ async def run_once(
     settings: Settings,
     selector: Callable[[Settings], Awaitable[DesignCandidate | None]] | None = None,
 ) -> str | None:
-    choose = selector or select_from_jira
-    selected = await choose(settings)
+    selected = await select_with_project_page(
+        client, settings, selector or select_from_jira, FAILURE_PREFIX, "experiment-analytics",
+        publish_failure,
+    )
     if selected is None:
-        LOGGER.info("No eligible experiment-analytics task; finishing silently")
         return None
-    if selected.project_page_id is None:
-        try:
-            selected = replace(
-                selected,
-                project_page_id=await resolve_selected_project_page(settings, selected),
-            )
-        except SelectionError as error:
-            await publish_failure(
-                client, settings, f"{FAILURE_PREFIX} {selected.task_key}: {error}"
-            )
-            raise
     start_run = await agent.execute_once(
         start_prompt(selected), settings.experiment_analytics_timeout_seconds,
         job_name="experiment-analytics-reviewer",
@@ -443,7 +435,10 @@ async def run_preparation(
 
 
 async def select_from_jira(
-    settings: Settings, *, claimed_task_key: str | None = None,
+    settings: Settings,
+    *,
+    claimed_task_key: str | None = None,
+    excluded_epic_keys: frozenset[str] = frozenset(),
 ) -> DesignCandidate | None:
     if not settings.jira_username or not settings.jira_api_token:
         raise SelectionError("Jira credentials are unavailable to experiment-analytics selector")
@@ -451,6 +446,7 @@ async def select_from_jira(
         JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token),
         task_title=ANALYTICS_TITLE,
         claimed_task_key=claimed_task_key,
+        excluded_epic_keys=excluded_epic_keys,
     )
 
 

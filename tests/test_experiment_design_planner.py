@@ -141,7 +141,7 @@ async def test_no_candidate_finishes_without_slack_or_second_agent() -> None:
 
     assert await run_once(client, agent, settings, selector) is None
     assert agent.execute_once.await_count == 0
-    selector.assert_awaited_once_with(settings)
+    selector.assert_awaited_once_with(settings, excluded_epic_keys=frozenset())
     client.chat_postMessage.assert_not_awaited()
 
 
@@ -193,7 +193,7 @@ async def test_epic_setup_failure_mentions_the_epic_author(monkeypatch) -> None:
         slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test",
         experiment_design_channel="CDESIGN", jira_username="bot", jira_api_token="token",
     )
-    selector = AsyncMock(return_value=replace(SELECTED, project_page_id=None))
+    selector = AsyncMock(side_effect=lambda *_a, **_k: None)
     monkeypatch.setattr(
         "sloperator.experiment_design_planner.resolve_selected_project_page",
         AsyncMock(side_effect=EpicSetupError(
@@ -206,27 +206,77 @@ async def test_epic_setup_failure_mentions_the_epic_author(monkeypatch) -> None:
     lookup = AsyncMock(return_value="UAUTHOR")
     monkeypatch.setattr(DEFAULT_SLACK_MENTION_RESOLVER, "user_id_for_name", lookup)
 
-    with pytest.raises(EpicSetupError):
-        await run_once(client, agent, settings, selector)
+    async def run() -> str:
+        selector.side_effect = [replace(SELECTED, project_page_id=None), None]
+        assert await run_once(client, agent, settings, selector) is None
+        return client.chat_postMessage.await_args.kwargs["markdown_text"]
 
+    text = await run()
     issue_author.assert_awaited_once_with("UMN-12310")
     lookup.assert_awaited_once_with(client, "Anna Petrova")
-    text = client.chat_postMessage.await_args.kwargs["markdown_text"]
-    assert text.startswith("Experiment design automation failed: UMN-12312: Jira epic UMN-12310")
+    browse = "https://mu--se.atlassian.net/browse"
+    assert text.startswith(
+        "Experiment design automation failed: "
+        f"[UMN-12312]({browse}/UMN-12312): Jira epic [UMN-12310]({browse}/UMN-12310)"
+    )
     assert text.endswith("Epic author: <@UAUTHOR>")
 
     # No Slack match keeps the plain name; a Jira failure posts without any author.
     lookup.return_value = None
-    with pytest.raises(EpicSetupError):
-        await run_once(client, agent, settings, selector)
-    assert client.chat_postMessage.await_args.kwargs["markdown_text"].endswith(
-        "Epic author: Anna Petrova"
-    )
+    assert (await run()).endswith("Epic author: Anna Petrova")
     issue_author.side_effect = SelectionError("Jira GET failed with HTTP 500")
-    with pytest.raises(EpicSetupError):
+    assert (await run()).endswith("Link the epic in the project page header.")
+
+
+async def test_epic_setup_failure_moves_on_to_the_next_task(monkeypatch) -> None:
+    from dataclasses import replace
+
+    from sloperator.experiment_design_selector import EpicSetupError
+
+    broken = replace(SELECTED, task_key="UMN-14155", epic_key="UMN-14153", project_page_id=None)
+    healthy = replace(SELECTED, project_page_id=None)
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="xoxb-test", app_token="xapp-test",
+        experiment_design_channel="CDESIGN",
+    )
+    selector = AsyncMock(side_effect=[broken, healthy])
+
+    async def resolve(_settings, candidate):
+        if candidate.epic_key == "UMN-14153":
+            raise EpicSetupError("Jira epic UMN-14153 has no Confluence project-page link.")
+        return "838613487"
+
+    monkeypatch.setattr("sloperator.experiment_design_planner.resolve_selected_project_page", resolve)
+    monkeypatch.setattr(
+        "sloperator.experiment_design_planner.epic_author_mention", AsyncMock(return_value="<@U1>")
+    )
+    start = HeadlessAgentRun(provider="claude", model="m", session_id="s1", text="stop here")
+    agent = SimpleNamespace(execute_once=AsyncMock(return_value=start), attach_session=AsyncMock())
+
+    with pytest.raises(InvalidDesignResult):
         await run_once(client, agent, settings, selector)
-    assert client.chat_postMessage.await_args.kwargs["markdown_text"].endswith(
-        "Link the epic in the project page header."
+
+    assert selector.await_args_list[1].kwargs == {"excluded_epic_keys": frozenset({"UMN-14153"})}
+    client.chat_postMessage.assert_awaited_once()
+    assert "UMN-14155" in client.chat_postMessage.await_args.kwargs["markdown_text"]
+    # The healthy task reached the reviewer start instead of the run ending on the broken epic.
+    agent.execute_once.assert_awaited_once()
+    assert "UMN-12312" in agent.execute_once.await_args.args[0]
+
+
+def test_link_jira_keys_embeds_links_once() -> None:
+    from sloperator.experiment_design_planner import link_jira_keys
+
+    base = "https://mu--se.atlassian.net"
+    text = (
+        "UMN-1: epic `UMN-2`, see https://mu--se.atlassian.net/browse/UMN-3 "
+        "and [UMN-4](https://x/browse/UMN-4) <https://y|UMN-5>"
+    )
+    assert link_jira_keys(text, base + "/") == (
+        f"[UMN-1]({base}/browse/UMN-1): epic [UMN-2]({base}/browse/UMN-2), see "
+        "https://mu--se.atlassian.net/browse/UMN-3 and [UMN-4](https://x/browse/UMN-4) "
+        "<https://y|UMN-5>"
     )
 
 

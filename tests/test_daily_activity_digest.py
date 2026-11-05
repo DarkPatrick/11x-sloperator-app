@@ -836,3 +836,20 @@ async def test_clarification_request_needs_latest_service_account_question() -> 
         return_value=[comment(SERVICE_ACCOUNT_ID, "Done: results are on the page.")]
     )
     assert await reader.clarification_request("UMN-12389") is None
+
+
+def test_linked_automation_failure_is_still_attributed_to_its_task() -> None:
+    from sloperator.daily_activity_digest import parse_automation_failure
+
+    browse = "https://mu--se.atlassian.net/browse"
+    failure = parse_automation_failure(
+        "C0BT7HSVACD",
+        "1793800811.506759",
+        f"Experiment analytics automation failed: [UMN-14157]({browse}/UMN-14157): Jira epic "
+        f"[UMN-14153]({browse}/UMN-14153) has no Confluence project-page link. "
+        "Epic author: <@U0149RHN7D3>",
+    )
+
+    assert failure is not None
+    assert failure.task_key == "UMN-14157"
+    assert failure.note.endswith("нет однозначной ссылки на страницу проекта")

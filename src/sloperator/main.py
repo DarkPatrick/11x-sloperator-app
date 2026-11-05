@@ -133,6 +133,8 @@ from sloperator.jira_task_automation import (
 from sloperator.operations_store import configure_operations
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
 from sloperator.scheduled_jobs import EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME
+from sloperator.mysql_docs_sync import cancel_task as cancel_mysql_docs_sync
+from sloperator.mysql_docs_sync import run_weekly as run_weekly_mysql_docs_sync
 from sloperator.skill_docs_sync import cancel_task as cancel_skill_docs_sync
 from sloperator.skill_docs_sync import run_daily as run_daily_skill_docs_sync
 from sloperator.store import EventStore
@@ -180,6 +182,7 @@ async def serve(settings: Settings) -> None:
     error_audit_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["automation-error-audit"]
     activity_digest_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["daily-activity-digest"]
     skill_docs_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["skill-docs-sync"]
+    mysql_docs_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["mysql-docs-sync"]
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
     experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
@@ -271,6 +274,7 @@ async def serve(settings: Settings) -> None:
     automation_error_audit_task: asyncio.Task[None] | None = None
     daily_activity_digest_task: asyncio.Task[None] | None = None
     skill_docs_sync_task: asyncio.Task[None] | None = None
+    mysql_docs_sync_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -677,6 +681,15 @@ async def serve(settings: Settings) -> None:
             ),
             name="daily-skill-docs-sync",
         )
+        mysql_docs_sync_task = asyncio.create_task(
+            run_weekly_mysql_docs_sync(
+                settings,
+                lambda: not automation_controls.disabled(
+                    "crons", mysql_docs_job.display_name
+                ),
+            ),
+            name="weekly-mysql-docs-sync",
+        )
         LOGGER.info(
             "Sloperator started; health http://%s:%d/healthz; admin /admin; archive %s",
             settings.host,
@@ -702,6 +715,7 @@ async def serve(settings: Settings) -> None:
         await cancel_automation_error_audit(automation_error_audit_task)
         await cancel_daily_activity_digest(daily_activity_digest_task)
         await cancel_skill_docs_sync(skill_docs_sync_task)
+        await cancel_mysql_docs_sync(mysql_docs_sync_task)
         await orchestrator.close()
         await slack_handler.close_async()  # type: ignore[no-untyped-call]
         await runner.cleanup()

@@ -14,6 +14,10 @@ from sloperator.experiment_analytics_planner import PREPARATION_PROMPT as ANALYT
 from sloperator.experiment_design_planner import PREPARATION_PROMPT
 from sloperator.experiment_finalizer import START_PROMPT as FINALIZATION_PROMPT
 from sloperator.jira_task_automation import WORKER_PROMPT
+from sloperator.mysql_docs_sync import HOUR as MYSQL_DOCS_HOUR
+from sloperator.mysql_docs_sync import PROMPT as MYSQL_DOCS_PROMPT
+from sloperator.mysql_docs_sync import PROMPT_SOURCE as MYSQL_DOCS_PROMPT_SOURCE
+from sloperator.mysql_docs_sync import TIMEZONE_NAME as MYSQL_DOCS_TIMEZONE
 from sloperator.skill_docs_sync import HOUR as SKILL_DOCS_HOUR
 from sloperator.skill_docs_sync import PROMPT as SKILL_DOCS_PROMPT
 from sloperator.skill_docs_sync import PROMPT_SOURCE as SKILL_DOCS_PROMPT_SOURCE
@@ -159,6 +163,22 @@ EMBEDDED_SCHEDULED_JOBS = (
             "Daily fast-forward of ug-ai-analyst main and Confluence regeneration for stale skills"
         ),
         prompt=SKILL_DOCS_PROMPT,
+    ),
+    EmbeddedScheduledJob(
+        job_name="mysql-docs-sync",
+        run_job_names=("mysql-docs-sync",),
+        display_name="mysql-docs-sync (sloperator.service)",
+        schedule=lambda _settings: f"weekly Sun {MYSQL_DOCS_HOUR:02d}:00 {MYSQL_DOCS_TIMEZONE}",
+        logger_name="sloperator.mysql_docs_sync",
+        scheduled_prefix="Next MySQL docs sync scheduled for ",
+        started_message="Starting scheduled MySQL docs sync",
+        completed_message="MySQL docs sync completed",
+        failed_message="Weekly MySQL docs sync failed",
+        prompt_source=MYSQL_DOCS_PROMPT_SOURCE,
+        condition=(
+            "Weekly check of the Confluence MySQL table docs; Claude only for tables with drift"
+        ),
+        prompt=MYSQL_DOCS_PROMPT,
     ),
 )
 

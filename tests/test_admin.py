@@ -517,6 +517,11 @@ def test_systemd_scheduler_jobs_include_every_registered_schedule_and_runtime_st
             "schedule": "daily 00:00 UTC",
             "command": "embedded asyncio scheduler · active · PID 123",
         },
+        {
+            "name": "mysql-docs-sync (sloperator.service)",
+            "schedule": "weekly Sun 03:00 UTC",
+            "command": "embedded asyncio scheduler · active · PID 123",
+        },
     ]
 
 

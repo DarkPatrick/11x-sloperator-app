@@ -15,7 +15,7 @@ from sloperator.config import Settings
 FAKE_BUILDER = """
 import json, sys
 from pathlib import Path
-name, out = sys.argv[2], Path(sys.argv[4])
+name, out = sys.argv[2].replace("/", "_"), Path(sys.argv[4])
 if name == "broken":
     sys.exit("unknown section")
 out.mkdir(parents=True, exist_ok=True)
@@ -71,6 +71,16 @@ def test_builder_failure_falls_back_to_full_context(
 
     assert claude_profile_options(settings, "broken") == ()
     assert "running with full context" in caplog.text
+
+
+def test_agent_name_selects_one_role_only(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, {"slack/general"})
+
+    general = claude_profile_options(settings, "slack", "slack/general")
+    gate = claude_profile_options(settings, "slack", "slack/communication-gate")
+
+    assert general[-1] == str(profile_directory(settings) / "slack_general.md")
+    assert gate == ()
 
 
 def test_missing_builder_falls_back_to_full_context(tmp_path: Path) -> None:

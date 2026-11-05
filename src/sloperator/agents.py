@@ -1312,7 +1312,9 @@ async def run_claude(
     # Passed on resumes as well: settings and the appended prompt are per process, not per session.
     command_options = (
         *command_options,
-        *await asyncio.to_thread(claude_profile_options, settings, context.workflow),
+        *await asyncio.to_thread(
+            claude_profile_options, settings, context.workflow, context.agent_name
+        ),
     )
 
     async def invoke(current: AgentSession, *, resume: bool) -> AgentRunResult:

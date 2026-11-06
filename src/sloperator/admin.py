@@ -627,8 +627,12 @@ const dailyRows=daily.slice().reverse().map(x=>`<tr><td>${esc(x.day)}</td><td>${
 <td>${tokenCount(x.invocations)}</td><td>${tokenCount(x.input_tokens)}</td><td>${tokenCount(x.cache_read_input_tokens)}</td>
 <td>${tokenCount(x.output_tokens)}</td><td><b>${tokenCount(x.total_tokens)}</b></td></tr>`).join("");
 const recentRows=recent.map(x=>`<tr><td>${esc(x.started_at)} UTC</td><td>${esc(x.agent_name)}${x.task_key?` · <a href="https://mu--se.atlassian.net/browse/${esc(x.task_key)}" target="_blank" rel="noreferrer">${esc(x.task_key)}</a>`:""}</td>
-<td><span class="badge ${esc(x.status)}">${esc(x.status)}</span></td><td>${esc(x.usage_source)}</td>
-<td>${tokenCount(x.total_tokens)}</td><td>${tokenCount(x.duration_ms)} ms</td></tr>`).join("");
+<td><span class="badge ${esc(x.status)}" title="${esc(x.outcome||"")}">${esc(x.outcome&&x.outcome!==x.status?x.outcome:x.status)}</span></td><td>${esc(x.usage_source)}</td>
+<td>${tokenCount(x.total_tokens)}</td><td>${tokenCount(x.duration_ms)} ms</td>
+<td title="${esc(x.tool_counts||"")}">${x.tool_calls==null?"":tokenCount(x.tool_calls)}</td>
+<td>${esc((()=>{try{return JSON.parse(x.skills||"[]").join(", ")}catch(e){return ""}})())}</td>
+<td>${x.subagent_calls?`${tokenCount(x.subagent_calls)} · ${tokenCount(x.subagent_tokens)}`:""}</td>
+<td class="sub">${esc((x.workspace_commit||"").slice(0,8))}</td></tr>`).join("");
 document.getElementById("usage").innerHTML=`<details class="card" open><summary>Задачи Jira</summary><div class="table-wrap"><table>
 <thead><tr><th>Задача</th><th>Агент</th><th>Вызовы</th><th>Токены</th><th>Последний запуск</th></tr></thead>
 <tbody>${jiraRows||'<tr><td colspan="5" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
@@ -640,8 +644,8 @@ document.getElementById("usage").innerHTML=`<details class="card" open><summary>
 <tbody>${agentRows||'<tr><td colspan="10" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
 <details class="card" open><summary>Динамика по дням</summary><div class="table-wrap"><table><thead><tr><th>День</th><th>Агент</th><th>Вызовы</th><th>Input</th><th>Cache read</th><th>Output</th><th>Total</th></tr></thead>
 <tbody>${dailyRows||'<tr><td colspan="7" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>
-<details class="card" open><summary>Последние вызовы</summary><div class="table-wrap"><table><thead><tr><th>Время</th><th>Агент</th><th>Статус</th><th>Источник</th><th>Токены</th><th>Длительность</th></tr></thead>
-<tbody>${recentRows||'<tr><td colspan="6" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>`}
+<details class="card" open><summary>Последние вызовы</summary><div class="table-wrap"><table><thead><tr><th>Время</th><th>Агент</th><th>Статус</th><th>Источник</th><th>Токены</th><th>Длительность</th><th>Tool calls</th><th>Скиллы</th><th>Сабагенты · токены</th><th>Коммит</th></tr></thead>
+<tbody>${recentRows||'<tr><td colspan="10" class="sub">Данных пока нет</td></tr>'}</tbody></table></div></details>`}
 async function load(){const d=await api("/state");const signature=JSON.stringify(d.sessions);
 if(signature!==sessionsSignature){renderSessions(d.sessions);sessionsSignature=signature}
 const nextCodexSignature=JSON.stringify([d.codex_sessions,selectedCodex]);

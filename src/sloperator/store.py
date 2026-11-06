@@ -262,6 +262,14 @@ CREATE TABLE IF NOT EXISTS agent_usage_invocations (
     provider_turns INTEGER,
     duration_ms INTEGER,
     error TEXT,
+    tool_calls INTEGER,
+    tool_counts TEXT,
+    skills TEXT,
+    subagent_calls INTEGER,
+    subagent_tokens INTEGER,
+    outcome TEXT,
+    workspace_commit TEXT,
+    sloperator_commit TEXT,
     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     finished_at TEXT
 ) STRICT;
@@ -272,6 +280,16 @@ ON agent_usage_invocations(agent_name, started_at);
 CREATE INDEX IF NOT EXISTS agent_usage_workflow_started_idx
 ON agent_usage_invocations(workflow, role, started_at);
 """
+AGENT_USAGE_ACTIVITY_COLUMNS = (
+    ("tool_calls", "INTEGER"),
+    ("tool_counts", "TEXT"),
+    ("skills", "TEXT"),
+    ("subagent_calls", "INTEGER"),
+    ("subagent_tokens", "INTEGER"),
+    ("outcome", "TEXT"),
+    ("workspace_commit", "TEXT"),
+    ("sloperator_commit", "TEXT"),
+)
 OTP_MESSAGE_RE = re.compile(r"^\s*(?:vpn\s+otp\s+)?\d{6,8}\s*$", re.IGNORECASE)
 REDACTED_OTP = "[redacted one-time code]"
 
@@ -366,6 +384,14 @@ class EventStore:
                 connection.execute("ALTER TABLE jira_task_agent_links ADD COLUMN confluence_page_url TEXT")
             if "confluence_page_version" not in task_columns:
                 connection.execute("ALTER TABLE jira_task_agent_links ADD COLUMN confluence_page_version INTEGER")
+            usage_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(agent_usage_invocations)")
+            }
+            for column, kind in AGENT_USAGE_ACTIVITY_COLUMNS:
+                if column not in usage_columns:
+                    connection.execute(
+                        f"ALTER TABLE agent_usage_invocations ADD COLUMN {column} {kind}"
+                    )
             if "job_name" not in scheduled_columns:
                 connection.execute(
                     "ALTER TABLE scheduled_agent_runs ADD COLUMN job_name TEXT "
@@ -437,6 +463,8 @@ class EventStore:
         provider: str,
         model: str,
         external_session_id: str | None,
+        workspace_commit: str | None = None,
+        sloperator_commit: str | None = None,
     ) -> None:
         """Persist an invocation before the provider process starts."""
         with self._connect() as connection:
@@ -444,12 +472,12 @@ class EventStore:
                 """
                 INSERT INTO agent_usage_invocations(
                     invocation_id, source_run_id, agent_name, workflow, role, source,
-                    provider, model, external_session_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    provider, model, external_session_id, workspace_commit, sloperator_commit
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     invocation_id, source_run_id, agent_name, workflow, role, source,
-                    provider, model, external_session_id,
+                    provider, model, external_session_id, workspace_commit, sloperator_commit,
                 ),
             )
 
@@ -469,6 +497,12 @@ class EventStore:
         duration_ms: int | None = None,
         external_session_id: str | None = None,
         error: str | None = None,
+        outcome: str | None = None,
+        tool_calls: int | None = None,
+        tool_counts: Mapping[str, int] | None = None,
+        skills: Sequence[str] | None = None,
+        subagent_calls: int | None = None,
+        subagent_tokens: int | None = None,
     ) -> None:
         """Complete one invocation, retaining rows even for failures and timeouts."""
         with self._connect() as connection:
@@ -479,13 +513,17 @@ class EventStore:
                     cache_creation_input_tokens = ?, cache_read_input_tokens = ?,
                     output_tokens = ?, total_tokens = ?, cost_usd = ?, provider_turns = ?,
                     duration_ms = ?, external_session_id = COALESCE(?, external_session_id),
-                    error = ?, finished_at = CURRENT_TIMESTAMP
+                    error = ?, outcome = ?, tool_calls = ?, tool_counts = ?, skills = ?,
+                    subagent_calls = ?, subagent_tokens = ?, finished_at = CURRENT_TIMESTAMP
                 WHERE invocation_id = ?
                 """,
                 (
                     status, usage_source, input_tokens, cache_creation_input_tokens,
                     cache_read_input_tokens, output_tokens, total_tokens, cost_usd,
-                    provider_turns, duration_ms, external_session_id, error, invocation_id,
+                    provider_turns, duration_ms, external_session_id, error, outcome or status,
+                    tool_calls, _json(dict(tool_counts)) if tool_counts is not None else None,
+                    _json(list(skills)) if skills is not None else None,
+                    subagent_calls, subagent_tokens, invocation_id,
                 ),
             )
 
@@ -511,6 +549,7 @@ class EventStore:
                        ROUND(AVG(total_tokens), 1) AS avg_tokens,
                        MAX(total_tokens) AS max_tokens,
                        ROUND(AVG(duration_ms), 0) AS avg_duration_ms,
+                       ROUND(AVG(tool_calls), 1) AS avg_tool_calls,
                        ROUND(COALESCE(SUM(cost_usd), 0), 4) AS cost_usd
                 FROM agent_usage_invocations
                 WHERE date(started_at) >= date('now', ?)
@@ -543,6 +582,8 @@ class EventStore:
                        i.cache_creation_input_tokens, i.cache_read_input_tokens,
                        i.output_tokens, i.total_tokens, i.cost_usd, i.provider_turns,
                        i.duration_ms, i.error, i.started_at, i.finished_at,
+                       i.outcome, i.tool_calls, i.tool_counts, i.skills, i.subagent_calls,
+                       i.subagent_tokens, i.workspace_commit, i.sloperator_commit,
                        substr(s.prompt, 1, 2048) AS source_prompt
                 FROM agent_usage_invocations AS i
                 LEFT JOIN scheduled_agent_runs AS s ON s.run_id = i.source_run_id

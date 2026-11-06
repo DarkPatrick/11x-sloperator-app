@@ -24,13 +24,19 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.agent_usage import (
+    ActivityDelta,
     AgentUsageContext,
     TokenUsage,
+    TranscriptActivity,
+    activity_delta,
     context_for_job,
     fallback_context,
+    git_commit,
+    own_commit,
     parse_claude_usage,
     slack_agent_name,
     slack_context,
+    transcript_activity,
     transcript_usage,
 )
 from sloperator.artifacts import artifact_fingerprint
@@ -1208,6 +1214,25 @@ def _usage_context(
     return usage_context or fallback_context(session.channel_id, session.thread_ts)
 
 
+def _invocation_outcome(error: BaseException | None) -> str:
+    """A stable reason for how an invocation ended, finer than completed/failed/cancelled."""
+    if error is None:
+        return "completed"
+    for kind, outcome in (
+        (asyncio.CancelledError, "cancelled"),
+        (ClaudeBudgetExceeded, "budget_stopped"),
+        (ClaudeQuotaExceeded, "quota_exhausted"),
+        (AgentAuthenticationError, "auth_failed"),
+        (AgentTimeoutError, "timeout"),
+        (AgentSteeringInterrupt, "interrupted"),
+        (AgentSessionNotFoundError, "session_lost"),
+        (AgentInfrastructureError, "infrastructure_error"),
+    ):
+        if isinstance(error, kind):
+            return outcome
+    return "failed"
+
+
 async def _recorded_agent_call(
     settings: Settings,
     session: AgentSession,
@@ -1220,6 +1245,17 @@ async def _recorded_agent_call(
     store = EventStore(settings.database_path)
     started = time.monotonic()
     recorded = True
+    transcripts = transcript_directory(settings.agent_workspace)
+    known_session = session.external_session_id or ""
+    activity_before = TranscriptActivity()
+    if session.provider == "claude":
+        # Snapshot here, not only in the caller: every Claude call, including one that fails
+        # after the provider already spent tokens, then gets its usage from the transcript.
+        activity_before = await asyncio.to_thread(transcript_activity, transcripts, known_session)
+        if transcript_before is None and known_session:
+            transcript_before = await asyncio.to_thread(
+                transcript_usage, transcripts, known_session
+            )
     try:
         await asyncio.to_thread(
             store.start_agent_usage_invocation,
@@ -1232,6 +1268,8 @@ async def _recorded_agent_call(
             provider=session.provider,
             model=session.model,
             external_session_id=session.external_session_id,
+            workspace_commit=await asyncio.to_thread(git_commit, settings.agent_workspace),
+            sloperator_commit=own_commit(),
         )
     except Exception:
         recorded = False
@@ -1248,12 +1286,17 @@ async def _recorded_agent_call(
         if recorded:
             usage = result.usage if result is not None else None
             usage_source = result.usage_source if result is not None else None
-            if session.provider == "claude" and transcript_before is not None:
-                after = await asyncio.to_thread(
-                    transcript_usage,
-                    transcript_directory(settings.agent_workspace),
-                    result.session_id if result is not None else session.external_session_id or "",
+            final_session = result.session_id if result is not None else known_session
+            activity = ActivityDelta()
+            if session.provider == "claude":
+                activity = activity_delta(
+                    activity_before
+                    if final_session == known_session
+                    else TranscriptActivity(),
+                    await asyncio.to_thread(transcript_activity, transcripts, final_session),
                 )
+            if session.provider == "claude" and transcript_before is not None:
+                after = await asyncio.to_thread(transcript_usage, transcripts, final_session)
                 delta = after.minus(transcript_before)
                 if delta.total_tokens and (usage is None or delta.total_tokens > usage.total_tokens):
                     usage = TokenUsage(
@@ -1286,6 +1329,14 @@ async def _recorded_agent_call(
                     duration_ms=round((time.monotonic() - started) * 1000),
                     external_session_id=result.session_id if result else None,
                     error=repr(error)[:2000] if error else None,
+                    outcome=_invocation_outcome(error),
+                    tool_calls=activity.tool_calls if session.provider == "claude" else None,
+                    tool_counts=activity.tool_counts if session.provider == "claude" else None,
+                    skills=activity.skills if session.provider == "claude" else None,
+                    subagent_calls=activity.subagents if session.provider == "claude" else None,
+                    subagent_tokens=(
+                        activity.subagent_tokens if session.provider == "claude" else None
+                    ),
                 )
             except Exception:
                 LOGGER.exception("Failed to finish agent usage invocation %s", invocation_id)

@@ -118,7 +118,7 @@ def build_web_health_agent_prompt(
     return f"""\
 Use the `time-series-research` skill to investigate the critical negative anomalies from the
 UG Web Monetisation Health Monitoring report below. Work from
-`/home/egor/projects/ug-ai-analyst`, follow its CLAUDE.md and freshness preflight, and use its
+`/home/egor/projects/ug-ai-analyst`, follow its CLAUDE.md, and use its
 analytics context and data tools.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}

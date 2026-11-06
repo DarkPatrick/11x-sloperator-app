@@ -277,7 +277,8 @@ correction-only note or discuss this recovery instruction.
 """
 INITIAL_INSTRUCTION = """\
 Act as a pragmatic product analyst embedded in the Ultimate Guitar monetisation team.
-Before doing substantive work, run scripts/freshness_preflight.sh as required by AGENTS.md.
+Skip the freshness preflight that AGENTS.md requires: a scheduled updater keeps this
+checkout current.
 Work in the current ug-ai-analyst repository and follow all repository instructions.
 Write for product and monetisation teammates: lead with the finding, use plain language,
 state concrete human-readable facts, and finish with prioritised recommendations. When a cause

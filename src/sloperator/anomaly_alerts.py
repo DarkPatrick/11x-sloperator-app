@@ -713,7 +713,7 @@ def build_monetisation_agent_prompt(
     return f"""\
 Use the `time-series-research` skill to investigate the confirmed UG monetisation anomalies
 below. Work from the current `/home/egor/projects/ug-ai-analyst` repository, follow its
-CLAUDE.md and freshness preflight, and use its analytics context and data tools.
+CLAUDE.md, and use its analytics context and data tools.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 

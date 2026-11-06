@@ -162,7 +162,7 @@ def build_subscription_flow_agent_prompt(incident: SubscriptionFlowIncident) -> 
     return f"""\
 First apply the repository known-incident check. Only if deeper investigation is needed,
 use the `time-series-research` skill for this SERIOUS UG subscription-flow alert.
-Work from `/home/egor/projects/ug-ai-analyst`, follow CLAUDE.md and its freshness preflight,
+Work from `/home/egor/projects/ug-ai-analyst`, follow CLAUDE.md,
 and use the repository's analytics context and data tools.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}

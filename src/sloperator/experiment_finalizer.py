@@ -502,8 +502,7 @@ Execution for the selected experiment:
 3. Use the `ug-experiment-calculator` skill and calculate through the calculator API queue. Never
    call `calculate_exp_info(...)` in-process in this job: a direct run bypasses the queue and can
    read the shared subscription source tables while a queued calculation is rebuilding them
-   (exp 7994 on 2026-10-15 got iOS Free trials without their charges that way). First run the
-   repository freshness preflight. Enqueue with
+   (exp 7994 on 2026-10-15 got iOS Free trials without their charges that way). Enqueue with
    `{CALC_API_COMMAND} calculate <exp_id> --priority {FINALIZER_CALC_PRIORITY} --source {FINALIZER_CALC_SOURCE} --wait --timeout 3300`;
    on this server it reaches the API through the corporate bridge. A higher priority puts the job
    ahead of queued ones, but a running calculation is never pre-empted, so it may wait first.
@@ -641,8 +640,7 @@ Fresh calculation procedure used to establish candidate maturity:
 3. Use the `ug-experiment-calculator` skill and calculate through the calculator API queue. Never
    call `calculate_exp_info(...)` in-process in this job: a direct run bypasses the queue and can
    read the shared subscription source tables while a queued calculation is rebuilding them
-   (exp 7994 on 2026-10-15 got iOS Free trials without their charges that way). First run the
-   repository freshness preflight. Enqueue with
+   (exp 7994 on 2026-10-15 got iOS Free trials without their charges that way). Enqueue with
    `{CALC_API_COMMAND} calculate <exp_id> --priority {FINALIZER_CALC_PRIORITY} --source {FINALIZER_CALC_SOURCE} --wait --timeout 3300`;
    on this server it reaches the API through the corporate bridge. A higher priority puts the job
    ahead of queued ones, but a running calculation is never pre-empted, so it may wait first.

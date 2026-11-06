@@ -38,7 +38,7 @@ def build_payment_layer_agent_prompt(alert_text: str) -> str:
     """Build the first Claude turn for a serious payment-path incident."""
     return f"""\
 Use the `time-series-research` skill to investigate this serious UG payment-layer alert.
-Work from `/home/egor/projects/ug-ai-analyst`, follow CLAUDE.md and its freshness preflight,
+Work from `/home/egor/projects/ug-ai-analyst`, follow CLAUDE.md,
 and use the repository's analytics context and data tools.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}

@@ -16,7 +16,7 @@ def recent_analysis_reuse_policy(
         else "return exactly this one line:"
     )
     return f"""\
-Before the freshness preflight, repository research, or any data query, check whether this exact
+Before repository research or any data query, check whether this exact
 alert was already investigated in Slack during the previous five days:
 1. Use the available Slack read/search tools to read channel `{channel_id}` back to at least
    `now - 5 days`; paginate rather than relying only on the first page. Inspect candidate alert

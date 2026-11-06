@@ -102,8 +102,8 @@ def build_experiment_config_prompt(payload: dict[str, Any], *, interactive: bool
     )
     return f"""\
 This is an automated review of one newly started UG monetisation experiment. Work from the
-ug-ai-analyst repository and follow its CLAUDE.md, skills, hooks, freshness preflight, and
-source-quality rules.
+ug-ai-analyst repository and follow its CLAUDE.md, skills, hooks, and source-quality
+rules.
 
 {AUTOMATED_SESSION_REPOSITORY_POLICY}
 

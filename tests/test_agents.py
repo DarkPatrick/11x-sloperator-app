@@ -1486,3 +1486,20 @@ async def test_required_artifact_text_only_answer_is_asked_to_package_evidence(
         markdown_text="Ложная тревога: бот-трафик.",
     )
     upload.assert_awaited_once()
+
+
+def test_slack_worker_prompt_does_not_repeat_the_response_style() -> None:
+    from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE, slack_worker_prompt
+
+    plain = slack_worker_prompt("Investigate.")
+    carried = slack_worker_prompt(f"{AUTOMATED_RESPONSE_STYLE}\n\nInvestigate.")
+
+    assert plain.count("AUTOMATED RESPONSE STYLE") == 1
+    assert carried.count("AUTOMATED RESPONSE STYLE") == 1
+
+
+def test_agent_prompts_do_not_ask_to_run_the_preflight() -> None:
+    from sloperator.automated_session_policy import AUTOMATED_SESSION_REPOSITORY_POLICY
+
+    assert "Do not run `scripts/freshness_preflight.sh`" in AUTOMATED_SESSION_REPOSITORY_POLICY
+    assert "run scripts/freshness_preflight.sh" not in CLAUDE_INITIAL_INSTRUCTION

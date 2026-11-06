@@ -3,6 +3,7 @@ import datetime as dt
 from sloperator.claude_usage import ClaudeUsage
 from sloperator.jira_task_automation import (
     confluence_destination,
+    is_reserved_experiment_task,
     latest_external_confluence_activity,
     latest_external_confluence_comment,
     latest_external_jira_comment,
@@ -364,3 +365,15 @@ def test_is_reassigned_away() -> None:
     assert not is_reassigned_away(SimpleNamespace(assignee_account_id=SERVICE_ACCOUNT_ID))
     assert is_reassigned_away(SimpleNamespace(assignee_account_id=""))
     assert is_reassigned_away(SimpleNamespace(assignee_account_id="human"))
+
+
+def test_confluence_destination_routes_mysql_docs_tasks() -> None:
+    parent, template = confluence_destination("MySQL docs: update u_guitarcom.songs_base documentation")
+    assert parent.endswith("/852018521/MySQL")
+    assert template is not None and "mysql-table-docs" in template
+
+
+def test_mysql_docs_task_is_not_reserved_by_a_table_name() -> None:
+    assert not is_reserved_experiment_task("MySQL docs: u_guitarcom.survey_results")
+    assert is_reserved_experiment_task("Experiment results for 8174")
+

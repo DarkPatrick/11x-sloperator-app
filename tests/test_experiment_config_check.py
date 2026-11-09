@@ -562,3 +562,14 @@ def test_output_cap_is_a_ceiling_shared_by_prompt_and_gate() -> None:
     assert verdict == "ISSUES"
     with pytest.raises(ValueError):
         normalize_experiment_config_result(f"{body}{'y' * 100}\nEXPERIMENT_CONFIG_VERDICT: ISSUES")
+
+
+def test_prompt_covers_variation_changes_and_untargeted_clients() -> None:
+    payload = {"recipient_id": "U1", "experiments": [{"id": 1, "name": "x"}]}
+    prompt = build_experiment_config_prompt(payload, interactive=False)
+
+    assert "context/ab-experiment-split-mechanics.md" in prompt
+    assert "never claim that a change re-shuffles or reassigns them" in prompt
+    assert "first appearance of every variation id" in prompt
+    assert "A client the project does not target" in prompt
+    assert "Never call such a client harmless" in prompt

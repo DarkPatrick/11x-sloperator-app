@@ -134,12 +134,26 @@ relevant application source/release history. Perform all of these checks:
    source code, then verify the shipped version directly against the authoritative published
    release history for the relevant platform. Never use git tags as evidence of an app release or
    infer the released version from tags: tags are not precise enough to establish what shipped.
+   Also compare the admin `clients` and `clients_options` with the platforms the project targets.
+   A client the project does not target (for example Android on an iOS-only project) is a required
+   fix even when the code never activates the experiment there: its users are still distributed
+   into the experiment's groups. Never call such a client harmless.
 3. Check that the configured activation event exactly matches the project table and the implemented
    exposure/activation point. Distinguish assignment from real exposure and flag uncertainty.
 4. Check that the number and identifiers of test branches/variations in the admin configuration
    match the project table. Treat control as a branch and detect missing, extra, or duplicated ids.
    When a branch is missing or extra, read the implementation yourself to find which mechanic each
    variation id serves, and name the affected branch from that code.
+   Before writing anything about what changing the number of variations does, read
+   `context/ab-experiment-split-mechanics.md` section "Sticky client caches". Users already
+   assigned keep their cached variation; never claim that a change re-shuffles or reassigns them.
+   The real damage of a change after the start is that the new or removed arm holds a different,
+   later population, so the arms stop being comparable: recommend a restart (or reading results
+   only from the change) for any variation fix made after the start.
+   When the experiment has already started, also find the first appearance of every variation id
+   in its activation events since `date_start`. A variation that first appears clearly later than
+   the others means the count was changed during the run: report it even when the admin row now
+   matches the project, with the time of the change.
 5. Compare every place where the project defines who is in the test: Hypothesis, Solution /
    Audience, the design table, Analytics > Activation Conditions and the activation-event comment.
    When they disagree (for example "active paid plan" in one place and a trial or any-plan trigger
@@ -149,6 +163,8 @@ relevant application source/release history. Perform all of these checks:
 6. Decide whether there is a material, actionable configuration/project mismatch that the starter
    should fix. This is not an experiment-health report: do not analyse early SRM, reach pace,
    experiment overlaps, metric movement, subscriptions, rendered-price evidence, or runtime data.
+   The one exception is the first appearance of each variation in the activation events (check 4),
+   which shows a configuration change made during the run.
 
 This review runs silently before any Slack message exists. The Slack recipient needs only changes
 they should make, never an audit trail. Apply these output rules strictly:

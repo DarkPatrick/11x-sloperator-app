@@ -202,6 +202,9 @@ async def test_epic_setup_failure_mentions_the_epic_author(monkeypatch) -> None:
     issue_author = AsyncMock(return_value="Anna Petrova")
     monkeypatch.setattr(JiraRestReader, "issue_author", issue_author)
     monkeypatch.setattr(JiraRestReader, "issue_parent_key", AsyncMock(return_value="UMN-12310"))
+    monkeypatch.setattr(
+        "sloperator.automation_failure.release_task", AsyncMock(return_value=None)
+    )
     lookup = AsyncMock(return_value="UAUTHOR")
     monkeypatch.setattr(DEFAULT_SLACK_MENTION_RESOLVER, "user_id_for_name", lookup)
 

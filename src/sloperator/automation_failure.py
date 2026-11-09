@@ -2,6 +2,8 @@
 
 Every failure of the design, analytics and finalizer jobs is addressed to the author of the
 task's epic (the person who can fix the project setup) and carries a Jira link for every task key.
+Before the post goes out, a task the run had already started is returned to its queue, so the
+selector can pick it again once the problem is fixed.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from sloperator.config import Settings
 from sloperator.experiment_design_selector import JiraRestReader, SelectionError
+from sloperator.jira_task_release import release_task
 from sloperator.slack_identity import DEFAULT_SLACK_MENTION_RESOLVER
 from sloperator.team_channel import first_task_key
 
@@ -83,12 +86,15 @@ async def address_failure(
     task_key: str | None = None,
     epic_key: str | None = None,
 ) -> str:
-    """Address a failure to the epic author and link every Jira key in it.
+    """Release the started task, address the failure to the epic author, link every Jira key.
 
     The failure prefix stays on the first line, so the daily digest still recognises the post.
     """
     message = message.strip()
     key = task_key or first_task_key(message)
+    restored = await release_task(settings, key)
+    if restored:
+        message += f"\n{key} was returned to {restored}; the job will take it again once fixed."
     epic = epic_key or (await epic_key_for(settings, key) if key else None)
     author = await epic_author_mention(client, settings, epic) if epic else None
     linked = link_jira_keys(message, settings.jira_url)

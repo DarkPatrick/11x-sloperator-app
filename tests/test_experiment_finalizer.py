@@ -651,6 +651,9 @@ async def test_finalizer_failure_is_addressed_to_the_epic_author(monkeypatch) ->
     author = AsyncMock(return_value="<@UAUTHOR>")
     monkeypatch.setattr("sloperator.automation_failure.epic_key_for", epic)
     monkeypatch.setattr("sloperator.automation_failure.epic_author_mention", author)
+    monkeypatch.setattr(
+        "sloperator.automation_failure.release_task", AsyncMock(return_value="To Do")
+    )
 
     await publish_failure(
         client, settings, "Experiment finalisation failed: Results task UMN-101 has no page"
@@ -660,7 +663,9 @@ async def test_finalizer_failure_is_addressed_to_the_epic_author(monkeypatch) ->
     author.assert_awaited_once_with(client, settings, "UMN-100")
     assert client.chat_postMessage.await_args.kwargs["markdown_text"] == (
         "<@UAUTHOR>, please take a look. Experiment finalisation failed: Results task "
-        "[UMN-101](https://mu--se.atlassian.net/browse/UMN-101) has no page"
+        "[UMN-101](https://mu--se.atlassian.net/browse/UMN-101) has no page\n"
+        "[UMN-101](https://mu--se.atlassian.net/browse/UMN-101) was returned to To Do; "
+        "the job will take it again once fixed."
     )
 
 

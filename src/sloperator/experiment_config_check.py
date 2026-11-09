@@ -22,6 +22,10 @@ LOGGER = logging.getLogger(__name__)
 
 METADATA_EVENT_TYPE = "ug_experiment_config_check"
 VERDICT_MARKER = "EXPERIMENT_CONFIG_VERDICT:"
+# Ceiling for the starter's notification, not a target length:
+# most reviews need one to three bullets.
+MAX_VISIBLE_CHARS = 3_500
+MAX_BULLETS = 6
 # A rejected answer goes back to the same worker session this many times before the worker's own
 # text is published as is: the ISSUES verdict already proves the review finished, and a dropped
 # notification leaves a misconfigured experiment collecting data unnoticed.
@@ -164,7 +168,12 @@ they should make, never an audit trail. Apply these output rules strictly:
   starter and is always reported.
 - Do not include skill/context disclosure lines in the Slack-facing content; Sloperator strips any
   mandatory internal disclosure lines before publication.
-- Keep the visible result under 2,500 characters and use at most four bullets total.
+- Keep the visible result under {MAX_VISIBLE_CHARS:,} characters and use at most
+  {MAX_BULLETS} bullets.
+  This is a ceiling, not a target: most reviews need one to three bullets, so write only what
+  the starter must change. When several issues compete for space, put first whatever stops
+  the experiment from running correctly at all (code not merged or not shipped, a wrong app
+  version, a missing branch), then segments, then activation, then the project's wording.
 - No archive is attached by this workflow. Never promise or refer to an attached archive.
 - Put each experiment title on its own line, followed by `Проект: <URL>` and `Админка: <URL>`.
 
@@ -194,7 +203,7 @@ def normalize_experiment_config_result(text: str) -> tuple[str, str]:
             if verdict == "ISSUES":
                 if any(fragment in visible_text for fragment in FORBIDDEN_OUTPUT_FRAGMENTS):
                     raise ValueError("agent response contains forbidden low-value content")
-                if len(visible_text) > 2_500:
+                if len(visible_text) > MAX_VISIBLE_CHARS:
                     raise ValueError(
                         "agent response is too long for experiment-config notification"
                     )
@@ -203,7 +212,7 @@ def normalize_experiment_config_result(text: str) -> tuple[str, str]:
     if any(marker in visible_text for marker in ISSUE_SECTION_MARKERS):
         if any(fragment in visible_text for fragment in FORBIDDEN_OUTPUT_FRAGMENTS):
             raise ValueError("agent response contains forbidden low-value content")
-        if len(visible_text) > 2_500:
+        if len(visible_text) > MAX_VISIBLE_CHARS:
             raise ValueError("agent response is too long for experiment-config notification")
         return "ISSUES", visible_text
     raise ValueError("agent response has no experiment-config verdict")
@@ -482,7 +491,8 @@ class ExperimentConfigResponder:
             output_requirements=AUTOMATED_RESPONSE_STYLE
             + "\nAutomated experiment configuration notification. "
             "No attachment will be uploaded. Return only the Russian issue body, "
-            "under 2,500 characters, with at most four bullets. Preserve the complete "
+            f"under {MAX_VISIBLE_CHARS:,} characters (a ceiling, not a target), with at most "
+            f"{MAX_BULLETS} bullets. Preserve the complete "
             "copy-paste configuration code verbatim. Do not add an introduction or "
             "experiment links: the publisher adds them separately. "
             "Remove evidence walkthroughs, passed checks and archive claims.",

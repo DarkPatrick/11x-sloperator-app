@@ -543,3 +543,22 @@ def test_prompt_reports_project_audience_contradictions() -> None:
     assert "Compare every place where the project defines who is in the test" in prompt
     assert "never widen the filter to `all` because the page is unclear" in prompt
     assert "is not uncertainty: it is a fix for the" in prompt
+
+
+def test_output_cap_is_a_ceiling_shared_by_prompt_and_gate() -> None:
+    from sloperator.experiment_config_check import (
+        MAX_VISIBLE_CHARS,
+        normalize_experiment_config_result,
+    )
+
+    payload = {"recipient_id": "U1", "experiments": [{"id": 1, "name": "x"}]}
+    prompt = build_experiment_config_prompt(payload, interactive=False)
+    assert f"under {MAX_VISIBLE_CHARS:,} characters" in prompt
+    assert "This is a ceiling, not a target" in prompt
+    assert "code not merged or not shipped" in prompt
+
+    body = "*Нужно исправить*\n- " + "x" * (MAX_VISIBLE_CHARS - 40)
+    verdict, _ = normalize_experiment_config_result(f"{body}\nEXPERIMENT_CONFIG_VERDICT: ISSUES")
+    assert verdict == "ISSUES"
+    with pytest.raises(ValueError):
+        normalize_experiment_config_result(f"{body}{'y' * 100}\nEXPERIMENT_CONFIG_VERDICT: ISSUES")

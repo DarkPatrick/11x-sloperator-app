@@ -534,3 +534,12 @@ async def test_failed_review_is_not_reused_and_can_be_resubmitted() -> None:
         await responder.review_and_publish(payload, AsyncMock(), timeout_seconds=300)
     assert await responder.review_and_publish(payload, AsyncMock(), timeout_seconds=300) is False
     assert agent.execute_once.await_count == 2
+
+
+def test_prompt_reports_project_audience_contradictions() -> None:
+    payload = {"recipient_id": "U1", "experiments": [{"id": 1, "name": "x"}]}
+    prompt = build_experiment_config_prompt(payload, interactive=False)
+
+    assert "Compare every place where the project defines who is in the test" in prompt
+    assert "never widen the filter to `all` because the page is unclear" in prompt
+    assert "is not uncertainty: it is a fix for the" in prompt

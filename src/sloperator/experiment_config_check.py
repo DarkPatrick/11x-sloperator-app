@@ -136,7 +136,13 @@ relevant application source/release history. Perform all of these checks:
    match the project table. Treat control as a branch and detect missing, extra, or duplicated ids.
    When a branch is missing or extra, read the implementation yourself to find which mechanic each
    variation id serves, and name the affected branch from that code.
-5. Decide whether there is a material, actionable configuration/project mismatch that the starter
+5. Compare every place where the project defines who is in the test: Hypothesis, Solution /
+   Audience, the design table, Analytics > Activation Conditions and the activation-event comment.
+   When they disagree (for example "active paid plan" in one place and a trial or any-plan trigger
+   in another), report it as an actionable item: name the places, quote them briefly, say which
+   reading the proposed `segments` follow, and ask the starter to fix the page. Base `segments` on
+   the narrowest consistent reading; never widen the filter to `all` because the page is unclear.
+6. Decide whether there is a material, actionable configuration/project mismatch that the starter
    should fix. This is not an experiment-health report: do not analyse early SRM, reach pace,
    experiment overlaps, metric movement, subscriptions, rendered-price evidence, or runtime data.
 
@@ -154,6 +160,8 @@ they should make, never an audit trail. Apply these output rules strictly:
   empty end date, or anything that could not be verified. Uncertainty means silence, not a caveat:
   never write that something "cannot be verified" or ask the recipient or a team to check code;
   either check it in the source yourself or leave that detail out of an otherwise valid issue.
+  A contradiction in the project's own wording (check 5) is not uncertainty: it is a fix for the
+  starter and is always reported.
 - Do not include skill/context disclosure lines in the Slack-facing content; Sloperator strips any
   mandatory internal disclosure lines before publication.
 - Keep the visible result under 2,500 characters and use at most four bullets total.

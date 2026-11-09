@@ -21,6 +21,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
     LOCAL_CONFLUENCE_USER_DIRECTORY,
 )
+from sloperator.automation_failure import address_failure, epic_author_mention, link_jira_keys
 from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
 from sloperator.experiment_design_selector import (
@@ -37,7 +38,6 @@ from sloperator.jira_agent_policy import (
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
 )
-from sloperator.slack_identity import DEFAULT_SLACK_MENTION_RESOLVER
 from sloperator.team_channel import channel_for_task, first_task_key
 
 LOGGER = logging.getLogger(__name__)
@@ -45,8 +45,7 @@ NO_OP_RESULT = "No eligible experiment-design task was found."
 PREPARED_RE = re.compile(r"DESIGN_PREPARED: (?P<task>UMN-\d+) \| (?P<epic>UMN-\d+)")
 FAILURE_PREFIX = "Experiment design automation failed:"
 TASK_LINK_RE = re.compile(r"mu--se\.atlassian\.net/browse/(?P<task>UMN-\d+)")
-# A bare Jira key (optionally in backticks) that is not already part of a URL or a link label.
-BARE_JIRA_KEY_RE = re.compile(r"`(UMN-\d+)`|(?<![\w/\[|.-])(UMN-\d+)(?![\w\]-])")
+__all__ = ["epic_author_mention", "link_jira_keys"]
 
 SELECTION_RULES = (
     ISSUE_SELECTION_POLICY
@@ -370,8 +369,11 @@ async def publish_notification(
     """Publish one verified reviewer notification and attach its session."""
     notification = normalize_review_notification(run.text, task_key)
     if notification.startswith(FAILURE_PREFIX):
-        notification = task_failure(notification, task_key)
-    notification = link_jira_keys(notification, settings.jira_url)
+        notification = await address_failure(
+            client, settings, task_failure(notification, task_key), task_key=task_key
+        )
+    else:
+        notification = link_jira_keys(notification, settings.jira_url)
     published_run = replace(run, text=notification)
     channel = await channel_for_task(settings, task_key, settings.experiment_design_channel)
     response = await client.chat_postMessage(
@@ -383,17 +385,6 @@ async def publish_notification(
     channel_id = response.get("channel", channel)
     await agent.attach_session(channel_id, response["ts"], published_run)
     return notification
-
-
-def link_jira_keys(text: str, jira_url: str) -> str:
-    """Embed a Jira link into every bare task key so each task in a post is one click away."""
-    base = jira_url.rstrip("/")
-
-    def link(match: re.Match[str]) -> str:
-        key = match.group(1) or match.group(2)
-        return f"[{key}]({base}/browse/{key})"
-
-    return BARE_JIRA_KEY_RE.sub(link, text)
 
 
 def task_failure(message: str, task_key: str) -> str:
@@ -414,7 +405,7 @@ async def publish_failure(
         channel=await channel_for_task(
             settings, first_task_key(message), settings.experiment_design_channel
         ),
-        markdown_text=link_jira_keys(message, settings.jira_url),
+        markdown_text=await address_failure(client, settings, message),
         unfurl_links=False,
         unfurl_media=False,
     )
@@ -535,11 +526,7 @@ async def select_with_project_page(
                 project_page_id=await resolve_selected_project_page(settings, selected),
             )
         except EpicSetupError as error:
-            message = f"{failure_prefix} {selected.task_key}: {error}"
-            author = await epic_author_mention(client, settings, selected.epic_key)
-            if author:
-                message += f" Epic author: {author}"
-            await report(client, settings, message)
+            await report(client, settings, f"{failure_prefix} {selected.task_key}: {error}")
             skipped_epics.add(selected.epic_key)
             LOGGER.info(
                 "Skipping %s task %s: epic %s setup is broken; looking for the next task",
@@ -555,27 +542,6 @@ async def resolve_selected_project_page(settings: Settings, selected: DesignCand
         raise SelectionError("Jira credentials are unavailable to project-page resolver")
     jira = JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
     return await resolve_project_page_id(jira, selected.epic_key)
-
-
-async def epic_author_mention(
-    client: AsyncWebClient, settings: Settings, epic_key: str
-) -> str | None:
-    """Mention the epic's author, who can fix its setup; fail open so the failure still posts."""
-    if not settings.jira_username or not settings.jira_api_token:
-        return None
-    try:
-        jira = JiraRestReader(settings.jira_url, settings.jira_username, settings.jira_api_token)
-        name = await jira.issue_author(epic_key)
-        if not name:
-            return None
-        user_id = await DEFAULT_SLACK_MENTION_RESOLVER.user_id_for_name(client, name)
-    except Exception as error:
-        LOGGER.warning(
-            "Could not resolve the author of epic %s: %s", epic_key, type(error).__name__
-        )
-        return None
-    # An unresolved name stays plain text; the delivery boundary may still turn it into a mention.
-    return f"<@{user_id}>" if user_id else name
 
 
 async def select_from_jira(

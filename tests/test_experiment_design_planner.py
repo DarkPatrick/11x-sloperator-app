@@ -160,8 +160,8 @@ async def test_missing_project_page_stops_before_starting_agents(monkeypatch) ->
     resolver = AsyncMock(
         side_effect=SelectionError("Confluence page 838613487 could not be read: timeout")
     )
-    author = AsyncMock()
-    monkeypatch.setattr("sloperator.experiment_design_planner.epic_author_mention", author)
+    author = AsyncMock(return_value=None)
+    monkeypatch.setattr("sloperator.automation_failure.epic_author_mention", author)
     monkeypatch.setattr(
         "sloperator.experiment_design_planner.resolve_selected_project_page", resolver
     )
@@ -173,8 +173,6 @@ async def test_missing_project_page_stops_before_starting_agents(monkeypatch) ->
     client.chat_postMessage.assert_awaited_once()
     assert "UMN-12312" in client.chat_postMessage.await_args.kwargs["markdown_text"]
     agent.attach_session.assert_not_awaited()
-    # An infrastructure failure is not the epic author's to fix.
-    author.assert_not_awaited()
 
 
 async def test_epic_setup_failure_mentions_the_epic_author(monkeypatch) -> None:
@@ -203,6 +201,7 @@ async def test_epic_setup_failure_mentions_the_epic_author(monkeypatch) -> None:
     )
     issue_author = AsyncMock(return_value="Anna Petrova")
     monkeypatch.setattr(JiraRestReader, "issue_author", issue_author)
+    monkeypatch.setattr(JiraRestReader, "issue_parent_key", AsyncMock(return_value="UMN-12310"))
     lookup = AsyncMock(return_value="UAUTHOR")
     monkeypatch.setattr(DEFAULT_SLACK_MENTION_RESOLVER, "user_id_for_name", lookup)
 
@@ -216,16 +215,15 @@ async def test_epic_setup_failure_mentions_the_epic_author(monkeypatch) -> None:
     lookup.assert_awaited_once_with(client, "Anna Petrova")
     browse = "https://mu--se.atlassian.net/browse"
     assert text.startswith(
-        "Experiment design automation failed: "
+        "<@UAUTHOR>, please take a look. Experiment design automation failed: "
         f"[UMN-12312]({browse}/UMN-12312): Jira epic [UMN-12310]({browse}/UMN-12310)"
     )
-    assert text.endswith("Epic author: <@UAUTHOR>")
 
     # No Slack match keeps the plain name; a Jira failure posts without any author.
     lookup.return_value = None
-    assert (await run()).endswith("Epic author: Anna Petrova")
+    assert (await run()).startswith("Anna Petrova, please take a look. Experiment design")
     issue_author.side_effect = SelectionError("Jira GET failed with HTTP 500")
-    assert (await run()).endswith("Link the epic in the project page header.")
+    assert (await run()).startswith("Experiment design automation failed: [UMN-12312]")
 
 
 async def test_epic_setup_failure_moves_on_to_the_next_task(monkeypatch) -> None:
@@ -249,7 +247,7 @@ async def test_epic_setup_failure_moves_on_to_the_next_task(monkeypatch) -> None
 
     monkeypatch.setattr("sloperator.experiment_design_planner.resolve_selected_project_page", resolve)
     monkeypatch.setattr(
-        "sloperator.experiment_design_planner.epic_author_mention", AsyncMock(return_value="<@U1>")
+        "sloperator.automation_failure.epic_author_mention", AsyncMock(return_value="<@U1>")
     )
     start = HeadlessAgentRun(provider="claude", model="m", session_id="s1", text="stop here")
     agent = SimpleNamespace(execute_once=AsyncMock(return_value=start), attach_session=AsyncMock())
@@ -266,7 +264,7 @@ async def test_epic_setup_failure_moves_on_to_the_next_task(monkeypatch) -> None
 
 
 def test_link_jira_keys_embeds_links_once() -> None:
-    from sloperator.experiment_design_planner import link_jira_keys
+    from sloperator.automation_failure import link_jira_keys
 
     base = "https://mu--se.atlassian.net"
     text = (

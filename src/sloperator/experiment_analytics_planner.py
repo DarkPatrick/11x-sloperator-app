@@ -19,11 +19,11 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
     LOCAL_CONFLUENCE_USER_DIRECTORY,
 )
+from sloperator.automation_failure import address_failure, link_jira_keys
 from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
 from sloperator.experiment_design_planner import (
     AgentSubmitter,
-    link_jira_keys,
     next_run_at,
     select_with_project_page,
 )
@@ -318,8 +318,11 @@ async def publish_notification(
 ) -> str:
     notification = normalize_review_notification(run.text, task_key)
     if notification.startswith(FAILURE_PREFIX):
-        notification = task_failure(notification, task_key)
-    notification = link_jira_keys(notification, settings.jira_url)
+        notification = await address_failure(
+            client, settings, task_failure(notification, task_key), task_key=task_key
+        )
+    else:
+        notification = link_jira_keys(notification, settings.jira_url)
     channel = await channel_for_task(settings, task_key, settings.experiment_analytics_channel)
     response = await client.chat_postMessage(
         channel=channel,
@@ -348,7 +351,7 @@ async def publish_failure(client: AsyncWebClient, settings: Settings, message: s
         channel=await channel_for_task(
             settings, first_task_key(message), settings.experiment_analytics_channel
         ),
-        markdown_text=link_jira_keys(message, settings.jira_url),
+        markdown_text=await address_failure(client, settings, message),
         unfurl_links=False,
         unfurl_media=False,
     )

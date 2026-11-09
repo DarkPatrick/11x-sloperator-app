@@ -127,17 +127,19 @@ async def test_analytics_epic_setup_failure_tags_author_and_moves_on(monkeypatch
         )),
     )
     author = AsyncMock(return_value="<@UAUTHOR>")
-    monkeypatch.setattr("sloperator.experiment_design_planner.epic_author_mention", author)
+    monkeypatch.setattr("sloperator.automation_failure.epic_author_mention", author)
+    monkeypatch.setattr(
+        "sloperator.automation_failure.epic_key_for", AsyncMock(return_value=CANDIDATE.epic_key)
+    )
 
     assert await run_once(client, agent, settings, selector) is None
 
     author.assert_awaited_once_with(client, settings, CANDIDATE.epic_key)
     text = client.chat_postMessage.await_args.kwargs["markdown_text"]
     assert text.startswith(
-        "Experiment analytics automation failed: "
+        "<@UAUTHOR>, please take a look. Experiment analytics automation failed: "
         f"[{CANDIDATE.task_key}](https://mu--se.atlassian.net/browse/{CANDIDATE.task_key}):"
     )
-    assert text.endswith("Epic author: <@UAUTHOR>")
     assert selector.await_args_list[1].kwargs == {
         "excluded_epic_keys": frozenset({CANDIDATE.epic_key})
     }

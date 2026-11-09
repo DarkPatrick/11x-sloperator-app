@@ -21,6 +21,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
     LOCAL_CONFLUENCE_USER_DIRECTORY,
 )
+from sloperator.automation_failure import address_failure
 from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
 from sloperator.experiment_design_selector import (
@@ -35,7 +36,7 @@ from sloperator.jira_agent_policy import (
     WORKER_JIRA_POLICY,
 )
 from sloperator.project_page_people import ensure_header_mentions
-from sloperator.team_channel import channel_for_task
+from sloperator.team_channel import channel_for_task, first_task_key
 
 LOGGER = logging.getLogger(__name__)
 NO_OP_PREFIX = "No eligible experiment"
@@ -929,6 +930,9 @@ async def run_once(
     for forecast in dict.fromkeys((*forecasts, *recovered_forecasts)):
         LOGGER.info("Experiment finalizer forecast: %s", forecast)
     start_run = replace(start_run, text=terminal)
+    if is_finalization_failure(start_run.text):
+        await publish_failure(client, settings, start_run.text)
+        raise InvalidFinalizationNotification(start_run.text)
     if start_run.text.strip().startswith(NO_OP_PREFIX):
         no_op_run = replace(start_run, text=NO_OP_NOTIFICATION)
         return await publish_run(client, agent, settings, no_op_run)
@@ -948,15 +952,9 @@ async def run_preparation_from_started_run(
         project_page_id = await validate_started_page(settings, start_run.text)
     except SelectionError as error:
         started = STARTED_RE.fullmatch(start_run.text.strip())
-        await client.chat_postMessage(
-            channel=await channel_for_task(
-                settings,
-                started.group(4) if started else None,
-                settings.experiment_finalizer_channel,
-            ),
-            markdown_text=f"Experiment finalisation failed: {error}",
-            unfurl_links=False,
-            unfurl_media=False,
+        await publish_failure(
+            client, settings, f"Experiment finalisation failed: {error}",
+            task_key=started.group(4) if started else None,
         )
         raise
     return await run_preparation(client, agent, settings, start_run, project_page_id)
@@ -1047,7 +1045,14 @@ async def run_preparation(
         accept_result=is_preparation_result,
     )
     prepared_text = prepared_run.text.strip()
-    if prepared_text.startswith(NO_OP_PREFIX) or prepared_text.startswith(FAILURE_PREFIXES):
+    if prepared_text.startswith(FAILURE_PREFIXES):
+        started_match = STARTED_RE.fullmatch(started_run.text.strip())
+        await publish_failure(
+            client, settings, prepared_text,
+            task_key=started_match.group(4) if started_match else None,
+        )
+        raise InvalidFinalizationNotification(prepared_text)
+    if prepared_text.startswith(NO_OP_PREFIX):
         raise InvalidFinalizationNotification(prepared_text)
     if PREPARED_RE.match(prepared_text) is None:
         raise InvalidFinalizationNotification("Preparation agent returned no FINALIZATION_PREPARED marker")
@@ -1104,7 +1109,9 @@ async def publish_run(
 ) -> str:
     """Publish and attach a completed or restart-recovered finalizer run."""
     notification = normalize_finalization_notification(run.text)
-    if notification != NO_OP_NOTIFICATION and not notification.startswith(FAILURE_PREFIXES):
+    if notification.startswith(FAILURE_PREFIXES):
+        notification = await address_failure(client, settings, notification, task_key=task_key)
+    elif notification != NO_OP_NOTIFICATION:
         heading_page_ids = confluence_page_ids(notification.splitlines()[0])
         page_id = project_page_id or (
             next(iter(heading_page_ids)) if len(heading_page_ids) == 1 else None
@@ -1139,6 +1146,23 @@ async def publish_run(
         published_run,
     )
     return notification
+
+
+async def publish_failure(
+    client: AsyncWebClient,
+    settings: Settings,
+    message: str,
+    *,
+    task_key: str | None = None,
+) -> None:
+    """Post a finalizer failure addressed to the epic author of its Results task."""
+    task_key = task_key or first_task_key(message)
+    await client.chat_postMessage(
+        channel=await channel_for_task(settings, task_key, settings.experiment_finalizer_channel),
+        markdown_text=await address_failure(client, settings, message, task_key=task_key),
+        unfurl_links=False,
+        unfurl_media=False,
+    )
 
 
 async def find_existing_publication(

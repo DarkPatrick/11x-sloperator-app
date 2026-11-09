@@ -631,7 +631,37 @@ async def test_failed_or_unverified_start_never_runs_worker(start_text: str) -> 
     with pytest.raises(InvalidFinalizationNotification):
         await run_once(client, agent, settings)
     assert agent.execute_once.await_count == 1
-    client.chat_postMessage.assert_not_awaited()
+    if start_text.startswith("Experiment finalisation failed:"):
+        # A failed start is still reported in Slack; an unverified one is not.
+        client.chat_postMessage.assert_awaited_once()
+        assert client.chat_postMessage.await_args.kwargs["markdown_text"] == start_text
+    else:
+        client.chat_postMessage.assert_not_awaited()
+
+
+async def test_finalizer_failure_is_addressed_to_the_epic_author(monkeypatch) -> None:
+    from sloperator.experiment_finalizer import publish_failure
+
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="test", app_token="test",
+        experiment_finalizer_channel="CFINAL",
+    )
+    epic = AsyncMock(return_value="UMN-100")
+    author = AsyncMock(return_value="<@UAUTHOR>")
+    monkeypatch.setattr("sloperator.automation_failure.epic_key_for", epic)
+    monkeypatch.setattr("sloperator.automation_failure.epic_author_mention", author)
+
+    await publish_failure(
+        client, settings, "Experiment finalisation failed: Results task UMN-101 has no page"
+    )
+
+    epic.assert_awaited_once_with(settings, "UMN-101")
+    author.assert_awaited_once_with(client, settings, "UMN-100")
+    assert client.chat_postMessage.await_args.kwargs["markdown_text"] == (
+        "<@UAUTHOR>, please take a look. Experiment finalisation failed: Results task "
+        "[UMN-101](https://mu--se.atlassian.net/browse/UMN-101) has no page"
+    )
 
 
 async def test_no_candidate_stops_at_reviewer_and_attaches_only_owner() -> None:

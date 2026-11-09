@@ -33,8 +33,10 @@ from sloperator.experiment_finalizer import FAILURE_PREFIXES as FINALIZATION_FAI
 from sloperator.experiment_finalizer import NO_OP_PREFIX as FINALIZATION_NO_OP_PREFIX
 from sloperator.experiment_finalizer import (
     QUEUE_FORECAST_RESULT_PREFIX,
-    SELECTION_RULES as FINALIZATION_SELECTION_RULES,
     UPCOMING_QUEUE_FORECAST_POLICY,
+)
+from sloperator.experiment_finalizer import (
+    SELECTION_RULES as FINALIZATION_SELECTION_RULES,
 )
 from sloperator.experiment_finalizer import next_run_at as next_finalization_run_at
 from sloperator.jira_task_automation import (
@@ -675,9 +677,13 @@ def parse_automation_failure(
 ) -> AutomationFailure | None:
     """Turn a published experiment-automation failure into a plain digest outcome."""
     stripped = text.strip()
+    first_line = stripped.split("\n", 1)[0]
     for prefix, title, outcome in AUTOMATION_FAILURES:
-        if not stripped.startswith(prefix):
+        # A failure may be addressed to the epic author before the prefix.
+        position = first_line.find(prefix)
+        if position < 0:
             continue
+        stripped = stripped[position:]
         # Published failures embed Jira links into task keys; attribute by the bare key.
         detail = re.sub(r"\[(UMN-\d+)\]\([^)]*\)", r"\1", stripped.removeprefix(prefix).strip())
         owned = re.match(r"(UMN-\d+):", detail) or re.search(r"\bResults task (UMN-\d+)", detail)

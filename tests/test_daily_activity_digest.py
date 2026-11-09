@@ -845,9 +845,9 @@ def test_linked_automation_failure_is_still_attributed_to_its_task() -> None:
     failure = parse_automation_failure(
         "C0BT7HSVACD",
         "1793800811.506759",
+        "<@U0149RHN7D3>, please take a look. "
         f"Experiment analytics automation failed: [UMN-14157]({browse}/UMN-14157): Jira epic "
-        f"[UMN-14153]({browse}/UMN-14153) has no Confluence project-page link. "
-        "Epic author: <@U0149RHN7D3>",
+        f"[UMN-14153]({browse}/UMN-14153) has no Confluence project-page link.",
     )
 
     assert failure is not None

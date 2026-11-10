@@ -84,7 +84,14 @@ async def test_gather_returns_brief_context_from_exact_targets(
 
 
 @pytest.mark.asyncio
-async def test_wait_for_returns_bounded_result_and_logs() -> None:
+async def test_wait_for_returns_bounded_result_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sloperator.experiment_agent_tools as module
+
+    # The real workspace exists only on the server; never write test logs into it.
+    monkeypatch.setattr(module, "WORKSPACE", tmp_path)
+    (tmp_path / "output").mkdir()
     result = await wait_for(
         [sys.executable, "-c", "print('x' * 4000)"], 5
     )

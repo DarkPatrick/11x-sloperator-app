@@ -909,36 +909,85 @@ def next_run_at(
     return candidate
 
 
+MAX_START_ATTEMPTS = 5
+
+
+def start_prompt(skipped_failures: list[str]) -> str:
+    """The start prompt, excluding candidates that already failed during this run."""
+    if not skipped_failures:
+        return START_PROMPT
+    experiments = sorted(
+        {
+            match
+            for text in skipped_failures
+            for match in re.findall(
+                r"(?:experiment|exp|send)\s+#?(\d{3,5})\b", text, flags=re.IGNORECASE
+            )
+        }
+    )
+    tasks = sorted({key for text in skipped_failures for key in re.findall(r"UMN-\d+", text)})
+    reasons = "\n".join(f"- {text}" for text in skipped_failures)
+    return f"""{START_PROMPT}
+
+EXCLUDED IN THIS RUN
+Earlier start passes of this same scheduled run already failed on the candidates below and the
+failures were reported to their owners. Do not select, start, or report them again: treat every
+experiment id ({", ".join(experiments) or "none"}) and Jira task ({", ".join(tasks) or "none"})
+named here as ineligible for this run and continue with the next eligible candidate in the normal
+order. If no other candidate is eligible, follow the no-eligible-candidate path.
+{reasons}
+"""
+
+
 async def run_once(
     client: AsyncWebClient,
     agent: AgentSubmitter,
     settings: Settings,
 ) -> str:
-    """Run headlessly, publish once, and attach the resumable session."""
-    start_run = await execute_finalizer_turn(
-        agent,
-        START_PROMPT,
-        settings.experiment_finalizer_timeout_seconds,
-        job_name="experiment-finalizer-reviewer",
-        accept_result=is_start_result,
+    """Run headlessly, publish once, and attach the resumable session.
+
+    A candidate that fails before preparation (a setup problem, reported to its epic author) is
+    excluded and the start pass runs again for the next eligible candidate.
+    """
+    skipped: list[str] = []
+    for _ in range(MAX_START_ATTEMPTS):
+        start_run = await execute_finalizer_turn(
+            agent,
+            start_prompt(skipped),
+            settings.experiment_finalizer_timeout_seconds,
+            job_name="experiment-finalizer-reviewer",
+            accept_result=is_start_result,
+        )
+        _, forecasts = split_maturity_forecasts(start_run.text)
+        try:
+            recovered_start = await recover_missing_project_page(settings, agent, start_run)
+        except SelectionError as error:
+            failed_text = split_maturity_forecasts(start_run.text)[0]
+            recovered_start = replace(start_run, text=f"{failed_text} ({error})")
+        if recovered_start is not None:
+            start_run = recovered_start
+        terminal, recovered_forecasts = split_maturity_forecasts(start_run.text)
+        for forecast in dict.fromkeys((*forecasts, *recovered_forecasts)):
+            LOGGER.info("Experiment finalizer forecast: %s", forecast)
+        start_run = replace(start_run, text=terminal)
+        if is_finalization_failure(start_run.text):
+            await publish_failure(client, settings, start_run.text)
+            skipped.append(start_run.text.strip())
+            LOGGER.info("Finalizer candidate failed at start; looking for the next one")
+            continue
+        if start_run.text.strip().startswith(NO_OP_PREFIX):
+            no_op_run = replace(start_run, text=NO_OP_NOTIFICATION)
+            return await publish_run(client, agent, settings, no_op_run)
+        if STARTED_RE.fullmatch(start_run.text.strip()) is None:
+            raise InvalidFinalizationNotification(start_run.text)
+        try:
+            return await run_preparation_from_started_run(client, agent, settings, start_run)
+        except SelectionError as error:
+            skipped.append(f"{start_run.text.strip()}: {error}")
+            LOGGER.info("Finalizer start failed page validation; looking for the next candidate")
+    raise InvalidFinalizationNotification(
+        skipped[-1] if skipped else "Experiment finalisation failed: no start attempts left"
     )
-    _, forecasts = split_maturity_forecasts(start_run.text)
-    recovered_start = await recover_missing_project_page(settings, agent, start_run)
-    if recovered_start is not None:
-        start_run = recovered_start
-    terminal, recovered_forecasts = split_maturity_forecasts(start_run.text)
-    for forecast in dict.fromkeys((*forecasts, *recovered_forecasts)):
-        LOGGER.info("Experiment finalizer forecast: %s", forecast)
-    start_run = replace(start_run, text=terminal)
-    if is_finalization_failure(start_run.text):
-        await publish_failure(client, settings, start_run.text)
-        raise InvalidFinalizationNotification(start_run.text)
-    if start_run.text.strip().startswith(NO_OP_PREFIX):
-        no_op_run = replace(start_run, text=NO_OP_NOTIFICATION)
-        return await publish_run(client, agent, settings, no_op_run)
-    if STARTED_RE.fullmatch(start_run.text.strip()) is None:
-        raise InvalidFinalizationNotification(start_run.text)
-    return await run_preparation_from_started_run(client, agent, settings, start_run)
 
 
 async def run_preparation_from_started_run(

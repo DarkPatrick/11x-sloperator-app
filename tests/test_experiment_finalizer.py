@@ -561,7 +561,7 @@ async def test_recovers_overlooked_jira_mentioned_in_project_page(monkeypatch) -
     assert call.kwargs["existing_session_id"] == "reviewer-session"
 
 
-async def test_finalizer_stops_before_worker_when_epic_page_is_missing(monkeypatch) -> None:
+async def test_finalizer_skips_a_started_candidate_whose_epic_page_is_missing(monkeypatch) -> None:
     from sloperator.experiment_design_selector import SelectionError
 
     monkeypatch.setattr(
@@ -569,17 +569,26 @@ async def test_finalizer_stops_before_worker_when_epic_page_is_missing(monkeypat
         AsyncMock(side_effect=SelectionError("Jira epic UMN-13001 has no project-page link")),
     )
     agent = SimpleNamespace(
-        execute_once=AsyncMock(return_value=HeadlessAgentRun(
-            "claude", "opus", "reviewer-session",
-            f"FINALIZATION_STARTED: 7607 | {PAGE_URL} | Iteration 3 | UMN-13000",
-        )),
+        execute_once=AsyncMock(side_effect=[
+            HeadlessAgentRun(
+                "claude", "opus", "reviewer-session",
+                f"FINALIZATION_STARTED: 7607 | {PAGE_URL} | Iteration 3 | UMN-13000",
+            ),
+            HeadlessAgentRun("claude", "opus", "next", NO_OP_NOTIFICATION),
+        ]),
+        attach_session=AsyncMock(),
     )
-    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    client = SimpleNamespace(chat_postMessage=AsyncMock(return_value={"channel": "C", "ts": "1"}))
     settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
-    with pytest.raises(SelectionError, match="no project-page link"):
-        await run_once(client, agent, settings)
-    assert agent.execute_once.await_count == 1
-    client.chat_postMessage.assert_awaited_once()
+
+    assert await run_once(client, agent, settings) == NO_OP_NOTIFICATION
+
+    # The failure is posted, and the second start pass excludes the failed candidate.
+    first_post = client.chat_postMessage.await_args_list[0].kwargs["markdown_text"]
+    assert "no project-page link" in first_post
+    retry_prompt = agent.execute_once.await_args_list[1].args[0]
+    assert "EXCLUDED IN THIS RUN" in retry_prompt
+    assert "7607" in retry_prompt and "UMN-13000" in retry_prompt
 
 
 def test_notification_normalizer_removes_operational_preamble() -> None:
@@ -630,13 +639,29 @@ async def test_failed_or_unverified_start_never_runs_worker(start_text: str) -> 
     settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
     with pytest.raises(InvalidFinalizationNotification):
         await run_once(client, agent, settings)
-    assert agent.execute_once.await_count == 1
     if start_text.startswith("Experiment finalisation failed:"):
-        # A failed start is still reported in Slack; an unverified one is not.
-        client.chat_postMessage.assert_awaited_once()
+        # A failed start is reported and retried for the next candidate, up to the attempt cap.
+        from sloperator.experiment_finalizer import MAX_START_ATTEMPTS
+
+        assert agent.execute_once.await_count == MAX_START_ATTEMPTS
+        assert client.chat_postMessage.await_count == MAX_START_ATTEMPTS
         assert client.chat_postMessage.await_args.kwargs["markdown_text"] == start_text
     else:
+        assert agent.execute_once.await_count == 1
         client.chat_postMessage.assert_not_awaited()
+
+
+def test_retry_prompt_excludes_failed_crm_send_and_task() -> None:
+    from sloperator.experiment_finalizer import START_PROMPT, start_prompt
+
+    assert start_prompt([]) == START_PROMPT
+    prompt = start_prompt([
+        "Experiment finalisation failed: CRM send 8180 (Bloomreach campaign "
+        "6ad3b301871ac0c24b2616ca) has queued Results task UMN-13007 (To Do) under epic "
+        "UMN-13000, but no project page can be found for it."
+    ])
+    assert "experiment id (8180)" in prompt
+    assert "Jira task (UMN-13000, UMN-13007)" in prompt
 
 
 async def test_finalizer_failure_is_addressed_to_the_epic_author(monkeypatch) -> None:

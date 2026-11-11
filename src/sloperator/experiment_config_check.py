@@ -92,6 +92,12 @@ def is_experiment_config_trigger(event: dict[str, Any]) -> bool:
     )
 
 
+# UMN-14203: Sonnet matched Opus on every golden case of this review (same required findings,
+# no forbidden ones) at 43% lower cost, so the review runs on Sonnet. Slack follow-ups in the
+# thread continue on the same model.
+CONFIG_CHECK_MODEL = "claude-sonnet-5-5"
+
+
 def build_experiment_config_prompt(payload: dict[str, Any], *, interactive: bool) -> str:
     """Build the fail-closed project/config audit requested by the cron notification."""
     experiments = payload["experiments"]
@@ -104,7 +110,7 @@ def build_experiment_config_prompt(payload: dict[str, Any], *, interactive: bool
         "message with a short explicit suggestion to ask this agent from Claude Code or contact "
         "the monetisation-team analysts for clarification. Do not invite a reply in Slack."
     )
-    return f"""\
+    return f"""[claude:{CONFIG_CHECK_MODEL}]
 This is an automated review of one newly started UG monetisation experiment. Work from the
 ug-ai-analyst repository and follow its CLAUDE.md, skills, hooks, and source-quality
 rules.

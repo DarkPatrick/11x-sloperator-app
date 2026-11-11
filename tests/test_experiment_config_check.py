@@ -573,3 +573,18 @@ def test_prompt_covers_variation_changes_and_untargeted_clients() -> None:
     assert "first appearance of every variation id" in prompt
     assert "A client the project does not target" in prompt
     assert "Never call such a client harmless" in prompt
+
+
+def test_config_check_prompt_runs_on_sonnet() -> None:
+    from types import SimpleNamespace
+
+    from sloperator.agents import parse_agent_request
+    from sloperator.experiment_config_check import CONFIG_CHECK_MODEL, build_experiment_config_prompt
+
+    prompt = build_experiment_config_prompt(
+        {"experiments": [{"id": 1, "name": "x"}], "recipient_id": "U1"}, interactive=True
+    )
+    settings = SimpleNamespace(default_agent="claude", claude_model="claude-opus-5-5", codex_model="gpt")
+    parsed = parse_agent_request(prompt, settings)
+    assert (parsed.provider, parsed.model) == ("claude", CONFIG_CHECK_MODEL)
+    assert parsed.prompt.startswith("This is an automated review")

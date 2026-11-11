@@ -36,6 +36,7 @@ from sloperator.jira_agent_policy import (
     WORKER_JIRA_POLICY,
 )
 from sloperator.project_page_people import ensure_header_mentions
+from sloperator.scheduler_catchup import SlotRunner
 from sloperator.store import EventStore
 from sloperator.team_channel import channel_for_task, first_task_key
 
@@ -1300,18 +1301,22 @@ async def run_daily(
     agent: AgentSubmitter,
     settings: Settings,
     enabled: Callable[[], bool] = lambda: True,
+    slots: SlotRunner | None = None,
 ) -> None:
     """Run forever at the configured local wall-clock hour on weekdays."""
+    slots = slots or SlotRunner("experiment-finalizer")
     while True:
-        now = dt.datetime.now(dt.UTC)
-        target = next_run_at(
-            now,
-            settings.experiment_finalizer_timezone,
-            settings.experiment_finalizer_hour,
+        target = await slots.next_slot(
+            lambda now: next_run_at(
+                now,
+                settings.experiment_finalizer_timezone,
+                settings.experiment_finalizer_hour,
+            ),
+            LOGGER,
+            "Next experiment finalizer run scheduled for %s",
         )
-        delay = (target.astimezone(dt.UTC) - now).total_seconds()
-        LOGGER.info("Next experiment finalizer run scheduled for %s", target.isoformat())
-        await asyncio.sleep(delay)
+        if target is None:
+            continue
         if not enabled():
             LOGGER.info("Scheduled experiment finalizer run disabled from admin")
             continue

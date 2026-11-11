@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -40,6 +39,7 @@ from sloperator.jira_agent_policy import (
     REVIEWER_START_POLICY,
     WORKER_JIRA_POLICY,
 )
+from sloperator.scheduler_catchup import SlotRunner
 from sloperator.team_channel import channel_for_task, first_task_key
 
 LOGGER = logging.getLogger(__name__)
@@ -458,14 +458,19 @@ async def run_daily(
     agent: AgentSubmitter,
     settings: Settings,
     enabled: Callable[[], bool] = lambda: True,
+    slots: SlotRunner | None = None,
 ) -> None:
+    slots = slots or SlotRunner("experiment-analytics-planner")
     while True:
-        now = dt.datetime.now(dt.UTC)
-        target = next_run_at(
-            now, settings.experiment_analytics_timezone, settings.experiment_analytics_hour
+        target = await slots.next_slot(
+            lambda now: next_run_at(
+                now, settings.experiment_analytics_timezone, settings.experiment_analytics_hour
+            ),
+            LOGGER,
+            "Next experiment analytics run scheduled for %s",
         )
-        LOGGER.info("Next experiment analytics run scheduled for %s", target.isoformat())
-        await asyncio.sleep((target.astimezone(dt.UTC) - now).total_seconds())
+        if target is None:
+            continue
         if not enabled():
             LOGGER.info("Scheduled experiment analytics run disabled from admin")
             continue

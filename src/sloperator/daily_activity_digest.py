@@ -44,6 +44,7 @@ from sloperator.jira_task_automation import (
     is_reassigned_away,
     is_reserved_experiment_task,
 )
+from sloperator.scheduler_catchup import SlotRunner
 
 LOGGER = logging.getLogger(__name__)
 TIMEZONE = "Asia/Nicosia"
@@ -1440,12 +1441,15 @@ async def run_weekdays(
     settings: Settings,
     store: DigestStore,
     enabled: Callable[[], bool] = lambda: True,
+    slots: SlotRunner | None = None,
 ) -> None:
+    slots = slots or SlotRunner(JOB_NAME)
     while True:
-        now = dt.datetime.now(dt.UTC)
-        target = next_run_at(now)
-        LOGGER.info("Next daily activity digest scheduled for %s", target.isoformat())
-        await asyncio.sleep((target.astimezone(dt.UTC) - now).total_seconds())
+        target = await slots.next_slot(
+            lambda now: next_run_at(now), LOGGER, "Next daily activity digest scheduled for %s"
+        )
+        if target is None:
+            continue
         if not enabled():
             LOGGER.info("Scheduled daily activity digest disabled from admin")
             continue

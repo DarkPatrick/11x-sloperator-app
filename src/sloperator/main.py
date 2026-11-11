@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from typing import Any
 
@@ -102,6 +102,7 @@ from sloperator.experiment_finalizer import (
     STARTED_RE as FINALIZATION_STARTED_RE,
 )
 from sloperator.experiment_finalizer import (
+    SWEEP_JOB_NAME,
     InvalidFinalizationNotification,
     cancel_task,
     publish_run,
@@ -133,7 +134,11 @@ from sloperator.jira_task_automation import (
 )
 from sloperator.operations_store import configure_operations
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
-from sloperator.scheduled_jobs import EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME
+from sloperator.scheduled_jobs import (
+    EMBEDDED_SCHEDULED_JOBS,
+    EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME,
+)
+from sloperator.scheduler_catchup import RecoveryGate, SlotRunner
 from sloperator.mysql_docs_sync import cancel_task as cancel_mysql_docs_sync
 from sloperator.mysql_docs_sync import run_weekly as run_weekly_mysql_docs_sync
 from sloperator.skill_docs_sync import cancel_task as cancel_skill_docs_sync
@@ -288,6 +293,133 @@ async def serve(settings: Settings) -> None:
     try:
         await site.start()
         await slack_handler.connect_async()  # type: ignore[no-untyped-call]
+        # Scheduler loops start before the recovery chain, which can take most of an hour; the
+        # recovery gate keeps a job from racing the recovery of its own interrupted run.
+        gate_run_names = {
+            job.job_name: job.run_job_names for job in EMBEDDED_SCHEDULED_JOBS
+        }
+        gate_run_names["experiment-finalizer"] += (SWEEP_JOB_NAME,)
+        recovery_gate = await RecoveryGate.snapshot(store, gate_run_names)
+        archive_synchronized = asyncio.Event()
+
+        def slot_runner(
+            job_name: str,
+            ready: Callable[[], Awaitable[Any]] | None = None,
+        ) -> SlotRunner:
+            return SlotRunner(job_name, store, gate=recovery_gate, ready=ready)
+
+        async def wait_for_jira_recovery() -> None:
+            await recovery_gate.wait("jira-task-automation")
+
+        if settings.experiment_finalizer_enabled:
+            experiment_finalizer_task = asyncio.create_task(
+                run_daily(
+                    app.client,
+                    orchestrator,
+                    settings,
+                    lambda: not automation_controls.disabled("crons", finalizer_job.display_name),
+                    slots=slot_runner("experiment-finalizer"),
+                ),
+                name="daily-experiment-finalizer",
+            )
+        if settings.experiment_design_enabled:
+            experiment_design_task = asyncio.create_task(
+                run_daily_experiment_design(
+                    app.client,
+                    orchestrator,
+                    settings,
+                    lambda: (
+                        not automation_controls.disabled(
+                            "crons", experiment_design_job.display_name
+                        )
+                    ),
+                    slots=slot_runner("experiment-design-planner"),
+                ),
+                name="daily-experiment-design-planner",
+            )
+        if settings.experiment_analytics_enabled:
+            experiment_analytics_task = asyncio.create_task(
+                run_daily_experiment_analytics(
+                    app.client,
+                    orchestrator,
+                    settings,
+                    lambda: not automation_controls.disabled(
+                        "crons", experiment_analytics_job.display_name
+                    ),
+                    slots=slot_runner("experiment-analytics-planner"),
+                ),
+                name="daily-experiment-analytics-planner",
+            )
+        if settings.jira_task_automation_enabled:
+            claude_usage_alert = ClaudeUsageAlert(app.client, settings)
+            jira_task_automation_task = asyncio.create_task(
+                run_jira_task_automation(
+                    settings,
+                    orchestrator,
+                    lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
+                    handle_jira_abuse,
+                    pause_jira_automation,
+                    claude_usage_alert,
+                    wait_ready=wait_for_jira_recovery,
+                ),
+                name="hourly-jira-task-automation",
+            )
+            jira_task_poll_task = asyncio.create_task(
+                poll_jira_task_automation(
+                    settings, orchestrator,
+                    lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
+                    handle_jira_abuse,
+                    pause_jira_automation,
+                    claude_usage_alert,
+                    wait_ready=wait_for_jira_recovery,
+                ),
+                name="ten-minute-jira-task-poll",
+            )
+        else:
+            LOGGER.warning("Jira task automation is disabled by JIRA_TASK_AUTOMATION_ENABLED")
+        automation_error_audit_task = asyncio.create_task(
+            run_daily_automation_error_audit(
+                app.client,
+                orchestrator,
+                settings,
+                lambda: not automation_controls.disabled("crons", error_audit_job.display_name),
+                slots=slot_runner("automation-error-audit"),
+            ),
+            name="daily-automation-error-audit",
+        )
+        daily_activity_digest_task = asyncio.create_task(
+            run_daily_activity_digest(
+                app.client,
+                orchestrator,
+                settings,
+                store,
+                lambda: not automation_controls.disabled(
+                    "crons", activity_digest_job.display_name
+                ),
+                slots=slot_runner("daily-activity-digest", ready=archive_synchronized.wait),
+            ),
+            name="weekday-daily-activity-digest",
+        )
+        skill_docs_sync_task = asyncio.create_task(
+            run_daily_skill_docs_sync(
+                settings,
+                lambda: not automation_controls.disabled(
+                    "crons", skill_docs_job.display_name
+                ),
+                slots=slot_runner("skill-docs-sync"),
+            ),
+            name="daily-skill-docs-sync",
+        )
+        mysql_docs_sync_task = asyncio.create_task(
+            run_weekly_mysql_docs_sync(
+                settings,
+                lambda: not automation_controls.disabled(
+                    "crons", mysql_docs_job.display_name
+                ),
+                slots=slot_runner("mysql-docs-sync"),
+            ),
+            name="weekly-mysql-docs-sync",
+        )
         await orchestrator.resume_interrupted(app.client)
         abandoned_runs = await asyncio.to_thread(store.abandon_stale_scheduled_agent_runs)
         if abandoned_runs:
@@ -576,7 +708,9 @@ async def serve(settings: Settings) -> None:
                 "Recovered and published %d interrupted daily activity digest(s)",
                 recovered_digests,
             )
+        recovery_gate.release()
         await synchronize_archive(app.client, store, settings.backfill_limit)
+        archive_synchronized.set()
         archive_task = asyncio.create_task(
             periodically_synchronize_archive(
                 app.client,
@@ -592,106 +726,6 @@ async def serve(settings: Settings) -> None:
                 _monitor_vpn(app, settings, vpn),
                 name="vpn-monitor",
             )
-        if settings.experiment_finalizer_enabled:
-            experiment_finalizer_task = asyncio.create_task(
-                run_daily(
-                    app.client,
-                    orchestrator,
-                    settings,
-                    lambda: not automation_controls.disabled("crons", finalizer_job.display_name),
-                ),
-                name="daily-experiment-finalizer",
-            )
-        if settings.experiment_design_enabled:
-            experiment_design_task = asyncio.create_task(
-                run_daily_experiment_design(
-                    app.client,
-                    orchestrator,
-                    settings,
-                    lambda: (
-                        not automation_controls.disabled(
-                            "crons", experiment_design_job.display_name
-                        )
-                    ),
-                ),
-                name="daily-experiment-design-planner",
-            )
-        if settings.experiment_analytics_enabled:
-            experiment_analytics_task = asyncio.create_task(
-                run_daily_experiment_analytics(
-                    app.client,
-                    orchestrator,
-                    settings,
-                    lambda: not automation_controls.disabled(
-                        "crons", experiment_analytics_job.display_name
-                    ),
-                ),
-                name="daily-experiment-analytics-planner",
-            )
-        if settings.jira_task_automation_enabled:
-            claude_usage_alert = ClaudeUsageAlert(app.client, settings)
-            jira_task_automation_task = asyncio.create_task(
-                run_jira_task_automation(
-                    settings,
-                    orchestrator,
-                    lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
-                    handle_jira_abuse,
-                    pause_jira_automation,
-                    claude_usage_alert,
-                ),
-                name="hourly-jira-task-automation",
-            )
-            jira_task_poll_task = asyncio.create_task(
-                poll_jira_task_automation(
-                    settings, orchestrator,
-                    lambda: not automation_controls.disabled("crons", "jira-task-automation (sloperator.service)"),
-                    handle_jira_abuse,
-                    pause_jira_automation,
-                    claude_usage_alert,
-                ),
-                name="ten-minute-jira-task-poll",
-            )
-        else:
-            LOGGER.warning("Jira task automation is disabled by JIRA_TASK_AUTOMATION_ENABLED")
-        automation_error_audit_task = asyncio.create_task(
-            run_daily_automation_error_audit(
-                app.client,
-                orchestrator,
-                settings,
-                lambda: not automation_controls.disabled("crons", error_audit_job.display_name),
-            ),
-            name="daily-automation-error-audit",
-        )
-        daily_activity_digest_task = asyncio.create_task(
-            run_daily_activity_digest(
-                app.client,
-                orchestrator,
-                settings,
-                store,
-                lambda: not automation_controls.disabled(
-                    "crons", activity_digest_job.display_name
-                ),
-            ),
-            name="weekday-daily-activity-digest",
-        )
-        skill_docs_sync_task = asyncio.create_task(
-            run_daily_skill_docs_sync(
-                settings,
-                lambda: not automation_controls.disabled(
-                    "crons", skill_docs_job.display_name
-                ),
-            ),
-            name="daily-skill-docs-sync",
-        )
-        mysql_docs_sync_task = asyncio.create_task(
-            run_weekly_mysql_docs_sync(
-                settings,
-                lambda: not automation_controls.disabled(
-                    "crons", mysql_docs_job.display_name
-                ),
-            ),
-            name="weekly-mysql-docs-sync",
-        )
         LOGGER.info(
             "Sloperator started; health http://%s:%d/healthz; admin /admin; archive %s",
             settings.host,

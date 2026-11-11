@@ -264,6 +264,45 @@ sandboxed network access. Agent processes never bypass approval or sandbox contr
 The automatic repository updater and agent processes share an exclusive Git lock so
 they cannot modify the working tree concurrently.
 
+## Scheduled jobs across restarts
+
+The embedded scheduler loops start right after Slack Socket Mode connects, before the startup
+recovery of interrupted agent runs. Each loop logs its usual `Next ... scheduled for ...` line
+when it starts. The loops are the experiment finalizer, the experiment design planner and the
+experiment analytics planner. They also include the Jira task automation hourly launcher and
+ten-minute poll, the automation error audit, the daily activity digest, the skill docs sync and
+the MySQL docs sync. The `*_ENABLED` settings still decide whether a loop is created. The Slack
+archive sync loop and the VPN monitor still start after the recovery and the initial archive
+sync, and `Sloperator started` is still logged last.
+
+Recovery gate. At startup the service notes, per job, which of the job's scheduled agent runs
+are unfinished. It uses the job's `run_job_names` from `scheduled_jobs.py`, and for the finalizer
+also `results-overdue-sweep`. While the recovery is still running, a job that is due waits until
+those runs are finished. It re-checks about once a minute and logs `Scheduled <job> is waiting
+for the recovery of its interrupted run(s): ...` once. The gate opens for every job when the
+recovery finishes. Runs started after startup never hold it.
+
+Slots and catch-up. Seven jobs run on a daily or weekly schedule: the finalizer, the two
+planners, the audit, the digest and the two docs syncs. Each of their scheduled times (a slot)
+fires at most once. A slot missed while the service was down, still starting, or held by the
+gate fires once after startup, provided it is still inside the catch-up window. The window is at
+most 6 hours old and the same calendar day in the job's own timezone. Only the most recent
+missed slot is considered, so a multi-day outage gives at most one run. A catch-up logs
+`Catching up the missed <job> slot ...`. The digest also waits for the initial archive sync. The
+Jira launcher and poll have no slots: they already check once as soon as they start.
+
+Slot record. Before a slot runs, the slot is recorded in the SQLite `metadata` table under the
+key `scheduler-slot:<job>`, with the slot time in ISO format. A slot skipped because the job is
+disabled from the admin is recorded too. So a restart in the middle of a run does not repeat the
+slot (the existing recovery resumes the interrupted run). A slot disabled from the admin also
+does not run later. On the first start of a job with no record, its most recent past slot is
+recorded without running it. If the record cannot be read or written, the job logs an error,
+skips that slot, and waits for the next one. Inspect the records with:
+
+```bash
+sqlite3 data/sloperator.sqlite3 "SELECT key, value FROM metadata WHERE key LIKE 'scheduler-slot:%'"
+```
+
 ## Production
 
 The included `deploy/sloperator.service` applies restart and resource-limit policies.

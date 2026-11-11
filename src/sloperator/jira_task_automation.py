@@ -483,13 +483,17 @@ async def add_jira_bot_comment(settings: Settings, task_key: str, text: str) -> 
     )
 
 
-async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None, on_usage_error: Any = None) -> None:
+async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None, on_usage_error: Any = None,
+                     wait_ready: Any = None) -> None:
     """Hourly quota-gated launcher; task state is re-read before every launch."""
     first_run = True
     while True:
         if not first_run:
             await asyncio.sleep(3600)
         first_run = False
+        if wait_ready is not None:
+            # Held while a jira-task run left unfinished by the previous process is recovered.
+            await wait_ready()
         if not enabled():
             continue
         if not settings.jira_username or not settings.jira_api_token:
@@ -541,13 +545,17 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
             LOGGER.exception("Jira task automation hourly run failed")
 
 
-async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None, on_usage_error: Any = None) -> None:
+async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambda: True, on_abuse: Any = None, pause: Any = None, on_usage_error: Any = None,
+                            wait_ready: Any = None) -> None:
     """Ten-minute Jira poll that resumes the durable reviewer after task activity."""
     first_run = True
     while True:
         if not first_run:
             await asyncio.sleep(600)
         first_run = False
+        if wait_ready is not None:
+            # Held while a jira-task run left unfinished by the previous process is recovered.
+            await wait_ready()
         if not enabled():
             continue
         if not settings.jira_username or not settings.jira_api_token:

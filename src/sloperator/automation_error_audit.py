@@ -16,6 +16,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sloperator.agents import HeadlessAgentRun
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.config import Settings
+from sloperator.scheduler_catchup import SlotRunner
 
 LOGGER = logging.getLogger(__name__)
 TIMEZONE = "Asia/Nicosia"
@@ -124,13 +125,16 @@ async def run_daily(
     agent: AgentSubmitter,
     settings: Settings,
     enabled: Callable[[], bool] = lambda: True,
+    slots: SlotRunner | None = None,
 ) -> None:
     """Run forever once per calendar day at 14:00 Cyprus time."""
+    slots = slots or SlotRunner("automation-error-audit")
     while True:
-        now = dt.datetime.now(dt.UTC)
-        target = next_run_at(now)
-        LOGGER.info("Next automation error audit scheduled for %s", target.isoformat())
-        await asyncio.sleep((target.astimezone(dt.UTC) - now).total_seconds())
+        target = await slots.next_slot(
+            lambda now: next_run_at(now), LOGGER, "Next automation error audit scheduled for %s"
+        )
+        if target is None:
+            continue
         if not enabled():
             LOGGER.info("Scheduled automation error audit disabled from admin")
             continue

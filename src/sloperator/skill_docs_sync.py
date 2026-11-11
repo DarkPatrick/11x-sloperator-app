@@ -14,6 +14,7 @@ from sloperator.agents import retry_claude_quota
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.claude_budget import ClaudeQuotaExceeded, quota_exhausted
 from sloperator.config import Settings
+from sloperator.scheduler_catchup import SlotRunner
 
 LOGGER = logging.getLogger(__name__)
 TIMEZONE = dt.UTC
@@ -115,13 +116,16 @@ async def run_once(settings: Settings) -> str:
 async def run_daily(
     settings: Settings,
     enabled: Callable[[], bool] = lambda: True,
+    slots: SlotRunner | None = None,
 ) -> None:
     """Run forever once per calendar day at midnight UTC."""
+    slots = slots or SlotRunner("skill-docs-sync")
     while True:
-        now = dt.datetime.now(dt.UTC)
-        target = next_run_at(now)
-        LOGGER.info("Next skill docs sync scheduled for %s", target.isoformat())
-        await asyncio.sleep((target - now).total_seconds())
+        target = await slots.next_slot(
+            lambda now: next_run_at(now), LOGGER, "Next skill docs sync scheduled for %s"
+        )
+        if target is None:
+            continue
         if not enabled():
             LOGGER.info("Scheduled skill docs sync disabled from admin")
             continue

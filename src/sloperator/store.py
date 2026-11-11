@@ -1229,6 +1229,23 @@ class EventStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def scheduler_slot(self, job_name: str) -> str | None:
+        """Return the last slot a scheduler loop handled for ``job_name`` (ISO time)."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (f"scheduler-slot:{job_name}",),
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def record_scheduler_slot(self, job_name: str, slot: str) -> None:
+        """Durably record ``slot`` (ISO time) as handled for ``job_name``."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+                (f"scheduler-slot:{job_name}", slot),
+            )
+
     def sync_completed_planner_tasks(self) -> int:
         """Enroll past and future successful planner tasks once, without resetting ownership."""
         from sloperator.planner_task_tracking import completed_task

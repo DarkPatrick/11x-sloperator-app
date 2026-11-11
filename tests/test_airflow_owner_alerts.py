@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from sloperator.airflow_owner_alerts import (
+    AirflowOwnerError,
     AirflowOwnerResponder,
+    AirflowOwnerUnavailable,
     FailedTask,
     is_airflow_owner_trigger,
     parse_alert,
@@ -140,3 +142,68 @@ async def test_a_failed_resolution_is_not_marked_handled(tmp_path: Path) -> None
 
     client.chat_postMessage.assert_not_awaited()
     assert not responder._handled(str(event["ts"]))
+
+
+def test_parse_alert_reads_the_map_index_of_a_mapped_task() -> None:
+    text = ALERT.replace("/tasks/load|Logs>", "/tasks/load/mapped/35|Logs>")
+    assert parse_alert(text) == FailedTask(
+        dag="ug_google_play_reports",
+        run="scheduled__2026-10-28T12:00:00+00:00",
+        task="load",
+        map_index=35,
+    )
+    assert parse_alert(ALERT).map_index is None
+
+
+@pytest.mark.asyncio
+async def test_a_temporary_failure_is_retried_until_a_verdict(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    responder = AirflowOwnerResponder(settings)
+    responder.retry_delays = (0, 0, 0)
+    responder.resolve = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            AirflowOwnerUnavailable("exited 75: /auth/token -> 503"),
+            AirflowOwnerUnavailable("exited 75: /auth/token -> 503"),
+            {"mention": True, "kind": "plain", "access_roles": ["User_UG_Monetisation"]},
+        ]
+    )
+    client = AsyncMock()
+    event = _event(settings)
+
+    await responder.handle(event, client)
+
+    assert responder.resolve.await_count == 3
+    client.chat_postMessage.assert_awaited_once()
+    assert responder._handled(str(event["ts"]))
+
+
+@pytest.mark.asyncio
+async def test_retries_stop_after_the_last_delay(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    responder = AirflowOwnerResponder(settings)
+    responder.retry_delays = (0, 0)
+    responder.resolve = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AirflowOwnerUnavailable("exited 75")
+    )
+    client = AsyncMock()
+    event = _event(settings)
+
+    await responder.handle(event, client)
+
+    assert responder.resolve.await_count == 3
+    client.chat_postMessage.assert_not_awaited()
+    assert not responder._handled(str(event["ts"]))
+
+
+@pytest.mark.asyncio
+async def test_a_hard_failure_is_not_retried(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    responder = AirflowOwnerResponder(settings)
+    responder.retry_delays = (0, 0)
+    responder.resolve = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AirflowOwnerError("exited 1: Traceback")
+    )
+
+    await responder.handle(_event(settings), AsyncMock())
+
+    responder.resolve.assert_awaited_once()

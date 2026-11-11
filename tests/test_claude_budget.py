@@ -12,7 +12,12 @@ from sloperator.agents import (
     retry_agent_service_errors,
     run_claude,
 )
-from sloperator.claude_budget import ClaudeBudgetExceeded, ClaudeQuotaExceeded, TranscriptBudget
+from sloperator.claude_budget import (
+    ClaudeBudgetExceeded,
+    ClaudeQuotaExceeded,
+    TranscriptBudget,
+    quota_exhausted,
+)
 from sloperator.config import Settings
 from sloperator.store import AgentSession, EventStore
 
@@ -243,3 +248,22 @@ async def test_automated_slack_stop_is_terminal_and_explained(tmp_path, monkeypa
     assert store.get_agent_session("C123", "1.1").status == "failed"
     assert store.list_interrupted_durable_agent_runs() == []
     assert "остановлен" in client.chat_postMessage.call_args.kwargs["markdown_text"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "You've hit your limit · resets 1pm (UTC)",
+        "API Error: 429 You've hit your limit · resets 13:00",
+        "5-hour limit reached ∙ resets 1pm",
+        "Claude AI usage limit reached|1794405600",
+        "You've hit your session limit",
+    ],
+)
+def test_quota_exhausted_recognises_the_allowance_wordings(text: str) -> None:
+    assert quota_exhausted(text)
+
+
+def test_quota_exhausted_ignores_unrelated_errors() -> None:
+    assert not quota_exhausted("API Error: 529 Overloaded")
+    assert not quota_exhausted("rate limit of the Jira API, retry later")

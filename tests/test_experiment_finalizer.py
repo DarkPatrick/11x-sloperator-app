@@ -781,3 +781,46 @@ def test_crm_sends_have_their_own_allowlist_identity_and_timing() -> None:
 def test_overdue_sweep_also_covers_crm_results_tasks() -> None:
     jql = overdue_sweep_jql(dt.date(2026, 11, 4))
     assert '(summary ~ "Итоги" OR summary ~ "\\"Experiment results\\"")' in jql
+
+
+async def test_an_interrupted_overdue_sweep_is_resumed_after_a_restart(
+    tmp_path, monkeypatch
+) -> None:
+    import json
+
+    from sloperator.agents import AgentOrchestrator
+    from sloperator.experiment_finalizer import SWEEP_JOB_NAME, resume_overdue_sweep
+    from sloperator.store import EventStore
+
+    settings = Settings(
+        slack_user_id="U123",
+        bot_token="test",
+        app_token="test",
+        agent_workspace=tmp_path,
+        database_path=tmp_path / "state.sqlite3",
+    )
+    store = EventStore(settings.database_path)
+    store.initialize()
+    # the run a restart left behind, and an unrelated one that must stay untouched
+    store.create_scheduled_agent_run("sweep-run", SWEEP_JOB_NAME, "claude", "opus", "s1", "sweep")
+    store.create_scheduled_agent_run("other-run", "mobile-health", "claude", "opus", "s2", "x")
+    commands = []
+    sweep_text = (
+        "OVERDUE_SWEEP: UMN-13763 | 8147 | dated | 2026-11-12 | comment: added | dates: set | ok\n"
+        "OVERDUE_SWEEP_DONE: 1"
+    )
+
+    async def provider(command, **_kwargs):
+        commands.append(command)
+        return 0, json.dumps({"result": sweep_text, "session_id": "s1"}), ""
+
+    monkeypatch.setattr("sloperator.agents._run_process", provider)
+    orchestrator = AgentOrchestrator(settings, store)
+
+    results = await resume_overdue_sweep(orchestrator, store, settings)
+
+    assert results == [sweep_text]
+    assert len(commands) == 1 and "--resume" in commands[0]
+    assert commands[0][commands[0].index("--resume") + 1] == "s1"
+    left = store.list_interrupted_scheduled_agent_runs()
+    assert [row["run_id"] for row in left] == ["other-run"]

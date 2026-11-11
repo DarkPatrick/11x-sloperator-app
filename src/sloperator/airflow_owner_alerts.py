@@ -10,7 +10,9 @@ alert belongs to the operator:
 * a dbt task where a failed model's `meta.owner` is the configured owner (`Egor Semin`).
 
 On a match the bot replies in the alert's thread with a mention and the one-line reason. No
-agent is involved and nothing is posted when the alert is someone else's.
+agent is involved and nothing is posted when the alert is someone else's. When the resolver
+exits 75 (Airflow or GitHub unreachable, e.g. Airflow's `/auth/token` answering 503) the check
+is retried after `RETRY_DELAYS` instead of being dropped.
 """
 
 from __future__ import annotations
@@ -42,11 +44,21 @@ MAX_ALERT_AGE_SECONDS = 6 * 3_600
 
 DAG_RE = re.compile(r"\*Dag\*:\s*(?P<dag>[\w.\-]+)")
 TASK_RE = re.compile(r"\*Task\*:\s*(?P<task>[\w.\-]+)")
-LOGS_RE = re.compile(r"/dags/(?P<dag>[^/|>]+)/runs/(?P<run>[^/|>]+)/tasks/(?P<task>[^/|>]+)")
+LOGS_RE = re.compile(
+    r"/dags/(?P<dag>[^/|>]+)/runs/(?P<run>[^/|>]+)/tasks/(?P<task>[^/|>]+)"
+    r"(?:/mapped/(?P<map_index>\d+))?"
+)
+# Waits before re-running the resolver after it exited 75 — about two hours in all, well
+# inside MAX_ALERT_AGE_SECONDS.
+RETRY_DELAYS = (300, 900, 1_800, 3_600)
 
 
 class AirflowOwnerError(RuntimeError):
     """The resolver could not reach a verdict."""
+
+
+class AirflowOwnerUnavailable(AirflowOwnerError):
+    """The resolver exited 75: a dependency was unreachable; worth retrying later."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +68,7 @@ class FailedTask:
     dag: str
     run: str
     task: str
+    map_index: int | None = None
 
 
 def parse_alert(text: str) -> FailedTask | None:
@@ -67,7 +80,13 @@ def parse_alert(text: str) -> FailedTask | None:
     task = TASK_RE.search(text)
     if link is None or dag is None or task is None:
         return None
-    return FailedTask(dag=dag["dag"], run=unquote(link["run"]), task=task["task"])
+    map_index = link["map_index"]
+    return FailedTask(
+        dag=dag["dag"],
+        run=unquote(link["run"]),
+        task=task["task"],
+        map_index=int(map_index) if map_index is not None else None,
+    )
 
 
 def is_airflow_owner_trigger(event: dict[str, Any], settings: Settings) -> bool:
@@ -101,6 +120,7 @@ class AirflowOwnerResponder:
     """Resolve a failed DAG's owner; mention the operator in the thread when it is theirs."""
 
     TRIGGER_KEY = "airflow-owner"
+    retry_delays: tuple[float, ...] = RETRY_DELAYS
 
     def __init__(self, settings: Settings, store: EventStore | None = None) -> None:
         self.settings = settings
@@ -125,7 +145,7 @@ class AirflowOwnerResponder:
             if await asyncio.to_thread(self._handled, message_ts):
                 return
             await self._record(message_ts, "running")
-            verdict = await self.resolve(failed)
+            verdict = await self._resolve_with_retries(message_ts, failed)
             LOGGER.info(
                 "Airflow alert %s %s/%s: mention=%s (%s)",
                 message_ts, failed.dag, failed.task, verdict.get("mention"), verdict.get("reason"),
@@ -152,15 +172,36 @@ class AirflowOwnerResponder:
         finally:
             self._in_flight.discard(message_ts)
 
+    async def _resolve_with_retries(
+        self, message_ts: str, failed: FailedTask
+    ) -> dict[str, Any]:
+        """Resolve; on a temporary failure (exit 75) wait and try again, then give up."""
+        for attempt, delay in enumerate(self.retry_delays, start=1):
+            try:
+                return await self.resolve(failed)
+            except AirflowOwnerUnavailable as error:
+                LOGGER.warning(
+                    "Airflow owner check for %s is temporarily unavailable; retry %d/%d in "
+                    "%.0f s: %s",
+                    message_ts, attempt, len(self.retry_delays), delay, str(error)[-300:],
+                )
+                await self._record(
+                    message_ts, "running", f"retry {attempt}/{len(self.retry_delays)}: "
+                    f"{str(error)[-500:]}",
+                )
+                await asyncio.sleep(delay)
+        return await self.resolve(failed)
+
     async def resolve(self, failed: FailedTask) -> dict[str, Any]:
         """Run the repository resolver and return its verdict."""
         python = self.workspace / ".venv" / "bin" / "python"
         script = self.workspace / RESOLVER
         if not python.is_file() or not script.is_file():
             raise AirflowOwnerError(f"{RESOLVER} or its virtualenv is missing in {self.workspace}")
+        map_index = () if failed.map_index is None else ("--map-index", str(failed.map_index))
         process = await asyncio.create_subprocess_exec(
             str(python), str(script),
-            "--dag", failed.dag, "--run", failed.run, "--task", failed.task,
+            "--dag", failed.dag, "--run", failed.run, "--task", failed.task, *map_index,
             "--access-role", self.settings.airflow_owner_access_role,
             "--dbt-owner", self.settings.airflow_owner_dbt_owner,
             cwd=self.workspace,
@@ -177,6 +218,10 @@ class AirflowOwnerResponder:
                     await asyncio.wait_for(process.wait(), timeout=10)
             raise
         output = stdout.decode(errors="replace").strip()
+        if process.returncode == EX_TEMPFAIL:
+            raise AirflowOwnerUnavailable(
+                f"{RESOLVER} exited {EX_TEMPFAIL}: {output[-1_500:] or 'no output'}"
+            )
         if process.returncode != 0:
             raise AirflowOwnerError(
                 f"{RESOLVER} exited {process.returncode}: {output[-1_500:] or 'no output'}"

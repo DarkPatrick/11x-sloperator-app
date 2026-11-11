@@ -36,6 +36,7 @@ from sloperator.jira_agent_policy import (
     WORKER_JIRA_POLICY,
 )
 from sloperator.project_page_people import ensure_header_mentions
+from sloperator.store import EventStore
 from sloperator.team_channel import channel_for_task, first_task_key
 
 LOGGER = logging.getLogger(__name__)
@@ -462,6 +463,47 @@ async def sweep_overdue_results(
     for line in run.text.strip().splitlines():
         LOGGER.info("Overdue Results sweep: %s", line.strip())
     return run.text.strip()
+
+
+class SweepResumer(Protocol):
+    async def resume_interrupted_headless(
+        self,
+        timeout_seconds: int,
+        *,
+        job_name: str | None = None,
+        accept_result: Callable[[str], bool] = lambda _: True,
+    ) -> list[HeadlessAgentRun]: ...
+
+
+async def resume_overdue_sweep(
+    agent: SweepResumer, store: EventStore, settings: Settings
+) -> list[str]:
+    """Finish an overdue sweep a service restart interrupted, in its own provider session.
+
+    The sweep runs only after the daily finalizer, so without this a restart mid-sweep (or
+    one during its quota waits) leaves the day's overdue Results tasks untouched until the
+    next weekday. The sweep's writes are idempotent (dates are re-set, comments are added
+    only when missing), so continuing a half-done turn is safe.
+    """
+    recovered = await agent.resume_interrupted_headless(
+        settings.experiment_finalizer_timeout_seconds,
+        job_name=SWEEP_JOB_NAME,
+        accept_result=is_sweep_result,
+    )
+    results: list[str] = []
+    for run in recovered:
+        for line in run.text.strip().splitlines():
+            LOGGER.info("Recovered overdue Results sweep: %s", line.strip())
+        if run.run_id is not None:
+            await asyncio.to_thread(
+                store.finish_scheduled_agent_run,
+                run.run_id,
+                status="completed",
+                external_session_id=run.session_id,
+                result_text=run.text,
+            )
+        results.append(run.text.strip())
+    return results
 
 
 FINALIZATION_PROMPT = f"""\

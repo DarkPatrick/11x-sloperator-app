@@ -108,6 +108,13 @@ def quota_exhausted(text: str) -> bool:
             "you've hit your session limit",
             "you've hit your weekly limit",
             "you've hit your usage limit",
+            # The CLI's generic wording for the five-hour allowance: "You've hit your limit ·
+            # resets 1pm (UTC)". Without it a 429 fell into the short service-error backoff,
+            # spent all five retries inside the window and the scheduled job was lost.
+            "you've hit your limit",
             "usage limit reached",
+            "5-hour limit reached",
+            "session limit reached",
+            "weekly limit reached",
         )
     )

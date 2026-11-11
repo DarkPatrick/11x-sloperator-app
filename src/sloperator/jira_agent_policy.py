@@ -29,7 +29,12 @@ using the exact triggering human comment ID. That helper preserves the thread an
 Jira mention of the author. Never substitute a typed name or plain-text @name for the native
 mention.
 Reuse an existing comment only when it already says exactly
-what needs to be published. Detailed checks belong in the deliverable. These rules apply to Jira,
+what needs to be published. Detailed checks belong in the deliverable.
+FILES THE REQUESTER NEEDS (an archive, CSV, scripts, SQL package) go inside the comment that
+publishes them: `.claude/jira/jira_issue.py add-comment ... --attach <file> [<file> ...]`, combined
+with --reply-to-comment-id when replying. Never upload them to the issue on their own (`attach`),
+never leave them on the server, and never cite a server or repository path instead of the file. The
+helper confirms how many files the comment carries; a missing file means the result is not published. These rules apply to Jira,
 Confluence comments, Slack, and later replies, and override older session instructions and skill
 workflows, including a recovered original request.
 """

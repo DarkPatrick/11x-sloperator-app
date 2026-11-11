@@ -254,6 +254,8 @@ async def test_automated_slack_stop_is_terminal_and_explained(tmp_path, monkeypa
     "text",
     [
         "You've hit your limit · resets 1pm (UTC)",
+        "You've hit your 5-hour limit · resets 1pm (UTC)",  # the 2026-11-11 wording
+        "You\u2019ve hit your weekly limit",  # typographic apostrophe
         "API Error: 429 You've hit your limit · resets 13:00",
         "5-hour limit reached ∙ resets 1pm",
         "Claude AI usage limit reached|1794405600",

@@ -100,18 +100,20 @@ def transcript_directory(workspace: Path) -> Path:
     return root / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", str(workspace.resolve()))
 
 
+# "You've hit your limit", "... your 5-hour limit · resets 1pm (UTC)", "... your session limit",
+# "... your weekly limit", "... your usage limit": the CLI words its allowance stop many ways.
+# Without a match a 429 fell into the short service-error backoff, spent all five retries
+# inside the window and the scheduled job was lost (2026-11-11, results-overdue-sweep).
+HIT_LIMIT_RE = re.compile(r"you(?:'|\u2019)ve hit your (?:[\w-]+ )?limit")
+
+
 def quota_exhausted(text: str) -> bool:
     normalized = text.casefold()
+    if HIT_LIMIT_RE.search(normalized):
+        return True
     return any(
         marker in normalized
         for marker in (
-            "you've hit your session limit",
-            "you've hit your weekly limit",
-            "you've hit your usage limit",
-            # The CLI's generic wording for the five-hour allowance: "You've hit your limit ·
-            # resets 1pm (UTC)". Without it a 429 fell into the short service-error backoff,
-            # spent all five retries inside the window and the scheduled job was lost.
-            "you've hit your limit",
             "usage limit reached",
             "5-hour limit reached",
             "session limit reached",

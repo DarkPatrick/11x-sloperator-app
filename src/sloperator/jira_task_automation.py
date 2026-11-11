@@ -207,6 +207,122 @@ async def start_task_with_reviewer(
     return ready
 
 
+# A worker pass ended but the reviewer has not judged it yet (or its pass was interrupted).
+REVIEW_PENDING = "review_pending"
+# Phases the poll must resume on its own, without new Jira or Confluence activity.
+RESUMABLE_PHASES = frozenset({"worker", REVIEW_PENDING})
+MAX_REWORK_ROUNDS = 2
+MAX_REVIEW_ATTEMPTS = 3
+REVIEW_VERDICTS = ("TASK_DONE", "TASK_WAITING", "TASK_REWORK", "TASK_IDLE")
+REVIEW_VERDICT_INSTRUCTION = """
+VERDICT (mandatory): end your reply with exactly one of these words alone on the final line.
+TASK_DONE - the verified result, reply or correction is published (task In Review, or the
+requested reply posted).
+TASK_WAITING - you asked the task author a clarification in Jira and wait for the answer.
+TASK_REWORK - the work does not answer the actual request yet (the description was missed or
+misread, the deliverable is wrong or incomplete, checks fail). Put concrete instructions for the
+next work pass above this line; the work pass is started automatically, do not ask anyone.
+TASK_IDLE - nothing in this cycle needed any action.
+Never return TASK_DONE or TASK_IDLE while the requested deliverable is unfinished."""
+
+
+def review_verdict(text: str) -> str | None:
+    lines = [line.strip() for line in str(text).strip().splitlines() if line.strip()]
+    return lines[-1] if lines and lines[-1] in REVIEW_VERDICTS else None
+
+
+async def run_worker_pass(agent: Any, task: Any, link: dict[str, Any], *, extra: str = "") -> str:
+    """Run one worker pass and park its handoff for the reviewer before reviewing it."""
+    notes = str(link.get("rework_notes") or "").strip()
+    rework = (
+        "\n\nREWORK REQUESTED by the task owner after reviewing the previous pass. Address every "
+        "point, then hand the result back:\n" + notes
+        if notes else ""
+    )
+    worker = await agent.execute_once(
+        worker_prompt(task.key, task.summary, task.description) + extra + rework,
+        7200,
+        job_name="jira-task-worker",
+        existing_session_id=link.get("worker_session_id"),
+    )
+    page_match = PAGE_RE.search(str(worker.text))
+    agent.store.upsert_jira_task_agent_link(
+        task.key, worker_session_id=worker.session_id, phase=REVIEW_PENDING,
+        confluence_page_url=page_match.group(1) if page_match else None,
+    )
+    agent.store.set_jira_task_progress(
+        task.key, worker_handoff=str(worker.text), rework_notes=None, review_attempts=0,
+    )
+    return str(worker.text)
+
+
+async def run_review_pass(
+    agent: Any,
+    task: Any,
+    link: dict[str, Any],
+    prompt: str,
+    *,
+    last_jira_updated_at: str | None = None,
+    last_confluence_activity_at: str | None = None,
+) -> str | None:
+    """Run the owner pass and turn its verdict into the next durable phase."""
+    handoff = str(link.get("worker_handoff") or "").strip()
+    if handoff and "worker handoff:" not in prompt.casefold():
+        prompt += "\n\nPrivate worker handoff:\n" + handoff
+    result = await agent.execute_once(
+        prompt + "\n" + REVIEW_VERDICT_INSTRUCTION,
+        7200,
+        job_name="jira-task-reviewer",
+        existing_session_id=link.get("reviewer_session_id"),
+    )
+    verdict = review_verdict(result.text)
+    progress: dict[str, Any] = {}
+    if verdict in {"TASK_DONE", "TASK_IDLE"}:
+        phase = "reviewer"
+        progress = {"worker_handoff": None, "review_attempts": 0}
+    elif verdict == "TASK_WAITING":
+        phase = "waiting"
+        progress = {"worker_handoff": None, "review_attempts": 0}
+    elif verdict == "TASK_REWORK":
+        rounds = int(link.get("rework_count") or 0)
+        if rounds < MAX_REWORK_ROUNDS:
+            phase = "worker"
+            progress = {
+                "rework_notes": str(result.text), "rework_count": rounds + 1,
+                "worker_handoff": None, "review_attempts": 0,
+            }
+        else:
+            # Stop the loop; the owner pass resolves it with the author on the next activity.
+            LOGGER.error(
+                "Jira task %s still needs rework after %d rounds; parking it", task.key, rounds,
+            )
+            phase = "waiting"
+            progress = {"worker_handoff": None, "review_attempts": 0}
+    elif not handoff:
+        # A plain reply pass (no unjudged work): keep the legacy owner phase, do not re-run it.
+        phase = "reviewer"
+    else:
+        attempts = int(link.get("review_attempts") or 0) + 1
+        if attempts < MAX_REVIEW_ATTEMPTS:
+            LOGGER.warning(
+                "Jira task %s review returned no verdict; will retry (%d)", task.key, attempts,
+            )
+            phase = REVIEW_PENDING
+        else:
+            LOGGER.error(
+                "Jira task %s review returned no verdict %d times; parking it", task.key, attempts,
+            )
+            phase = "reviewer"
+        progress = {"review_attempts": attempts}
+    agent.store.upsert_jira_task_agent_link(
+        task.key, reviewer_session_id=result.session_id, phase=phase,
+        last_jira_updated_at=last_jira_updated_at,
+        last_confluence_activity_at=last_confluence_activity_at,
+    )
+    agent.store.set_jira_task_progress(task.key, **progress)
+    return verdict
+
+
 async def read_confluence_comments(page_url: str, workspace: Path) -> list[dict[str, Any]]:
     """Read page comments through the repository's bot-authenticated Confluence helper."""
     helper = workspace / ".claude" / "confluence" / "confluence_page.py"
@@ -412,24 +528,14 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
                     last_jira_updated_at=task.updated_at.isoformat(),
                 ):
                     continue
-                link = agent.store.jira_task_agent_link(task.key)
-                worker = await agent.execute_once(
-                    worker_prompt(task.key, task.summary, task.description), 7200, job_name="jira-task-worker",
-                    existing_session_id=(link or {}).get("worker_session_id"),
-                )
-                page_match = PAGE_RE.search(str(worker.text))
-                agent.store.upsert_jira_task_agent_link(
-                    task.key, worker_session_id=worker.session_id, phase="reviewer",
-                    confluence_page_url=page_match.group(1) if page_match else None,
-                )
-                reviewer = await agent.execute_once(
-                    reviewer_prompt(task.key, task.description) + f"\n\nWorker handoff:\n{worker.text}",
-                    7200,
-                    job_name="jira-task-reviewer",
-                    existing_session_id=(link or {}).get("reviewer_session_id"),
-                )
-                agent.store.upsert_jira_task_agent_link(
-                    task.key, reviewer_session_id=reviewer.session_id, phase="reviewer"
+                link = agent.store.jira_task_agent_link(task.key) or {}
+                # Any interruption from here on (quota, restart, failure) leaves the link in a
+                # resumable phase ("worker" / REVIEW_PENDING); the ten-minute poll picks it up.
+                worker_text = await run_worker_pass(agent, task, link)
+                link = agent.store.jira_task_agent_link(task.key) or link
+                await run_review_pass(
+                    agent, task, link,
+                    reviewer_prompt(task.key, task.description) + f"\n\nWorker handoff:\n{worker_text}",
                 )
         except Exception:
             LOGGER.exception("Jira task automation hourly run failed")
@@ -586,8 +692,11 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                                 last_jira_updated_at=task.updated_at.isoformat(),
                             )
                         continue
+                    # An unfinished worker pass or an unjudged result is resumed on its own:
+                    # nobody has to touch the task after a quota stop, restart or failure.
+                    resumable = link.get("phase") in RESUMABLE_PHASES
                     if (
-                        link.get("phase") != "worker"
+                        not resumable
                         and task.status not in QUEUED_STATUSES
                         and not returned_to_work
                         and reply_target is None
@@ -595,7 +704,8 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                     ):
                         continue
                     if (
-                        previous_jira
+                        not resumable
+                        and previous_jira
                         and task.updated_at <= dt.datetime.fromisoformat(str(previous_jira))
                         and not has_new_page_comment
                         and not returned_to_work
@@ -607,8 +717,14 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                         if on_abuse: await on_abuse(task, comments)
                         if pause: pause()
                         continue
-                    handoff = ""
-                    if task.status in QUEUED_STATUSES or returned_to_work or link.get("phase") in {"worker", "waiting"}:
+                    if resumable:
+                        LOGGER.info("Resuming Jira task %s in phase %s", task.key, link.get("phase"))
+                    needs_start = (
+                        task.status in QUEUED_STATUSES
+                        or returned_to_work
+                        or link.get("phase") == "waiting"
+                    )
+                    if needs_start:
                         if not await start_task_with_reviewer(
                             agent,
                             task.key,
@@ -617,38 +733,24 @@ async def poll_active_tasks(settings: Settings, agent: Any, enabled: Any = lambd
                         ):
                             continue
                         link = agent.store.jira_task_agent_link(task.key)
-                        worker = await agent.execute_once(
-                            worker_prompt(task.key, task.summary, task.description)
-                            + "\nThis is a follow-up on an existing deliverable, including tasks "
+                    if needs_start or link.get("phase") == "worker":
+                        await run_worker_pass(
+                            agent, task, link,
+                            extra="\nThis is a follow-up on an existing deliverable, including tasks "
                             "originally completed by a specialized experiment planner. Read the "
                             "complete Jira description and newest comments, locate the existing "
                             "project page and exact iteration, and update that deliverable in place. "
                             "Preserve its structure and scope. Do not create a replacement page. "
                             "If the requested correction is unclear, return the missing clarification "
                             "to the reviewer. Existing page: " + page_context,
-                            7200,
-                            job_name="jira-task-worker",
-                            existing_session_id=link.get("worker_session_id"),
                         )
-                        page_match = PAGE_RE.search(str(worker.text))
-                        agent.store.upsert_jira_task_agent_link(
-                            task.key, worker_session_id=worker.session_id, phase="reviewer",
-                            confluence_page_url=page_match.group(1) if page_match else None,
-                        )
-                        handoff = "\n\nPrivate worker handoff:\n" + worker.text
                         link = agent.store.jira_task_agent_link(task.key)
                         page_context = str(link.get("confluence_page_url") or page_context)
-                    reviewer_id = link.get("reviewer_session_id")
-                    result = await agent.execute_once(
+                    await run_review_pass(
+                        agent, task, link,
                         reviewer_prompt(task.key, task.description) + reply_instruction
                         + page_reply_instruction
-                        + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context + "\nRecent Confluence comments (authoritative JSON):\n" + json.dumps(page_comments[-5:], ensure_ascii=False)[:8000] + handoff,
-                        7200,
-                        job_name="jira-task-reviewer",
-                        existing_session_id=reviewer_id,
-                    )
-                    agent.store.upsert_jira_task_agent_link(
-                        task.key, reviewer_session_id=result.session_id, phase="reviewer",
+                        + "\nRead all new Jira comments and all comments on this exact Confluence page: " + page_context + "; continue only if there is new activity or a pending review. Recent Jira comments (authoritative JSON):\n" + comment_context + "\nRecent Confluence comments (authoritative JSON):\n" + json.dumps(page_comments[-5:], ensure_ascii=False)[:8000],
                         last_jira_updated_at=task.updated_at.isoformat(),
                         last_confluence_activity_at=(
                             latest_page_activity.isoformat()

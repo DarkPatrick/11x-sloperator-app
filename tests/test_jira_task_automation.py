@@ -377,3 +377,178 @@ def test_mysql_docs_task_is_not_reserved_by_a_table_name() -> None:
     assert not is_reserved_experiment_task("MySQL docs: u_guitarcom.survey_results")
     assert is_reserved_experiment_task("Experiment results for 8174")
 
+
+
+def _resume_harness(
+    monkeypatch, link: dict, replies: list[tuple[str, str]], *, assignee: str | None = None,
+):
+    """Poll one link with no Jira/Confluence activity; the store is a real dict."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from sloperator import jira_task_automation as automation
+
+    task = SimpleNamespace(
+        key=link["task_key"], summary="Monitoring", description="Long spec",
+        status="In Progress",
+        updated_at=dt.datetime(2026, 11, 10, 13, 50, tzinfo=dt.UTC),  # == cursor: no activity
+        assignee_account_id=assignee or automation.SERVICE_ACCOUNT_ID,
+    )
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=task),
+        recent_comments=AsyncMock(return_value=[]),
+        was_returned_to_work=AsyncMock(return_value=False),
+    )
+    store = Mock()
+    store.active_jira_task_agent_links.side_effect = lambda: [dict(link)]
+    store.jira_task_agent_link.side_effect = lambda key: dict(link)
+    store.sync_completed_planner_tasks.return_value = 0
+    store.cleanup_jira_task_agent_links.return_value = 0
+    store.upsert_jira_task_agent_link.side_effect = lambda key, **values: link.update(
+        {k: v for k, v in values.items() if v is not None or k == "terminal_at"}
+    )
+    store.set_jira_task_progress.side_effect = lambda key, **values: link.update(values)
+    agent = SimpleNamespace(store=store, execute_once=AsyncMock(side_effect=[
+        SimpleNamespace(text=text, session_id=session) for text, session in replies
+    ]))
+    monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
+    monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))
+    monkeypatch.setattr(automation, "weekly_quota_allows_launch", lambda *a, **kw: True)
+    monkeypatch.setattr(automation, "abuse_precheck", AsyncMock(return_value=False))
+    return automation, agent
+
+
+async def _poll_once(monkeypatch, automation, agent) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import pytest
+
+    with monkeypatch.context() as patch:
+        patch.setattr(automation.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
+        with pytest.raises(asyncio.CancelledError):
+            await automation.poll_active_tasks(automation_settings(), agent)
+
+
+def automation_settings():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(jira_username="bot", jira_api_token="test",
+                           jira_url="https://jira.invalid", agent_workspace=None)
+
+
+def test_review_verdict_reads_only_the_final_line() -> None:
+    from sloperator.jira_task_automation import review_verdict
+
+    assert review_verdict("Done.\nTASK_DONE\n") == "TASK_DONE"
+    assert review_verdict("redo X\n  TASK_REWORK  ") == "TASK_REWORK"
+    assert review_verdict("TASK_DONE\nmore text") is None
+    assert review_verdict("") is None
+
+
+async def test_poll_resumes_unjudged_work_and_sends_it_back_for_rework(monkeypatch) -> None:
+    # UMN-14338: the worker misread the task, the owner saw it, and nothing ever ran again.
+    link = {
+        "task_key": "UMN-14338", "phase": "review_pending",
+        "worker_session_id": "worker-1", "reviewer_session_id": "owner-1",
+        "last_jira_updated_at": "2026-11-10T13:50:00+00:00",
+        "worker_handoff": "The task is empty", "rework_count": 0, "review_attempts": 0,
+    }
+    automation, agent = _resume_harness(monkeypatch, link, [
+        ("The description is 49 KB; build the dashboard it asks for.\nTASK_REWORK", "owner-1"),
+    ])
+    await _poll_once(monkeypatch, automation, agent)
+
+    (call,) = agent.execute_once.call_args_list
+    assert call.kwargs["job_name"] == "jira-task-reviewer"
+    assert "The task is empty" in call.args[0]
+    assert "TASK_REWORK" in call.args[0]  # the verdict contract is in the prompt
+    assert link["phase"] == "worker"
+    assert link["rework_count"] == 1
+    assert "49 KB" in link["rework_notes"]
+
+    # Next poll, still no Jira activity: the worker runs with the notes, then the owner judges.
+    agent.execute_once.side_effect = [
+        type("R", (), {"text": "Dashboard built", "session_id": "worker-1"})(),
+        type("R", (), {"text": "Published.\nTASK_DONE", "session_id": "owner-1"})(),
+    ]
+    agent.execute_once.reset_mock()
+    await _poll_once(monkeypatch, automation, agent)
+    worker_call, owner_call = agent.execute_once.call_args_list
+    assert worker_call.kwargs["job_name"] == "jira-task-worker"
+    assert worker_call.kwargs["existing_session_id"] == "worker-1"
+    assert "49 KB" in worker_call.args[0]
+    assert "Dashboard built" in owner_call.args[0]
+    assert link["phase"] == "reviewer"
+    assert link["worker_handoff"] is None
+    assert link["rework_notes"] is None
+
+
+async def test_poll_resumes_an_interrupted_worker_without_a_new_start_pass(monkeypatch) -> None:
+    link = {
+        "task_key": "UMN-14400", "phase": "worker", "reviewer_session_id": "owner-1",
+        "last_jira_updated_at": "2026-11-10T13:50:00+00:00",
+    }
+    automation, agent = _resume_harness(monkeypatch, link, [
+        ("Result", "worker-1"), ("Asked the author.\nTASK_WAITING", "owner-1"),
+    ])
+    await _poll_once(monkeypatch, automation, agent)
+    assert [c.kwargs["job_name"] for c in agent.execute_once.call_args_list] == [
+        "jira-task-worker", "jira-task-reviewer",
+    ]
+    assert link["phase"] == "waiting"
+
+
+async def test_rework_is_capped(monkeypatch) -> None:
+    link = {
+        "task_key": "UMN-14401", "phase": "review_pending", "reviewer_session_id": "owner-1",
+        "last_jira_updated_at": "2026-11-10T13:50:00+00:00",
+        "worker_handoff": "Third try", "rework_count": 2,
+    }
+    automation, agent = _resume_harness(
+        monkeypatch, link, [("Still wrong\nTASK_REWORK", "owner-1")],
+    )
+    await _poll_once(monkeypatch, automation, agent)
+    assert link["phase"] == "waiting"
+
+
+async def test_review_without_verdict_is_retried_then_parked(monkeypatch) -> None:
+    link = {
+        "task_key": "UMN-14402", "phase": "review_pending", "reviewer_session_id": "owner-1",
+        "last_jira_updated_at": "2026-11-10T13:50:00+00:00",
+        "worker_handoff": "Result", "review_attempts": 0,
+    }
+    automation, agent = _resume_harness(monkeypatch, link, [("no verdict", "owner-1")] * 3)
+    for _ in range(2):
+        await _poll_once(monkeypatch, automation, agent)
+        assert link["phase"] == "review_pending"
+    await _poll_once(monkeypatch, automation, agent)
+    assert link["phase"] == "reviewer"
+    assert link["review_attempts"] == 3
+
+
+async def test_settled_owner_link_without_activity_stays_idle(monkeypatch) -> None:
+    link = {
+        "task_key": "UMN-14403", "phase": "reviewer", "reviewer_session_id": "owner-1",
+        "last_jira_updated_at": "2026-11-10T13:50:00+00:00",
+    }
+    automation, agent = _resume_harness(monkeypatch, link, [])
+    await _poll_once(monkeypatch, automation, agent)
+    agent.execute_once.assert_not_called()
+
+
+def test_store_progress_columns_round_trip(tmp_path) -> None:
+    import pytest
+
+    from sloperator.store import EventStore as Store
+
+    store = Store(tmp_path / "s.sqlite3")
+    store.initialize()
+    store.upsert_jira_task_agent_link("UMN-1", phase="review_pending")
+    store.set_jira_task_progress("UMN-1", worker_handoff="h", rework_count=1)
+    assert store.jira_task_agent_link("UMN-1")["worker_handoff"] == "h"
+    store.set_jira_task_progress("UMN-1", worker_handoff=None)
+    row = store.jira_task_agent_link("UMN-1")
+    assert row["worker_handoff"] is None and row["rework_count"] == 1
+    with pytest.raises(ValueError):
+        store.set_jira_task_progress("UMN-1", phase="x")

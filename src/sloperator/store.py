@@ -182,6 +182,10 @@ CREATE TABLE IF NOT EXISTS jira_task_agent_links (
     terminal_at TEXT,
     confluence_page_url TEXT,
     confluence_page_version INTEGER,
+    worker_handoff TEXT,
+    rework_notes TEXT,
+    rework_count INTEGER NOT NULL DEFAULT 0,
+    review_attempts INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
 
@@ -280,6 +284,16 @@ ON agent_usage_invocations(agent_name, started_at);
 CREATE INDEX IF NOT EXISTS agent_usage_workflow_started_idx
 ON agent_usage_invocations(workflow, role, started_at);
 """
+# Resume bookkeeping of a Jira task: what the reviewer still has to judge, and how often the
+# worker was sent back, so an interrupted or rejected pass is picked up again by the poll.
+JIRA_TASK_PROGRESS_COLUMN_TYPES = (
+    ("worker_handoff", "TEXT"),
+    ("rework_notes", "TEXT"),
+    ("rework_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("review_attempts", "INTEGER NOT NULL DEFAULT 0"),
+)
+JIRA_TASK_PROGRESS_COLUMNS = frozenset(column for column, _ in JIRA_TASK_PROGRESS_COLUMN_TYPES)
+
 AGENT_USAGE_ACTIVITY_COLUMNS = (
     ("tool_calls", "INTEGER"),
     ("tool_counts", "TEXT"),
@@ -384,6 +398,11 @@ class EventStore:
                 connection.execute("ALTER TABLE jira_task_agent_links ADD COLUMN confluence_page_url TEXT")
             if "confluence_page_version" not in task_columns:
                 connection.execute("ALTER TABLE jira_task_agent_links ADD COLUMN confluence_page_version INTEGER")
+            for column, kind in JIRA_TASK_PROGRESS_COLUMN_TYPES:
+                if column not in task_columns:
+                    connection.execute(
+                        f"ALTER TABLE jira_task_agent_links ADD COLUMN {column} {kind}"
+                    )
             usage_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(agent_usage_invocations)")
             }
@@ -1181,6 +1200,25 @@ class EventStore:
                 """,
                 (task_key, worker_session_id, reviewer_session_id, phase,
                  last_jira_updated_at, last_confluence_activity_at, terminal_at, confluence_page_url, confluence_page_version),
+            )
+
+    def set_jira_task_progress(self, task_key: str, **values: Any) -> None:
+        """Overwrite resume bookkeeping of a Jira task link, NULLs included.
+
+        `upsert_jira_task_agent_link` keeps old values on NULL, which cannot clear a consumed
+        worker handoff or rework note; this setter writes exactly what it is given.
+        """
+        unknown = set(values) - JIRA_TASK_PROGRESS_COLUMNS
+        if unknown:
+            raise ValueError(f"Unknown Jira task progress columns: {sorted(unknown)}")
+        if not values:
+            return
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE jira_task_agent_links SET {assignments}, "  # columns are allow-listed above
+                "updated_at = CURRENT_TIMESTAMP WHERE task_key = ?",
+                (*values.values(), task_key),
             )
 
     def jira_task_agent_link(self, task_key: str) -> dict[str, Any] | None:

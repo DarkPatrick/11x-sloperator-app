@@ -105,7 +105,7 @@ from sloperator.experiment_finalizer import (
     InvalidFinalizationNotification,
     cancel_task,
     publish_run,
-    resume_overdue_sweep,
+    rerun_interrupted_overdue_sweep,
     run_daily,
 )
 from sloperator.experiment_finalizer import (
@@ -387,9 +387,7 @@ async def serve(settings: Settings) -> None:
                     external_session_id=run.session_id, result_text=run.text,
                     last_error=last_error,
                 )
-        recovered_sweeps = await resume_overdue_sweep(orchestrator, store, settings)
-        if recovered_sweeps:
-            LOGGER.info("Recovered %d interrupted overdue Results sweep(s)", len(recovered_sweeps))
+        await rerun_interrupted_overdue_sweep(orchestrator, store, settings)
         for task_job in ("jira-task-worker", "jira-task-reviewer"):
             recovered_task_runs = await orchestrator.resume_interrupted_headless(
                 settings.agent_timeout_seconds,

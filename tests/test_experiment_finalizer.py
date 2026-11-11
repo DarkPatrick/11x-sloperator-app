@@ -783,13 +783,7 @@ def test_overdue_sweep_also_covers_crm_results_tasks() -> None:
     assert '(summary ~ "Итоги" OR summary ~ "\\"Experiment results\\"")' in jql
 
 
-async def test_an_interrupted_overdue_sweep_is_resumed_after_a_restart(
-    tmp_path, monkeypatch
-) -> None:
-    import json
-
-    from sloperator.agents import AgentOrchestrator
-    from sloperator.experiment_finalizer import SWEEP_JOB_NAME, resume_overdue_sweep
+def _sweep_store(tmp_path):
     from sloperator.store import EventStore
 
     settings = Settings(
@@ -801,26 +795,57 @@ async def test_an_interrupted_overdue_sweep_is_resumed_after_a_restart(
     )
     store = EventStore(settings.database_path)
     store.initialize()
-    # the run a restart left behind, and an unrelated one that must stay untouched
-    store.create_scheduled_agent_run("sweep-run", SWEEP_JOB_NAME, "claude", "opus", "s1", "sweep")
+    return settings, store
+
+
+def _set_created_at(store, run_id: str, created_at: str) -> None:
+    import sqlite3
+
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE scheduled_agent_runs SET created_at = ? WHERE run_id = ?", (created_at, run_id)
+        )
+
+
+async def test_an_interrupted_overdue_sweep_is_rerun_fresh_not_resumed(tmp_path) -> None:
+    from sloperator.experiment_finalizer import SWEEP_JOB_NAME, rerun_interrupted_overdue_sweep
+
+    settings, store = _sweep_store(tmp_path)
+    store.create_scheduled_agent_run("sweep-run", SWEEP_JOB_NAME, "claude", "opus", "s1", "old")
     store.create_scheduled_agent_run("other-run", "mobile-health", "claude", "opus", "s2", "x")
-    commands = []
-    sweep_text = (
-        "OVERDUE_SWEEP: UMN-13763 | 8147 | dated | 2026-11-12 | comment: added | dates: set | ok\n"
-        "OVERDUE_SWEEP_DONE: 1"
+    _set_created_at(store, "sweep-run", "2026-11-11 10:32:32")
+    sweep_text = "OVERDUE_SWEEP_DONE: 0"
+    agent = SimpleNamespace(
+        execute_once=AsyncMock(
+            return_value=HeadlessAgentRun(provider="claude", model="opus", session_id="new",
+                                          text=sweep_text)
+        )
     )
+    now = dt.datetime(2026, 11, 11, 14, 19, tzinfo=dt.UTC)
 
-    async def provider(command, **_kwargs):
-        commands.append(command)
-        return 0, json.dumps({"result": sweep_text, "session_id": "s1"}), ""
+    result = await rerun_interrupted_overdue_sweep(agent, store, settings, now)
 
-    monkeypatch.setattr("sloperator.agents._run_process", provider)
-    orchestrator = AgentOrchestrator(settings, store)
-
-    results = await resume_overdue_sweep(orchestrator, store, settings)
-
-    assert results == [sweep_text]
-    assert len(commands) == 1 and "--resume" in commands[0]
-    assert commands[0][commands[0].index("--resume") + 1] == "s1"
+    assert result == sweep_text
+    agent.execute_once.assert_awaited_once()
+    prompt = agent.execute_once.await_args.args[0]
+    assert "Today is 2026-11-11" in prompt  # a new turn with the full prompt, not a resume
+    assert agent.execute_once.await_args.kwargs.get("existing_session_id") is None
     left = store.list_interrupted_scheduled_agent_runs()
     assert [row["run_id"] for row in left] == ["other-run"]
+
+
+async def test_a_sweep_interrupted_on_an_earlier_day_is_only_closed(tmp_path) -> None:
+    from sloperator.experiment_finalizer import SWEEP_JOB_NAME, rerun_interrupted_overdue_sweep
+
+    settings, store = _sweep_store(tmp_path)
+    store.create_scheduled_agent_run("sweep-run", SWEEP_JOB_NAME, "claude", "opus", "s1", "old")
+    _set_created_at(store, "sweep-run", "2026-11-10 10:32:32")
+    agent = SimpleNamespace(execute_once=AsyncMock())
+
+    result = await rerun_interrupted_overdue_sweep(
+        agent, store, settings, dt.datetime(2026, 11, 11, 8, 0, tzinfo=dt.UTC)
+    )
+
+    assert result is None
+    agent.execute_once.assert_not_awaited()
+    assert store.list_interrupted_scheduled_agent_runs() == []

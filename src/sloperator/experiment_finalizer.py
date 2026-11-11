@@ -465,45 +465,39 @@ async def sweep_overdue_results(
     return run.text.strip()
 
 
-class SweepResumer(Protocol):
-    async def resume_interrupted_headless(
-        self,
-        timeout_seconds: int,
-        *,
-        job_name: str | None = None,
-        accept_result: Callable[[str], bool] = lambda _: True,
-    ) -> list[HeadlessAgentRun]: ...
-
-
-async def resume_overdue_sweep(
-    agent: SweepResumer, store: EventStore, settings: Settings
-) -> list[str]:
-    """Finish an overdue sweep a service restart interrupted, in its own provider session.
+async def rerun_interrupted_overdue_sweep(
+    agent: AgentSubmitter,
+    store: EventStore,
+    settings: Settings,
+    now: dt.datetime | None = None,
+) -> str | None:
+    """Replace an overdue sweep a service restart interrupted today with a fresh run.
 
     The sweep runs only after the daily finalizer, so without this a restart mid-sweep (or
-    one during its quota waits) leaves the day's overdue Results tasks untouched until the
-    next weekday. The sweep's writes are idempotent (dates are re-set, comments are added
-    only when missing), so continuing a half-done turn is safe.
+    during its quota waits) leaves the day's overdue Results tasks untouched until the next
+    weekday. The interrupted turn is NOT resumed: its Jira reads may be hours old, and a
+    resumed turn acted on them (2026-11-11: a forecast comment on UMN-13763, which had been
+    closed by a person meanwhile). A fresh run re-reads every task. Runs interrupted on an
+    earlier day are only closed — that day's sweep is superseded by the next scheduled one.
     """
-    recovered = await agent.resume_interrupted_headless(
-        settings.experiment_finalizer_timeout_seconds,
-        job_name=SWEEP_JOB_NAME,
-        accept_result=is_sweep_result,
-    )
-    results: list[str] = []
-    for run in recovered:
-        for line in run.text.strip().splitlines():
-            LOGGER.info("Recovered overdue Results sweep: %s", line.strip())
-        if run.run_id is not None:
-            await asyncio.to_thread(
-                store.finish_scheduled_agent_run,
-                run.run_id,
-                status="completed",
-                external_session_id=run.session_id,
-                result_text=run.text,
-            )
-        results.append(run.text.strip())
-    return results
+    now = now or dt.datetime.now(dt.UTC)
+    zone = ZoneInfo(settings.experiment_finalizer_timezone)
+    today = now.astimezone(zone).date()
+    rows = await asyncio.to_thread(store.list_interrupted_scheduled_agent_runs, SWEEP_JOB_NAME)
+    interrupted_today = False
+    for row in rows:
+        created = dt.datetime.fromisoformat(str(row["created_at"])).replace(tzinfo=dt.UTC)
+        interrupted_today = interrupted_today or created.astimezone(zone).date() == today
+        await asyncio.to_thread(
+            store.finish_scheduled_agent_run,
+            str(row["run_id"]),
+            status="abandoned",
+            last_error="interrupted by a service restart; replaced by a fresh sweep",
+        )
+    if not interrupted_today:
+        return None
+    LOGGER.warning("Re-running the overdue Results sweep a service restart interrupted")
+    return await sweep_overdue_results(agent, settings, now)
 
 
 FINALIZATION_PROMPT = f"""\

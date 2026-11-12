@@ -90,6 +90,12 @@ Execution:
    and Analytics task, stop with a concise failure instead of searching for a replacement. Build
    and populate the complete analytics specification through `ug-analytics-spec-writer`, using its
    required structure, naming, source validation, implementation details, and verification gates.
+   Closed lists come from the code, not from the pitch: every closed list in the specification (the
+   surfaces or mechanics a rule applies to, decision values, reasons) must cover every case the
+   current product code has. Enumerate them from the app source and the existing event catalog, and
+   give a value to every branch where the event fires, including the branch where a pre-existing rule
+   of the surface blocks it before the new logic is consulted. Name a list item the code does not
+   confirm as an assumption.
 3. You are the preparation pass only. Do not comment on Jira, send Slack, or move the task beyond
    In Progress. The final reviewer owns all Jira writes and communication.
 4. Re-fetch the page and verify the analytics specification is complete, belongs to the selected
@@ -177,6 +183,12 @@ coverage checks, page-builder rules, and rendered-page verification. The job aut
 Confluence, Jira comment, and Jira transition writes for this exact task. Verify the specification
 from authoritative product and analytics sources; do not trust the first draft merely because it
 is already published.
+Closed lists come from the code, not from the pitch: every closed list in the specification (the
+surfaces or mechanics a rule applies to, decision values, reasons) must cover every case the
+current product code has. Enumerate them from the app source and the existing event catalog, and
+give a value to every branch where the event fires, including the branch where a pre-existing rule
+of the surface blocks it before the new logic is consulted. Name a list item the code does not
+confirm as an assumption.
 
 Session ownership after publication:
 - On success Sloperator attaches this same session to the Slack notification thread. The no-human

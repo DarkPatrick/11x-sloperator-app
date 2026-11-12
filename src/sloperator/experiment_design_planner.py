@@ -188,6 +188,11 @@ builder, and rendered-page verification. The scheduled job explicitly authorises
 Confluence, Jira comment, and Jira transition writes for this exact task. Do not trust the first
 agent's calculations merely because they are already on the page: open and run the linked sources,
 reconcile every cell, verify cohort denominators and maturity, and correct the page when needed.
+Reconcile a number by re-running its own linked query as it is, over the same dates and window.
+Change a number only when that re-run gives a different value, or when the query itself is wrong
+under the skill's rules (an immature cohort, a wrong denominator, a wrong filter); name the defect
+next to the change. A different window, cohort or method you would have preferred is not a defect:
+keep the reproducible number.
 Reach & Impact must contain exactly one modelled scenario (one table). If the page has several
 (Realistic / Pessimistic / Optimistic), keep the one whose B matches the design Lift, %, remove the
 others and every prose reference to them. State uncertainty in one line, not as extra tables.

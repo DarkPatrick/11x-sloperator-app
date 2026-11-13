@@ -651,19 +651,6 @@ async def test_failed_or_unverified_start_never_runs_worker(start_text: str) -> 
         client.chat_postMessage.assert_not_awaited()
 
 
-def test_retry_prompt_excludes_failed_crm_send_and_task() -> None:
-    from sloperator.experiment_finalizer import START_PROMPT, start_prompt
-
-    assert start_prompt([]) == START_PROMPT
-    prompt = start_prompt([
-        "Experiment finalisation failed: CRM send 8180 (Bloomreach campaign "
-        "6ad3b301871ac0c24b2616ca) has queued Results task UMN-13007 (To Do) under epic "
-        "UMN-13000, but no project page can be found for it."
-    ])
-    assert "experiment id (8180)" in prompt
-    assert "Jira task (UMN-13000, UMN-13007)" in prompt
-
-
 async def test_finalizer_failure_is_addressed_to_the_epic_author(monkeypatch) -> None:
     from sloperator.experiment_finalizer import publish_failure
 
@@ -761,28 +748,6 @@ async def test_sweep_runs_as_its_own_job_and_logs_each_task(
     assert "UMN-14200" in caplog.text
 
 
-def test_crm_sends_have_their_own_allowlist_identity_and_timing() -> None:
-    # 2026-11-04: CRM (Bloomreach) results tasks live in [UG][CRM] epics as "Experiment results",
-    # the admin rows have no project link and stay running for months after the one-off send.
-    for prompt in (FINALIZATION_PROMPT, START_PROMPT):
-        assert "get_crm_exps_list(config=cfg)" in prompt
-        assert "`provider_id = 1`" in prompt
-        assert "starts with `[UG][CRM]`" in prompt
-        assert "never guess the epic from the campaign name" in prompt
-        assert "summary is `Experiment results`" in prompt
-        assert "7 complete days (7 * 24 hours)" in prompt
-        assert "`crm_send_ts`" in prompt
-        assert "A CRM unit is always `Iteration 1`" in prompt
-        assert "of rule 8 still applies to every send" in " ".join(prompt.split())
-    assert "in place of its `TBU` template" in FINALIZATION_PROMPT
-    assert "or one CRM send unit" in FINALIZATION_PROMPT
-
-
-def test_overdue_sweep_also_covers_crm_results_tasks() -> None:
-    jql = overdue_sweep_jql(dt.date(2026, 11, 4))
-    assert '(summary ~ "Итоги" OR summary ~ "\\"Experiment results\\"")' in jql
-
-
 def _sweep_store(tmp_path):
     from sloperator.store import EventStore
 
@@ -849,3 +814,437 @@ async def test_a_sweep_interrupted_on_an_earlier_day_is_only_closed(tmp_path) ->
     assert result is None
     agent.execute_once.assert_not_awaited()
     assert store.list_interrupted_scheduled_agent_runs() == []
+
+
+# --- bot-finalizer-core: UGM run without CRM, FinalizerFlow, parametrised sweep -------------
+
+def _custom_flow():
+    from sloperator.experiment_finalizer import FinalizerFlow
+
+    return FinalizerFlow(
+        "CUSTOM START BASE",
+        "CUSTOM PREP BASE",
+        "CUSTOM REVIEW {prepared_result}",
+        "crm-post-analysis-reviewer",
+        "crm-post-analysis-preparer",
+        "After Split post-analysis published.",
+        False,
+        False,
+    )
+
+
+POST_ANALYSIS_HEADING = "After Split post-analysis published."
+POST_ANALYSIS_NOTIFICATION = (
+    "[Project](https://example.atlassian.net/wiki/x) — experiment "
+    "[8225](https://www.ultimate-guitar.com/components/ab/experiment/view?id=8225), "
+    "Iteration 1. After Split post-analysis published."
+)
+MISSING_PAGE_FAILURE = (
+    "Experiment finalisation failed: experiment 7940's Results task UMN-13460 passed every "
+    "other gate, but its epic UMN-12542 has no Confluence project-page link."
+)
+
+
+def _settings() -> Settings:
+    return Settings(
+        slack_user_id="UOWNER", bot_token="test", app_token="test",
+        experiment_finalizer_channel="CFINAL",
+    )
+
+
+def _client(messages: list[dict] | None = None):
+    return SimpleNamespace(
+        conversations_history=AsyncMock(return_value={
+            "messages": messages or [], "response_metadata": {"next_cursor": ""},
+        }),
+        chat_postMessage=AsyncMock(return_value={"channel": "CFINAL", "ts": "200.1"}),
+    )
+
+
+def _agent(*texts: str):
+    runs = [HeadlessAgentRun("claude", "opus", f"s{i}", text) for i, text in enumerate(texts)]
+    return SimpleNamespace(
+        execute_once=AsyncMock(side_effect=runs) if len(runs) > 1 else AsyncMock(
+            return_value=runs[0]
+        ),
+        attach_session=AsyncMock(),
+    )
+
+
+def test_c1_ugm_texts_carry_no_crm_rule() -> None:
+    from sloperator import experiment_finalizer as finalizer
+
+    texts = {
+        name: getattr(finalizer, name)
+        for name in (
+            "SELECTION_RULES", "MATURITY_FORECAST_POLICY", "UPCOMING_QUEUE_FORECAST_POLICY",
+            "OVERDUE_SWEEP_POLICY", "FINALIZATION_PROMPT", "START_PROMPT", "REVIEW_PROMPT",
+            "FINAL_NOTIFICATION_POLICY",
+        )
+    }
+    texts["overdue_sweep_prompt"] = overdue_sweep_prompt(dt.date(2026, 11, 13))
+    leaks = {name for name, text in texts.items() if "CRM" in text or "Experiment results" in text}
+    assert leaks == set()
+    for marker in ("get_crm_exps_list", "[UG][CRM]", "rule 10"):
+        assert marker not in finalizer.SELECTION_RULES
+
+
+def test_c2_goal_and_closing_lines_name_one_monetisation_experiment() -> None:
+    assert "Goal: finalise exactly one eligible UG monetisation experiment." in FINALIZATION_PROMPT
+    assert "Never finalise more than one experiment in this run." in FINALIZATION_PROMPT
+    for prompt in (FINALIZATION_PROMPT, START_PROMPT, REVIEW_PROMPT):
+        assert "CRM send unit" not in prompt
+        assert "After Split" not in prompt
+
+
+def test_c3_ugm_sweep_jql_matches_only_itogi_tasks() -> None:
+    jql = overdue_sweep_jql(dt.date(2026, 11, 13))
+    assert jql == (
+        'project = UMN AND assignee = "712020:e603f3a9-4b70-4ed8-866f-280460a661c5" '
+        'AND summary ~ "Итоги" AND status in (Backlog, "To Do") '
+        'AND (duedate <= "2026-11-13" OR duedate is EMPTY) ORDER BY duedate ASC, key ASC'
+    )
+    assert "Experiment results" not in jql
+
+
+def test_c4_sweep_prompt_and_forecasts_keep_the_ugm_schedule() -> None:
+    prompt = overdue_sweep_prompt(dt.date(2026, 11, 13))
+    assert overdue_sweep_jql(dt.date(2026, 11, 13)) in prompt
+    assert "2026-11-13" in prompt
+    assert "12:00 Asia/Nicosia" in UPCOMING_QUEUE_FORECAST_POLICY
+    assert "12:00 Asia/Nicosia" in MATURITY_FORECAST_POLICY
+
+
+def test_c5_ugm_flow_holds_todays_prompts_and_run_names() -> None:
+    from sloperator.experiment_finalizer import SUCCESS_HEADING, UGM_FLOW
+
+    assert SUCCESS_HEADING == "Results calculated and published."
+    assert UGM_FLOW.start_prompt is START_PROMPT
+    assert UGM_FLOW.preparation_prompt is FINALIZATION_PROMPT
+    assert UGM_FLOW.review_prompt is REVIEW_PROMPT
+    assert (UGM_FLOW.reviewer_job, UGM_FLOW.preparer_job) == (
+        "experiment-finalizer-reviewer", "experiment-finalizer-preparer"
+    )
+    assert UGM_FLOW.success_heading == SUCCESS_HEADING
+    assert UGM_FLOW.publish_no_op is True and UGM_FLOW.recover_missing_page is True
+
+
+async def test_c6_default_flow_still_posts_the_no_op_line() -> None:
+    agent = _agent(NO_OP_NOTIFICATION)
+    client = _client()
+
+    assert await run_once(client, agent, _settings()) == NO_OP_NOTIFICATION
+
+    client.chat_postMessage.assert_awaited_once()
+    post = client.chat_postMessage.await_args.kwargs
+    assert post["channel"] == "CFINAL"
+    assert "No eligible experiment was found for calculation today." in post["markdown_text"]
+    assert {c.kwargs["job_name"] for c in agent.execute_once.await_args_list} == {
+        "experiment-finalizer-reviewer"
+    }
+
+
+async def test_c7_silent_flow_logs_no_op_and_posts_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    agent = _agent(NO_OP_NOTIFICATION)
+    client = _client()
+    with caplog.at_level("INFO", logger="sloperator.experiment_finalizer"):
+        result = await run_once(client, agent, _settings(), flow=_custom_flow())
+
+    assert result == NO_OP_NOTIFICATION
+    client.chat_postMessage.assert_not_awaited()
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages.count("Finalizer flow crm-post-analysis-reviewer: no eligible candidate") == 1
+    call = agent.execute_once.await_args
+    assert call.kwargs["job_name"] == "crm-post-analysis-reviewer"
+    assert call.args[0] == "CUSTOM START BASE"
+
+
+async def test_c8_custom_flow_drives_preparation_review_and_publication(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sloperator.experiment_finalizer.validate_started_page",
+        AsyncMock(return_value="838613487"),
+    )
+    prepared = f"FINALIZATION_PREPARED: 8225 | {PAGE_URL} | Iteration 1"
+    notification = POST_ANALYSIS_NOTIFICATION.replace(
+        "https://example.atlassian.net/wiki/x", PAGE_URL
+    )
+    agent = _agent(
+        f"FINALIZATION_STARTED: 8225 | {PAGE_URL} | Iteration 1 | UMN-1234",
+        prepared,
+        notification,
+    )
+    client = _client()
+
+    result = await run_once(client, agent, _settings(), flow=_custom_flow())
+
+    _start_call, prep_call, review_call = agent.execute_once.await_args_list
+    assert prep_call.kwargs["job_name"] == "crm-post-analysis-preparer"
+    assert prep_call.args[0].startswith("CUSTOM PREP BASE")
+    assert review_call.kwargs["job_name"] == "crm-post-analysis-reviewer"
+    assert review_call.args[0].startswith("CUSTOM REVIEW " + prepared)
+    client.chat_postMessage.assert_awaited_once()
+    assert POST_ANALYSIS_HEADING in client.chat_postMessage.await_args.kwargs["markdown_text"]
+    assert result == client.chat_postMessage.await_args.kwargs["markdown_text"]
+    jobs = [c.kwargs["job_name"] for c in agent.execute_once.await_args_list]
+    assert not any(job.startswith("experiment-finalizer-") for job in jobs)
+
+
+async def test_c9_missing_page_recovery_runs_only_when_the_flow_asks(monkeypatch) -> None:
+    from sloperator.experiment_finalizer import UGM_FLOW
+
+    spy = AsyncMock(return_value=HeadlessAgentRun("claude", "opus", "r", NO_OP_NOTIFICATION))
+    monkeypatch.setattr("sloperator.experiment_finalizer.recover_missing_project_page", spy)
+
+    await run_once(_client(), _agent(MISSING_PAGE_FAILURE), _settings(), flow=UGM_FLOW)
+    spy.assert_awaited_once()
+    assert spy.await_args.kwargs["flow"].reviewer_job == "experiment-finalizer-reviewer"
+
+    spy.reset_mock()
+    agent = _agent(MISSING_PAGE_FAILURE, NO_OP_NOTIFICATION)
+    await run_once(_client(), agent, _settings(), flow=_custom_flow())
+    spy.assert_not_awaited()
+
+
+def test_c10_success_heading_is_a_parameter_of_the_normaliser() -> None:
+    from sloperator.experiment_finalizer import is_reviewer_result
+
+    text = POST_ANALYSIS_NOTIFICATION
+    assert normalize_finalization_notification(text, POST_ANALYSIS_HEADING) == text
+    assert is_finalization_notification(text, POST_ANALYSIS_HEADING)
+    assert is_reviewer_result(text, POST_ANALYSIS_HEADING)
+    with pytest.raises(InvalidFinalizationNotification):
+        normalize_finalization_notification(text)
+    assert not is_finalization_notification(text) and not is_reviewer_result(text)
+    ugm_text = text.replace(POST_ANALYSIS_HEADING, "Results calculated and published.")
+    assert is_finalization_notification(ugm_text) and is_reviewer_result(ugm_text)
+
+
+async def test_c11_existing_publication_is_matched_by_the_flow_heading() -> None:
+    from sloperator.experiment_finalizer import find_existing_publication
+
+    pa_client = _client([{"ts": "300.1", "text": POST_ANALYSIS_NOTIFICATION}])
+    ugm_message = POST_ANALYSIS_NOTIFICATION.replace(
+        POST_ANALYSIS_HEADING, "Results calculated and published."
+    )
+    ugm_client = _client([{"ts": "400.1", "text": ugm_message}])
+
+    assert await find_existing_publication(
+        pa_client, "CFINAL", POST_ANALYSIS_NOTIFICATION, success_heading=POST_ANALYSIS_HEADING
+    ) == "300.1"
+    assert await find_existing_publication(pa_client, "CFINAL", POST_ANALYSIS_NOTIFICATION) is None
+    assert await find_existing_publication(ugm_client, "CFINAL", ugm_message) == "400.1"
+
+
+async def test_c12_sweep_job_name_and_prompt_are_parameters() -> None:
+    agent = _agent("OVERDUE_SWEEP_DONE: 0")
+    settings = _settings()
+    now = dt.datetime(2026, 11, 13, 14, 30, tzinfo=ZoneInfo("Asia/Nicosia"))
+
+    result = await sweep_overdue_results(
+        agent, settings, now, job_name="crm-results-overdue-sweep",
+        prompt_builder=lambda today: f"CUSTOM SWEEP {today.isoformat()}",
+    )
+    assert result == "OVERDUE_SWEEP_DONE: 0"
+    custom = agent.execute_once.await_args_list[0]
+    assert (custom.args[0], custom.kwargs["job_name"]) == (
+        "CUSTOM SWEEP 2026-11-13", "crm-results-overdue-sweep"
+    )
+    await sweep_overdue_results(agent, settings, now)
+    default = agent.execute_once.await_args_list[1]
+    assert (default.args[0], default.kwargs["job_name"]) == (
+        overdue_sweep_prompt(dt.date(2026, 11, 13)), SWEEP_JOB_NAME
+    )
+
+
+async def test_e1_failures_of_a_silent_flow_are_still_published_and_retried() -> None:
+    from sloperator.experiment_finalizer import MAX_START_ATTEMPTS
+
+    failure = "Experiment finalisation failed: page missing"
+    agent = _agent(failure)
+    client = _client()
+
+    with pytest.raises(InvalidFinalizationNotification):
+        await run_once(client, agent, _settings(), flow=_custom_flow())
+
+    calls = agent.execute_once.await_args_list
+    assert len(calls) == MAX_START_ATTEMPTS == 5
+    assert {c.kwargs["job_name"] for c in calls} == {"crm-post-analysis-reviewer"}
+    retry = calls[1].args[0]
+    assert retry.startswith("CUSTOM START BASE") and "EXCLUDED IN THIS RUN" in retry
+    assert "page missing" in retry
+    # Each failed attempt is published once, as for the UGM flow today.
+    posts = [c.kwargs["markdown_text"] for c in client.chat_postMessage.await_args_list]
+    assert len(posts) == MAX_START_ATTEMPTS
+    assert all("Experiment finalisation failed:" in post for post in posts)
+
+
+def test_e2_start_prompt_builds_on_the_flow_base() -> None:
+    from sloperator.experiment_finalizer import start_prompt
+
+    custom = start_prompt([], flow=_custom_flow())
+    assert custom == "CUSTOM START BASE" and START_PROMPT not in custom
+    retry = start_prompt(["Experiment finalisation failed: send 8225 has no page"])
+    assert retry.startswith(START_PROMPT)
+    assert "experiment id (8225)" in retry
+
+
+async def test_e3_review_prompt_keeps_literal_braces_of_the_prepared_text() -> None:
+    from sloperator.experiment_finalizer import UGM_FLOW, run_review
+
+    prepared = f'FINALIZATION_PREPARED: 8225 | {PAGE_URL} | Iteration 1\n{{"type": "doc"}}'
+    agent = _agent(POST_ANALYSIS_NOTIFICATION)
+
+    await run_review(_client(), agent, _settings(), prepared, flow=_custom_flow())
+
+    assert agent.execute_once.await_args.args[0] == "CUSTOM REVIEW " + prepared + "\n"
+    formatted = UGM_FLOW.review_prompt.format(prepared_result="PREPARED-RESULT-TOKEN")
+    assert formatted.count("PREPARED-RESULT-TOKEN") == 1
+
+
+async def test_e4_custom_flow_rejects_the_ugm_heading() -> None:
+    from sloperator.experiment_finalizer import run_review
+
+    ugm_line = POST_ANALYSIS_NOTIFICATION.replace(
+        POST_ANALYSIS_HEADING, "Results calculated and published."
+    )
+    agent = _agent(ugm_line)
+    client = _client()
+    prepared = f"FINALIZATION_PREPARED: 8225 | {PAGE_URL} | Iteration 1"
+
+    with pytest.raises(InvalidFinalizationNotification):
+        await run_review(client, agent, _settings(), prepared, flow=_custom_flow())
+
+    assert agent.execute_once.await_args.kwargs["accept_result"](ugm_line) is False
+    client.chat_postMessage.assert_not_awaited()
+
+
+async def test_e5_repeated_post_analysis_publication_is_not_posted_twice() -> None:
+    from sloperator.experiment_finalizer import publish_run
+
+    client = _client([{"ts": "300.1", "text": POST_ANALYSIS_NOTIFICATION}])
+    agent = SimpleNamespace(attach_session=AsyncMock())
+    run = HeadlessAgentRun("claude", "opus", "s", POST_ANALYSIS_NOTIFICATION)
+
+    result = await publish_run(client, agent, _settings(), run, flow=_custom_flow())
+
+    assert result == POST_ANALYSIS_NOTIFICATION
+    client.chat_postMessage.assert_not_awaited()
+    agent.attach_session.assert_not_awaited()
+
+
+async def test_e6_interrupted_sweep_rerun_is_scoped_to_its_job_name(tmp_path) -> None:
+    from sloperator.experiment_finalizer import rerun_interrupted_overdue_sweep
+
+    def builder(today: dt.date) -> str:
+        return f"CUSTOM SWEEP {today.isoformat()}"
+
+    now = dt.datetime(2026, 11, 11, 14, 19, tzinfo=dt.UTC)
+    empty_settings, empty_store = _sweep_store(tmp_path / "empty")
+    settings, store = _sweep_store(tmp_path / "ugm")
+    store.create_scheduled_agent_run("sweep-run", SWEEP_JOB_NAME, "claude", "opus", "s1", "old")
+    _set_created_at(store, "sweep-run", "2026-11-11 10:32:32")
+    agent = _agent("OVERDUE_SWEEP_DONE: 0")
+
+    for each_settings, each_store in ((empty_settings, empty_store), (settings, store)):
+        assert await rerun_interrupted_overdue_sweep(
+            agent, each_store, each_settings, now,
+            job_name="crm-results-overdue-sweep", prompt_builder=builder,
+        ) is None
+    agent.execute_once.assert_not_awaited()
+
+    assert await rerun_interrupted_overdue_sweep(agent, store, settings, now) is not None
+    call = agent.execute_once.await_args
+    assert call.kwargs["job_name"] == SWEEP_JOB_NAME
+    assert call.args[0] == overdue_sweep_prompt(dt.date(2026, 11, 11))
+
+
+def test_e7_flow_is_frozen() -> None:
+    import dataclasses
+
+    from sloperator.experiment_finalizer import UGM_FLOW
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        UGM_FLOW.reviewer_job = "x"  # type: ignore[misc]
+
+
+async def test_e8_sweep_failure_handling_does_not_depend_on_the_job_name() -> None:
+    failed = "OVERDUE_SWEEP_FAILED: Jira search returned 401"
+    custom_agent, default_agent = _agent(failed), _agent(failed)
+    settings = _settings()
+    now = dt.datetime(2026, 11, 13, 12, 30, tzinfo=dt.UTC)
+
+    custom = await sweep_overdue_results(
+        custom_agent, settings, now, job_name="crm-results-overdue-sweep",
+        prompt_builder=lambda today: f"CUSTOM SWEEP {today.isoformat()}",
+    )
+    default = await sweep_overdue_results(default_agent, settings, now)
+
+    assert custom == default == failed
+    for agent in (custom_agent, default_agent):
+        kwargs = agent.execute_once.await_args.kwargs
+        assert kwargs["accept_result"] is is_sweep_result
+        assert kwargs["failure_result"](failed) is True
+
+
+def test_retry_prompt_excludes_failed_send_and_task() -> None:
+    # Generic part of the former CRM retry test: default flow, no exclusion section when empty,
+    # and every UMN key named in a failure is excluded.
+    from sloperator.experiment_finalizer import start_prompt
+
+    assert start_prompt([]) == START_PROMPT
+    prompt = start_prompt([
+        "Experiment finalisation failed: send 8180 has queued Results task UMN-13007 (To Do) "
+        "under epic UMN-13000, but no project page can be found for it."
+    ])
+    assert "experiment id (8180)" in prompt
+    assert "Jira task (UMN-13000, UMN-13007)" in prompt
+
+
+async def test_e9_interrupted_custom_sweep_is_rerun_under_its_own_job(tmp_path) -> None:
+    from sloperator.experiment_finalizer import rerun_interrupted_overdue_sweep
+
+    settings, store = _sweep_store(tmp_path)
+    store.create_scheduled_agent_run(
+        "crm-sweep", "crm-results-overdue-sweep", "claude", "opus", "s1", "old"
+    )
+    _set_created_at(store, "crm-sweep", "2026-11-11 10:32:32")
+    agent = _agent("OVERDUE_SWEEP_DONE: 0")
+
+    result = await rerun_interrupted_overdue_sweep(
+        agent, store, settings, dt.datetime(2026, 11, 11, 14, 19, tzinfo=dt.UTC),
+        job_name="crm-results-overdue-sweep",
+        prompt_builder=lambda today: f"CUSTOM SWEEP {today.isoformat()}",
+    )
+
+    assert result == "OVERDUE_SWEEP_DONE: 0"
+    call = agent.execute_once.await_args
+    assert (call.args[0], call.kwargs["job_name"]) == (
+        "CUSTOM SWEEP 2026-11-11", "crm-results-overdue-sweep"
+    )
+
+
+async def test_e10_missing_page_recovery_turn_runs_under_the_flow_reviewer_job(
+    monkeypatch,
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    jira = SimpleNamespace(
+        issue_parent_key=AsyncMock(return_value="UMN-12542"),
+        epic_page_links=AsyncMock(return_value=[
+            "https://alice.mu.se/pages/viewpage.action?pageId=822915848"
+        ]),
+    )
+    monkeypatch.setattr("sloperator.experiment_finalizer.JiraRestReader", lambda *_: jira)
+    agent = _agent(NO_OP_NOTIFICATION)
+    failed = HeadlessAgentRun("claude", "opus", "reviewer-session", MISSING_PAGE_FAILURE)
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="test", app_token="test",
+        jira_username="jira-user", jira_api_token="jira-token",
+    )
+    flow = dc_replace(_custom_flow(), recover_missing_page=True)
+
+    await recover_missing_project_page(settings, agent, failed, flow=flow)
+
+    assert agent.execute_once.await_args.kwargs["job_name"] == "crm-post-analysis-reviewer"

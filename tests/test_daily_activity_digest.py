@@ -71,6 +71,13 @@ def facts() -> DigestFacts:
     )
 
 
+def _skip_crm_forecast(monkeypatch) -> AsyncMock:
+    """Keep the CRM forecast out of tests about other digest behaviour."""
+    skip = AsyncMock(side_effect=lambda current, *_args, **_kwargs: current)
+    monkeypatch.setattr("sloperator.daily_activity_digest._add_crm_finalization_forecast", skip)
+    return skip
+
+
 def test_next_run_is_weekday_and_preserves_cyprus_wall_clock() -> None:
     friday_evening = dt.datetime(2026, 10, 2, 18, tzinfo=dt.UTC)
 
@@ -351,6 +358,7 @@ async def test_agent_failure_uses_fallback(monkeypatch, tmp_path) -> None:
         "sloperator.daily_activity_digest._add_finalization_forecast",
         AsyncMock(return_value=facts()),
     )
+    _skip_crm_forecast(monkeypatch)
     agent = AsyncMock()
     agent.execute_once.side_effect = RuntimeError("provider unavailable")
 
@@ -371,6 +379,7 @@ async def test_successful_agent_digest_is_sent_to_channel(monkeypatch, tmp_path)
         "sloperator.daily_activity_digest._add_finalization_forecast",
         AsyncMock(return_value=facts()),
     )
+    _skip_crm_forecast(monkeypatch)
     agent = AsyncMock()
     agent.execute_once.return_value = HeadlessAgentRun(
         "claude", "claude-opus-5-5", "session", draft
@@ -404,6 +413,7 @@ async def test_fallback_digest_still_gets_a_thread_session(monkeypatch, tmp_path
         "sloperator.daily_activity_digest._add_finalization_forecast",
         AsyncMock(return_value=facts()),
     )
+    _skip_crm_forecast(monkeypatch)
     agent = AsyncMock()
     agent.execute_once.side_effect = RuntimeError("provider unavailable")
     client = AsyncMock()
@@ -428,6 +438,7 @@ async def test_attach_failure_does_not_break_published_digest(monkeypatch, tmp_p
         "sloperator.daily_activity_digest._add_finalization_forecast",
         AsyncMock(return_value=facts()),
     )
+    _skip_crm_forecast(monkeypatch)
     agent = AsyncMock()
     agent.execute_once.side_effect = RuntimeError("provider unavailable")
     agent.attach_session.side_effect = RuntimeError("db locked")
@@ -462,14 +473,15 @@ async def test_interrupted_forecast_resumes_and_finishes_digest(monkeypatch, tmp
         job_name=FINALIZATION_FORECAST_JOB_NAME,
     )
     agent = AsyncMock()
-    agent.resume_interrupted_headless.side_effect = [[], [recovered]]
+    agent.resume_interrupted_headless.side_effect = [[], [recovered], []]
+    _skip_crm_forecast(monkeypatch)
     client = AsyncMock()
     store = MagicMock()
 
     count = await resume_interrupted(client, agent, settings(tmp_path), store)
 
     assert count == 1
-    assert agent.resume_interrupted_headless.await_count == 2
+    assert agent.resume_interrupted_headless.await_count == 3
     client.chat_postMessage.assert_awaited_once()
     store.finish_scheduled_agent_run.assert_called_once_with(
         "forecast-run",
@@ -853,3 +865,656 @@ def test_linked_automation_failure_is_still_attributed_to_its_task() -> None:
     assert failure is not None
     assert failure.task_key == "UMN-14157"
     assert failure.note.endswith("нет однозначной ссылки на страницу проекта")
+
+
+# CRM forecast and CRM run names (pipeline module bot-digest; case ids C1-C12, E1-E8).
+
+CRM_NOW = (
+    'FINALIZATION_FORECAST: {"id":"8225","task":"UMN-14210",'
+    '"title":"Experiment results - CRM Black Friday"}'
+)
+CRM_NEXT = (
+    'FINALIZATION_FORECAST_NEXT: {"id":"8225","task":"UMN-14210",'
+    '"title":"Experiment results - CRM Black Friday","date":"2026-11-18"}'
+)
+CRM_ITEM = DigestItem(
+    "UMN-14210",
+    "Experiment results - CRM Black Friday",
+    "https://mu--se.atlassian.net/browse/UMN-14210",
+    "итоги CRM-рассылки 8225; по текущей оценке возьму в работу 18.11",
+)
+CRM_NONE_NOTE = (
+    "По текущей оценке в следующий запуск нет CRM-рассылки для итогов, проходящей все фильтры."
+)
+CRM_FAILED_NOTE = "Очередь CRM-итогов не удалось надёжно проверить; повторю проверку по расписанию."
+NOV_13_EVENING = dt.datetime(2026, 11, 13, 16, tzinfo=dt.UTC)
+
+
+def _crm_agent(text: str) -> AsyncMock:
+    agent = AsyncMock()
+    agent.execute_once.return_value = HeadlessAgentRun(
+        "claude", "claude-opus-5-5", "crm-forecast-session", text
+    )
+    return agent
+
+
+def _keys(items) -> tuple[str, ...]:
+    return tuple(item.task_key for item in items)
+
+
+def test_c1_crm_forecast_prompt_is_separate_and_read_only() -> None:
+    from sloperator.automated_session_policy import (
+        AUTOMATED_ATLASSIAN_IDENTITY,
+        AUTOMATED_SESSION_REPOSITORY_POLICY,
+    )
+    from sloperator.crm_finalizer import CRM_SELECTION_RULES
+    from sloperator.daily_activity_digest import (
+        CRM_FINALIZATION_FORECAST_JOB_NAME,
+        CRM_FINALIZATION_FORECAST_PROMPT,
+    )
+
+    prompt = CRM_FINALIZATION_FORECAST_PROMPT
+    for required in (
+        CRM_SELECTION_RULES, AUTOMATED_SESSION_REPOSITORY_POLICY, AUTOMATED_ATLASSIAN_IDENTITY,
+        "AUTOMATED RESPONSE STYLE", "Do not write to Jira", "FINALIZATION_FORECAST:",
+        "FINALIZATION_FORECAST_NEXT:", "FINALIZATION_FORECAST_NONE",
+        "FINALIZATION_FORECAST_FAILED:",
+    ):
+        assert required in prompt
+    assert UPCOMING_QUEUE_FORECAST_POLICY not in prompt
+    assert "The only Jira writes allowed are the dated" not in prompt
+    assert CRM_FINALIZATION_FORECAST_JOB_NAME == "daily-activity-crm-forecast"
+
+
+@pytest.mark.asyncio
+async def test_c2_crm_forecast_targets_the_crm_run_schedule(tmp_path) -> None:
+    from sloperator.crm_finalizer import CRM_SELECTION_RULES
+    from sloperator.daily_activity_digest import forecast_crm_finalization
+
+    agent = _crm_agent(CRM_NOW)
+    now = dt.datetime(2026, 9, 28, 16, 0, tzinfo=dt.UTC)
+
+    item = await forecast_crm_finalization(settings(tmp_path), agent, now=now)
+
+    agent.execute_once.assert_awaited_once()
+    call_ = agent.execute_once.await_args
+    prompt = call_.args[0]
+    assert prompt.endswith("\n\nAuthoritative next scheduled run time: 2026-09-29T14:00:00+03:00")
+    assert CRM_SELECTION_RULES in prompt
+    assert "<CRM_RUN_TIME>" not in prompt
+    assert call_.kwargs["job_name"] == "daily-activity-crm-forecast"
+    assert call_.kwargs["max_interim_results"] == 0
+    assert call_.args[1] == 7200
+    assert item is not None
+    assert item.task_key == "UMN-14210"
+    assert item.jira_url.endswith("/browse/UMN-14210")
+    assert item.note.startswith("итоги CRM-рассылки 8225; по текущей оценке возьму в работу ")
+
+
+@pytest.mark.asyncio
+async def test_c3_crm_forecast_notes_follow_the_ugm_date_rules(tmp_path) -> None:
+    from sloperator.daily_activity_digest import forecast_crm_finalization
+
+    later = await forecast_crm_finalization(
+        settings(tmp_path), _crm_agent(CRM_NEXT), now=NOV_13_EVENING
+    )
+    now_item = await forecast_crm_finalization(
+        settings(tmp_path), _crm_agent(CRM_NOW), now=NOV_13_EVENING
+    )
+    ugm = _parse_finalization_forecast(
+        'FINALIZATION_FORECAST: {"id":"7982","task":"UMN-14000","title":"Итоги - Experiment 7982"}',
+        settings(tmp_path),
+    )
+
+    assert later is not None and later.task_key == "UMN-14210"
+    assert later.note == "итоги CRM-рассылки 8225; по текущей оценке возьму в работу 18.11"
+    assert now_item is not None and ugm is not None
+    when = "возьму в работу "
+    assert now_item.note.split(when, 1)[1] == ugm.note.split(when, 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_c4_crm_item_is_a_separate_pending_line(monkeypatch, tmp_path) -> None:
+    from sloperator.daily_activity_digest import _add_crm_finalization_forecast
+
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.forecast_crm_finalization",
+        AsyncMock(return_value=CRM_ITEM),
+    )
+
+    result = await _add_crm_finalization_forecast(
+        facts(), settings(tmp_path), AsyncMock(), now=NOV_13_EVENING
+    )
+
+    assert _keys(result.pending) == ("UMN-2", "UMN-14210")
+    assert result.pending[0] == facts().pending[0]
+    assert result.pending[1] == CRM_ITEM
+    assert result.completed == facts().completed
+
+
+@pytest.mark.asyncio
+async def test_c5_no_crm_candidate_adds_the_crm_queue_note(monkeypatch, tmp_path) -> None:
+    from sloperator.daily_activity_digest import _add_crm_finalization_forecast
+
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.forecast_crm_finalization",
+        AsyncMock(return_value=None),
+    )
+
+    result = await _add_crm_finalization_forecast(
+        facts(), settings(tmp_path), AsyncMock(), now=NOV_13_EVENING
+    )
+
+    assert _keys(result.pending) == ("UMN-2",)
+    assert result.queue_notes == (CRM_NONE_NOTE,)
+    assert CRM_NONE_NOTE in render_fallback(result)
+
+
+@pytest.mark.asyncio
+async def test_c6_digest_adds_crm_forecast_after_ugm_forecast(monkeypatch, tmp_path) -> None:
+    order: list[str] = []
+    with_crm = replace(facts(), pending=(*facts().pending, CRM_ITEM))
+
+    async def ugm(current, *_args, **_kwargs):
+        order.append("ugm")
+        return facts()
+
+    async def crm(current, *_args, **_kwargs):
+        order.append("crm")
+        return with_crm
+
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.collect_facts",
+        AsyncMock(return_value=(facts(), ClaudeUsage(0, 0, "", "Oct 2, 10:00PM"))),
+    )
+    monkeypatch.setattr("sloperator.daily_activity_digest._add_finalization_forecast", ugm)
+    crm_mock = AsyncMock(side_effect=crm)
+    monkeypatch.setattr("sloperator.daily_activity_digest._add_crm_finalization_forecast", crm_mock)
+    agent = _crm_agent(render_fallback(with_crm))
+
+    await build_digest(settings(tmp_path), AsyncMock(), agent)
+
+    assert order == ["ugm", "crm"]
+    assert crm_mock.await_args.args[0] == facts()
+    assert "UMN-14210" in agent.execute_once.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_c7_recovered_ugm_forecast_still_gets_crm_line(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.collect_facts",
+        AsyncMock(return_value=(facts(), ClaudeUsage(99, 0, "", "Oct 5, 10:00PM"))),
+    )
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest._format_draft",
+        AsyncMock(return_value=(render_fallback(facts()), True, None)),
+    )
+    crm_mock = _skip_crm_forecast(monkeypatch)
+    recovered = HeadlessAgentRun(
+        "claude", "claude-opus-5-5", "forecast-session",
+        'FINALIZATION_FORECAST: {"id":"7982","task":"UMN-14000","title":"Итоги - Experiment 7982"}',
+        run_id="forecast-run", job_name=FINALIZATION_FORECAST_JOB_NAME,
+    )
+    agent = AsyncMock()
+    agent.resume_interrupted_headless.side_effect = [[], [recovered], []]
+    client = AsyncMock()
+
+    count = await resume_interrupted(client, agent, settings(tmp_path), MagicMock())
+
+    assert count == 1
+    crm_mock.assert_awaited_once()
+    assert "UMN-14000" in _keys(crm_mock.await_args.args[0].pending)
+    client.chat_postMessage.assert_awaited_once()
+
+
+def _forecast_recovery_agent(ugm: list, crm: list) -> AsyncMock:
+    agent = AsyncMock()
+    agent.resume_interrupted_headless.side_effect = [[], ugm, crm]
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_recovered_crm_forecast_reuses_todays_completed_ugm_forecast(
+    monkeypatch, tmp_path
+) -> None:
+    run_once_mock = AsyncMock(return_value=("digest", True))
+    monkeypatch.setattr("sloperator.daily_activity_digest.run_once", run_once_mock)
+    now_text = dt.datetime.now(dt.UTC).isoformat()
+    store = MagicMock()
+    store.list_interrupted_scheduled_agent_runs.return_value = []
+    store.list_scheduled_agent_runs.return_value = [
+        {
+            "channel_name": FINALIZATION_FORECAST_JOB_NAME, "status": "completed",
+            "updated_at": now_text,
+            "messages": [
+                {"message_ts": "prompt", "text": "prompt"},
+                {"message_ts": "result", "text": "FINALIZATION_FORECAST_NONE"},
+            ],
+        },
+    ]
+    crm_run = HeadlessAgentRun(
+        "claude", "claude-opus-5-5", "crm-session", CRM_NEXT,
+        run_id="crm-forecast-run", job_name="daily-activity-crm-forecast",
+    )
+
+    count = await resume_interrupted(
+        AsyncMock(), _forecast_recovery_agent([], [crm_run]), settings(tmp_path), store
+    )
+
+    assert count == 1
+    run_once_mock.assert_awaited_once()
+    kwargs = run_once_mock.await_args.kwargs
+    assert kwargs["recovered_forecast"] == "FINALIZATION_FORECAST_NONE"
+    assert kwargs["recovered_crm_forecast"] == CRM_NEXT
+
+
+@pytest.mark.asyncio
+async def test_recovered_crm_forecast_without_completed_ugm_runs_a_fresh_one(
+    monkeypatch, tmp_path
+) -> None:
+    run_once_mock = AsyncMock(return_value=("digest", True))
+    monkeypatch.setattr("sloperator.daily_activity_digest.run_once", run_once_mock)
+    store = MagicMock()
+    store.list_interrupted_scheduled_agent_runs.return_value = []
+    store.list_scheduled_agent_runs.return_value = [
+        {
+            "channel_name": FINALIZATION_FORECAST_JOB_NAME, "status": "completed",
+            "updated_at": "2020-01-01T10:00:00+00:00",
+            "messages": [{"message_ts": "result", "text": "FINALIZATION_FORECAST_NONE"}],
+        },
+    ]
+    crm_run = HeadlessAgentRun(
+        "claude", "claude-opus-5-5", "crm-session", CRM_NEXT,
+        run_id="crm-forecast-run", job_name="daily-activity-crm-forecast",
+    )
+
+    await resume_interrupted(
+        AsyncMock(), _forecast_recovery_agent([], [crm_run]), settings(tmp_path), store
+    )
+
+    assert run_once_mock.await_args.kwargs["recovered_forecast"] is None
+
+
+@pytest.mark.asyncio
+async def test_both_interrupted_forecasts_publish_one_digest(monkeypatch, tmp_path) -> None:
+    run_once_mock = AsyncMock(return_value=("digest", True))
+    monkeypatch.setattr("sloperator.daily_activity_digest.run_once", run_once_mock)
+    store = MagicMock()
+    store.list_interrupted_scheduled_agent_runs.return_value = []
+    store.list_scheduled_agent_runs.return_value = []
+    ugm_run = HeadlessAgentRun(
+        "claude", "claude-opus-5-5", "ugm-session", "FINALIZATION_FORECAST_NONE",
+        run_id="ugm-forecast-run", job_name=FINALIZATION_FORECAST_JOB_NAME,
+    )
+    crm_run = HeadlessAgentRun(
+        "claude", "claude-opus-5-5", "crm-session", CRM_NEXT,
+        run_id="crm-forecast-run", job_name="daily-activity-crm-forecast",
+    )
+
+    count = await resume_interrupted(
+        AsyncMock(), _forecast_recovery_agent([ugm_run], [crm_run]), settings(tmp_path), store
+    )
+
+    assert count == 1
+    run_once_mock.assert_awaited_once()
+    kwargs = run_once_mock.await_args.kwargs
+    assert kwargs["recovered_forecast"] == "FINALIZATION_FORECAST_NONE"
+    assert kwargs["recovered_crm_forecast"] == CRM_NEXT
+    finished = {c.args[0] for c in store.finish_scheduled_agent_run.call_args_list}
+    assert finished == {"ugm-forecast-run", "crm-forecast-run"}
+
+
+@pytest.mark.asyncio
+async def test_c8_interrupted_crm_forecast_is_resumed_like_the_ugm_one(
+    monkeypatch, tmp_path
+) -> None:
+    # Ruling R10 supersedes the case text (abandon): the CRM forecast is resumed.
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.collect_facts",
+        AsyncMock(return_value=(facts(), ClaudeUsage(99, 0, "", "Nov 13, 10:00PM"))),
+    )
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest._format_draft",
+        AsyncMock(side_effect=lambda _settings, _agent, draft: (draft, True, None)),
+    )
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest._add_finalization_forecast",
+        AsyncMock(side_effect=lambda current, *_args, **_kwargs: current),
+    )
+    row = {
+        "run_id": "crm-forecast-run", "job_name": "daily-activity-crm-forecast",
+        "status": "running", "external_session_id": "crm-session", "result_text": None,
+        "created_at": "2026-11-13 16:00:01",
+    }
+    store = MagicMock()
+    store.list_interrupted_scheduled_agent_runs.side_effect = (
+        lambda job_name: [row] if job_name == "daily-activity-crm-forecast" else []
+    )
+    store.bot_channel_messages.return_value = []
+    recovered = HeadlessAgentRun(
+        "claude", "claude-opus-5-5", "crm-session", CRM_NEXT,
+        run_id="crm-forecast-run", job_name="daily-activity-crm-forecast",
+    )
+    agent = AsyncMock()
+    agent.resume_interrupted_headless.side_effect = [[], [], [recovered]]
+    client = AsyncMock()
+
+    count = await resume_interrupted(
+        client, agent, settings(tmp_path), store, now=dt.datetime(2026, 11, 13, 17, tzinfo=dt.UTC)
+    )
+
+    assert count == 1
+    assert call("daily-activity-crm-forecast") in (
+        store.list_interrupted_scheduled_agent_runs.call_args_list
+    )
+    assert agent.resume_interrupted_headless.await_args.kwargs["job_name"] == (
+        "daily-activity-crm-forecast"
+    )
+    assert "UMN-14210" in client.chat_postMessage.await_args.kwargs["markdown_text"]
+    store.finish_scheduled_agent_run.assert_called_once_with(
+        "crm-forecast-run", status="completed", external_session_id="crm-session",
+        result_text=CRM_NEXT,
+    )
+
+
+def test_c9_crm_run_names_use_finalizer_task_patterns() -> None:
+    text = "Context mentions UMN-13460. You are the reviewer for Jira task UMN-14210."
+    ugm = {"channel_name": "experiment-finalizer-reviewer", "messages": [{"text": text}]}
+    assert _run_task_keys(ugm) == ("UMN-14210",)
+    assert _run_task_keys({**ugm, "channel_name": "some-other-job"}) != ("UMN-14210",)
+
+    for job in (
+        "crm-finalizer-reviewer", "crm-finalizer-preparer",
+        "crm-post-analysis-reviewer", "crm-post-analysis-preparer",
+    ):
+        assert _run_task_keys({**ugm, "channel_name": job}) == ("UMN-14210",)
+
+
+def _reviewer_row(job: str, result: str) -> dict:
+    return {"channel_name": job, "status": "completed", "messages": [{"text": result}]}
+
+
+CRM_HEADING = (
+    "[CRM Black Friday](https://alice.mu.se/pages/1) — experiment "
+    "[8225](https://www.ultimate-guitar.com/components/ab/experiment/view?id=8225), Iteration 1. "
+)
+
+
+def test_c10_crm_reviewer_results_are_completed_activity() -> None:
+    from sloperator.daily_activity_digest import _valid_completed_run
+
+    first_read = _reviewer_row(
+        "crm-finalizer-reviewer", CRM_HEADING + "Results calculated and published."
+    )
+    post = _reviewer_row(
+        "crm-post-analysis-reviewer", CRM_HEADING + "After Split post-analysis published."
+    )
+
+    assert _valid_completed_run(first_read, "In Review")
+    assert _valid_completed_run(post, "In Review")
+
+
+def test_c11_crm_slack_sessions_read_like_finalizer_sessions() -> None:
+    base = {
+        "channel_id": "C07A9FDQ14P", "channel_name": "ug-experiments",
+        "thread_ts": "1791536598.030719", "agent_name": "experiment-finalizer/slack",
+        "status": "idle", "turn_count": 1,
+    }
+    expected = _slack_session_item(base)
+
+    for name in ("crm-finalizer/slack", "crm-post-analysis/slack"):
+        assert _slack_session_item({**base, "agent_name": name}) == expected
+
+
+@pytest.mark.parametrize("agent_name", ["crm-post-analysis/slack", "crm-finalizer/slack"])
+async def test_c12_crm_no_op_thread_is_not_reported_as_done(
+    monkeypatch, tmp_path, agent_name
+) -> None:
+    from sloperator.daily_activity_digest import collect_facts
+
+    session = {
+        "channel_id": "C07A9FDQ14P", "channel_name": "ug-experiments",
+        "thread_ts": "1791536598.030719", "agent_name": agent_name,
+        "status": "idle", "turn_count": 1,
+        "created_at": "2026-10-09 09:03:18", "updated_at": "2026-10-09 09:03:30",
+    }
+    store = _digest_store(
+        list_agent_sessions=lambda _limit: [session],
+        thread_messages=lambda *_args: [{
+            "message_ts": "1791536598.030719",
+            "text": "No eligible experiment was found for calculation today.",
+        }],
+    )
+    _patch_queues(monkeypatch, SimpleNamespace(queued_tasks=AsyncMock(return_value=[])))
+    current = replace(settings(tmp_path), jira_username="user", jira_api_token="token")
+
+    result, _usage = await collect_facts(
+        current, store, now=dt.datetime(2026, 10, 9, 16, 0, tzinfo=dt.UTC)
+    )
+
+    assert result.completed == ()
+    assert "итогами" not in render_fallback(result)
+
+
+@pytest.mark.asyncio
+async def test_e1_crm_forecast_uses_configured_hour_and_skips_weekend(tmp_path) -> None:
+    from sloperator.daily_activity_digest import forecast_crm_finalization
+
+    agent = _crm_agent(CRM_NOW)
+    friday_evening = dt.datetime(2026, 10, 2, 16, 0, tzinfo=dt.UTC)
+
+    await forecast_crm_finalization(
+        replace(settings(tmp_path), crm_finalizer_hour=15), agent, now=friday_evening
+    )
+
+    assert agent.execute_once.await_args.args[0].endswith(
+        "Authoritative next scheduled run time: 2026-10-05T15:00:00+03:00"
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2_crm_forecast_failure_adds_failure_note(monkeypatch, tmp_path) -> None:
+    from sloperator.daily_activity_digest import _add_crm_finalization_forecast
+
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.forecast_crm_finalization",
+        AsyncMock(side_effect=RuntimeError("provider unavailable")),
+    )
+
+    result = await _add_crm_finalization_forecast(
+        facts(), settings(tmp_path), AsyncMock(), now=NOV_13_EVENING
+    )
+
+    assert result.pending == facts().pending
+    assert result.queue_notes == (CRM_FAILED_NOTE,)
+
+
+@pytest.mark.asyncio
+async def test_e3_ambiguous_crm_answer_adds_failure_note(tmp_path) -> None:
+    from sloperator.daily_activity_digest import _add_crm_finalization_forecast
+
+    agent = _crm_agent(
+        'FINALIZATION_FORECAST: {"id":"8225","task":"UMN-14210","title":"First"}\n'
+        'FINALIZATION_FORECAST: {"id":"8226","task":"UMN-14211","title":"Second"}'
+    )
+
+    result = await _add_crm_finalization_forecast(
+        facts(), settings(tmp_path), agent, now=NOV_13_EVENING
+    )
+
+    assert result.pending == facts().pending
+    assert result.queue_notes == (CRM_FAILED_NOTE,)
+
+
+@pytest.mark.asyncio
+async def test_e4_crm_item_already_completed_is_not_repeated(monkeypatch, tmp_path) -> None:
+    from sloperator.daily_activity_digest import _add_crm_finalization_forecast
+
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.forecast_crm_finalization",
+        AsyncMock(return_value=replace(CRM_ITEM, task_key="UMN-1")),
+    )
+
+    result = await _add_crm_finalization_forecast(
+        facts(), settings(tmp_path), AsyncMock(), now=NOV_13_EVENING
+    )
+
+    assert _keys(result.pending) == ("UMN-2",)
+    assert result.completed == facts().completed
+
+
+@pytest.mark.asyncio
+async def test_e5_repeated_crm_forecast_adds_one_line(monkeypatch, tmp_path) -> None:
+    from sloperator.daily_activity_digest import _add_crm_finalization_forecast
+
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.forecast_crm_finalization",
+        AsyncMock(return_value=CRM_ITEM),
+    )
+    once = await _add_crm_finalization_forecast(
+        facts(), settings(tmp_path), AsyncMock(), now=NOV_13_EVENING
+    )
+
+    twice = await _add_crm_finalization_forecast(
+        once, settings(tmp_path), AsyncMock(), now=NOV_13_EVENING
+    )
+
+    assert _keys(twice.pending).count("UMN-14210") == 1
+
+
+@pytest.mark.asyncio
+async def test_e6_low_quota_digest_skips_crm_forecast(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "sloperator.daily_activity_digest.collect_facts",
+        AsyncMock(return_value=(facts(), ClaudeUsage(99, 10, "", "Oct 2, 10:00PM"))),
+    )
+    crm_mock = _skip_crm_forecast(monkeypatch)
+    agent = AsyncMock()
+
+    await build_digest(settings(tmp_path), AsyncMock(), agent)
+
+    crm_mock.assert_not_awaited()
+    agent.execute_once.assert_not_called()
+
+
+def test_e7_crm_reviewer_needs_its_own_success_heading() -> None:
+    from sloperator.daily_activity_digest import _valid_completed_run
+
+    post = _reviewer_row(
+        "crm-post-analysis-reviewer", CRM_HEADING + "Results calculated and published."
+    )
+    first_read = _reviewer_row(
+        "crm-finalizer-reviewer", "No eligible experiment was found for calculation today."
+    )
+
+    assert not _valid_completed_run(post, "In Review")
+    assert not _valid_completed_run(first_read, "In Review")
+
+
+@pytest.mark.asyncio
+async def test_e8_ugm_forecast_ignores_crm_settings(tmp_path) -> None:
+    from sloperator.crm_finalizer import CRM_SELECTION_RULES
+
+    agent = _crm_agent(
+        'FINALIZATION_FORECAST: {"id":"7982","task":"UMN-14000","title":"Итоги - Experiment 7982"}'
+    )
+    now = dt.datetime(2026, 9, 28, 16, 0, tzinfo=dt.UTC)
+
+    await forecast_finalization(
+        replace(settings(tmp_path), crm_finalizer_hour=15), agent, now=now
+    )
+
+    prompt = agent.execute_once.await_args.args[0]
+    assert FINALIZATION_FORECAST_PROMPT in prompt
+    assert "2026-09-29T12:00:00+03:00" in prompt
+    assert agent.execute_once.await_args.kwargs["job_name"] == FINALIZATION_FORECAST_JOB_NAME
+    assert CRM_SELECTION_RULES not in prompt
+
+
+# Verifier coverage gaps for bot-digest (verify.md findings 1-4).
+
+
+@pytest.mark.asyncio
+async def test_c3b_friday_crm_forecast_is_labelled_for_monday(tmp_path) -> None:
+    from sloperator.daily_activity_digest import _add_crm_finalization_forecast
+
+    friday_evening = dt.datetime(2026, 10, 2, 16, 0, tzinfo=dt.UTC)
+
+    result = await _add_crm_finalization_forecast(
+        facts(), settings(tmp_path), _crm_agent(CRM_NOW), now=friday_evening
+    )
+
+    assert result.pending[-1].note == (
+        "итоги CRM-рассылки 8225; по текущей оценке возьму в работу в понедельник"
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2b_failed_marker_adds_failure_note(tmp_path) -> None:
+    from sloperator.daily_activity_digest import _add_crm_finalization_forecast
+
+    agent = _crm_agent("FINALIZATION_FORECAST_FAILED: Jira search timed out")
+
+    result = await _add_crm_finalization_forecast(
+        facts(), settings(tmp_path), agent, now=NOV_13_EVENING
+    )
+
+    assert result.pending == facts().pending
+    assert result.queue_notes == (CRM_FAILED_NOTE,)
+
+
+@pytest.mark.asyncio
+async def test_c8b_recovered_crm_forecast_is_closed_after_recovered_digest(tmp_path) -> None:
+    message = render_fallback(facts())
+    recovered = HeadlessAgentRun(
+        "claude", "claude-opus-5-5", "digest-session", message,
+        run_id="digest-run", job_name="daily-activity-digest",
+    )
+    agent = AsyncMock()
+    agent.resume_interrupted_headless.return_value = [recovered]
+    crm_row = {
+        "run_id": "crm-forecast-run", "status": "recovered",
+        "external_session_id": "crm-session", "result_text": "FINALIZATION_FORECAST_NONE",
+    }
+    store = MagicMock()
+    store.list_interrupted_scheduled_agent_runs.side_effect = (
+        lambda job_name: [crm_row] if job_name == "daily-activity-crm-forecast" else []
+    )
+
+    count = await resume_interrupted(AsyncMock(), agent, settings(tmp_path), store)
+
+    assert count == 1
+    assert call(
+        "crm-forecast-run", status="completed", external_session_id="crm-session",
+        result_text="FINALIZATION_FORECAST_NONE",
+    ) in store.finish_scheduled_agent_run.call_args_list
+
+
+async def test_c10b_crm_reviewer_runs_appear_in_collect_facts(monkeypatch, tmp_path) -> None:
+    from sloperator.daily_activity_digest import collect_facts
+
+    def run(job: str, key: str, heading: str) -> dict:
+        return {
+            "channel_name": job, "status": "completed", "updated_at": "2026-11-13 12:00:00",
+            "messages": [
+                {"text": f"You are the reviewer for Jira task {key}."},
+                {"text": CRM_HEADING + heading},
+            ],
+        }
+
+    store = _digest_store(list_scheduled_agent_runs=lambda _limit: [
+        run("crm-finalizer-reviewer", "UMN-14210", "Results calculated and published."),
+        run("crm-post-analysis-reviewer", "UMN-14211", "After Split post-analysis published."),
+    ])
+    reader = SimpleNamespace(
+        task_snapshot=AsyncMock(return_value=SimpleNamespace(
+            summary="Experiment results - CRM Black Friday", status="In Review",
+        )),
+        queued_tasks=AsyncMock(return_value=[]),
+    )
+    _patch_queues(monkeypatch, reader)
+    current = replace(settings(tmp_path), jira_username="user", jira_api_token="token")
+
+    result, _usage = await collect_facts(current, store, now=NOV_13_EVENING)
+
+    assert {"UMN-14210", "UMN-14211"} <= set(_keys(result.completed))

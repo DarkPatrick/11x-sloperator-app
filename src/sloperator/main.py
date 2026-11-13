@@ -33,6 +33,11 @@ from sloperator.automation_error_audit import (
 )
 from sloperator.bot import create_app
 from sloperator.config import ConfigurationError, Settings
+from sloperator.crm_finalizer import (
+    CRM_SWEEP_JOB_NAME,
+    recover_interrupted_crm_runs,
+    run_crm_daily,
+)
 from sloperator.daily_activity_digest import cancel_task as cancel_daily_activity_digest
 from sloperator.daily_activity_digest import resume_interrupted as resume_daily_activity_digest
 from sloperator.daily_activity_digest import run_weekdays as run_daily_activity_digest
@@ -181,6 +186,7 @@ async def serve(settings: Settings) -> None:
         settings.database_path.parent / "automation-controls.json"
     )
     finalizer_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["experiment-finalizer"]
+    crm_finalizer_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["crm-finalizer"]
     experiment_design_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["experiment-design-planner"]
     experiment_analytics_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME[
         "experiment-analytics-planner"
@@ -273,6 +279,7 @@ async def serve(settings: Settings) -> None:
     archive_task: asyncio.Task[None] | None = None
     vpn_task: asyncio.Task[None] | None = None
     experiment_finalizer_task: asyncio.Task[None] | None = None
+    crm_finalizer_task: asyncio.Task[None] | None = None
     experiment_design_task: asyncio.Task[None] | None = None
     experiment_analytics_task: asyncio.Task[None] | None = None
     jira_task_automation_task: asyncio.Task[None] | None = None
@@ -299,6 +306,7 @@ async def serve(settings: Settings) -> None:
             job.job_name: job.run_job_names for job in EMBEDDED_SCHEDULED_JOBS
         }
         gate_run_names["experiment-finalizer"] += (SWEEP_JOB_NAME,)
+        gate_run_names["crm-finalizer"] += (CRM_SWEEP_JOB_NAME,)
         recovery_gate = await RecoveryGate.snapshot(store, gate_run_names)
         archive_synchronized = asyncio.Event()
 
@@ -321,6 +329,19 @@ async def serve(settings: Settings) -> None:
                     slots=slot_runner("experiment-finalizer"),
                 ),
                 name="daily-experiment-finalizer",
+            )
+        if settings.crm_finalizer_enabled:
+            crm_finalizer_task = asyncio.create_task(
+                run_crm_daily(
+                    app.client,
+                    orchestrator,
+                    settings,
+                    lambda: (
+                        not automation_controls.disabled("crons", crm_finalizer_job.display_name)
+                    ),
+                    slots=slot_runner("crm-finalizer"),
+                ),
+                name="daily-crm-finalizer",
             )
         if settings.experiment_design_enabled:
             experiment_design_task = asyncio.create_task(
@@ -520,6 +541,7 @@ async def serve(settings: Settings) -> None:
                     last_error=last_error,
                 )
         await rerun_interrupted_overdue_sweep(orchestrator, store, settings)
+        await recover_interrupted_crm_runs(app.client, orchestrator, store, settings)
         for task_job in ("jira-task-worker", "jira-task-reviewer"):
             recovered_task_runs = await orchestrator.resume_interrupted_headless(
                 settings.agent_timeout_seconds,
@@ -744,6 +766,7 @@ async def serve(settings: Settings) -> None:
             with suppress(asyncio.CancelledError):
                 await vpn_task
         await cancel_task(experiment_finalizer_task)
+        await cancel_task(crm_finalizer_task)
         await cancel_task(jira_task_automation_task)
         await cancel_task(jira_task_poll_task)
         await cancel_experiment_design(experiment_design_task)

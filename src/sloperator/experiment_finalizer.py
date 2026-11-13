@@ -8,7 +8,7 @@ import logging
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -79,8 +79,7 @@ return the exact terminal format required by the original turn.
 
 SELECTION_RULES = f"""\
 Selection rules:
-1. Start exclusively from `ug_experiment_calculator.get_ugm_exps_list(config=cfg)` (CRM email
-   sends are the one exception, with their own allowlist and gates in rule 10). Treat the
+1. Start exclusively from `ug_experiment_calculator.get_ugm_exps_list(config=cfg)`. Treat the
    returned ids as the authoritative allowlist: never inspect, calculate, select, or publish an
    experiment whose id is absent from that list. Do not use the general experiment list and then
    infer the domain from metrics, clients, segments, a project page, or other metadata. If the UGM
@@ -166,42 +165,6 @@ Selection rules:
    eligible, make no finalisation or publication writes and return exactly `{NO_OP_NOTIFICATION}`
    and nothing else. The reviewer-selection pass has one separately defined exception for an
    idempotent maturity forecast on an ineligible Results task. Keep filter/audit details internal.
-10. CRM (Bloomreach) email sends are a second candidate source with their own identity and timing
-   gates; everything not named here (rules 4, 5, 7, 8, 9, the calculation procedure, the forecasts)
-   applies to them unchanged. CRM sends are imported admin rows
-   `Imported experiment [BLOOMREACH/<hex>]` with `provider_id = 1`; the UGM allowlist and the
-   monetisation title markers of rule 1 never apply to them.
-   a. Allowlist: `ug_experiment_calculator.get_crm_exps_list(config=cfg)`. Treat it exactly like the
-      UGM allowlist (authoritative, fail closed when it cannot be read) and require `provider_id = 1`
-      on the admin row.
-   b. Identity: the admin `jira_task` must name a Jira epic (a key or a browse URL) whose summary
-      starts with `[UG][CRM]`. An empty or non-epic `jira_task`, or another summary prefix, makes the
-      send ineligible: never guess the epic from the campaign name. All CRM sends whose `jira_task`
-      names the same epic (the main send, a last-chance resend) form one finalisation unit; the unit
-      takes the place of "one experiment" everywhere in these rules, and its experiment id in every
-      terminal line is the id of its latest send.
-   c. Timing, replacing rules 2-3: the admin date_start, date_end and status of a CRM row are not the
-      send (rows stay running for months). Read each send's window from the calculator:
-      `get_experiment(<id>, config=cfg)` returns `crm_send_ts` (the mass send) and `date_end` (the last
-      `AB Test Start`). The unit is eligible when the latest send's `date_end` lies within the last
-      calendar month and every send of the unit has `date_end` at least 7 complete days (7 * 24 hours)
-      ago: the CRM read is on day 7 after the send, after its 3-day attribution window. An exact
-      threshold value passes; a missing or unverifiable window is ineligible. The pending-trials gate
-      of rule 8 still applies to every send (client `UG_CRM`, every segment): CRM sale offers include
-      trials (5-11% of CRM-attributed web subscriptions in Aug-Oct 2026).
-   d. Results task, replacing the launch-task mapping of rule 6: the unit's Results task is the
-      epic's single child task whose summary is `Experiment results`. None, or more than one, makes
-      the unit ineligible. Only Backlog or To Do may enter the pool. The task may be assigned to a CRM
-      team member; that is not a reason to skip it: the reviewer takes it exactly as a UGM task.
-   e. Project page and iteration: CRM rows carry no project link, so the project page is the epic's
-      unique Confluence remote link (the same `/remotelink` read as for UGM). The unit is already
-      finalised when that page's `Results` section holds filled CRM tables for these sends; a
-      template with `TBU` placeholders is not populated. A CRM unit is always `Iteration 1`.
-   f. Ordering: CRM units join the same preliminary pool as UGM experiments, ordered by the latest
-      send's `date_end`. The upcoming-queue forecast and the overdue sweep treat a unit like an
-      experiment, with the planned end being the latest send's `date_end` plus 7 days.
-   g. Re-check in rule 9 re-fetches the CRM allowlist, the admin `jira_task`, the epic summary and
-      the send windows instead of the UGM allowlist and title markers.
 
 """
 
@@ -334,7 +297,7 @@ def overdue_sweep_jql(today: dt.date) -> str:
     """Results tasks of the service account that are overdue or parked until the experiment ends."""
     return (
         f'project = UMN AND assignee = "{SERVICE_ACCOUNT_ID}" '
-        'AND (summary ~ "Итоги" OR summary ~ "\\"Experiment results\\"") '
+        'AND summary ~ "Итоги" '
         'AND status in (Backlog, "To Do") '
         f'AND (duedate <= "{today.isoformat()}" OR duedate is EMPTY) ORDER BY duedate ASC, key ASC'
     )
@@ -449,15 +412,18 @@ async def sweep_overdue_results(
     agent: AgentSubmitter,
     settings: Settings,
     now: dt.datetime | None = None,
+    *,
+    job_name: str = SWEEP_JOB_NAME,
+    prompt_builder: Callable[[dt.date], str] = overdue_sweep_prompt,
 ) -> str:
     """Re-date overdue Results tasks, or park them while their experiment is not over."""
     today = (now or dt.datetime.now(dt.UTC)).astimezone(
         ZoneInfo(settings.experiment_finalizer_timezone)
     ).date()
     run = await agent.execute_once(
-        overdue_sweep_prompt(today),
+        prompt_builder(today),
         settings.experiment_finalizer_timeout_seconds,
-        job_name=SWEEP_JOB_NAME,
+        job_name=job_name,
         accept_result=is_sweep_result,
         failure_result=lambda text: text.strip().startswith(SWEEP_FAILED_PREFIX),
     )
@@ -471,6 +437,9 @@ async def rerun_interrupted_overdue_sweep(
     store: EventStore,
     settings: Settings,
     now: dt.datetime | None = None,
+    *,
+    job_name: str = SWEEP_JOB_NAME,
+    prompt_builder: Callable[[dt.date], str] = overdue_sweep_prompt,
 ) -> str | None:
     """Replace an overdue sweep a service restart interrupted today with a fresh run.
 
@@ -484,7 +453,7 @@ async def rerun_interrupted_overdue_sweep(
     now = now or dt.datetime.now(dt.UTC)
     zone = ZoneInfo(settings.experiment_finalizer_timezone)
     today = now.astimezone(zone).date()
-    rows = await asyncio.to_thread(store.list_interrupted_scheduled_agent_runs, SWEEP_JOB_NAME)
+    rows = await asyncio.to_thread(store.list_interrupted_scheduled_agent_runs, job_name)
     interrupted_today = False
     for row in rows:
         created = dt.datetime.fromisoformat(str(row["created_at"])).replace(tzinfo=dt.UTC)
@@ -498,7 +467,9 @@ async def rerun_interrupted_overdue_sweep(
     if not interrupted_today:
         return None
     LOGGER.warning("Re-running the overdue Results sweep a service restart interrupted")
-    return await sweep_overdue_results(agent, settings, now)
+    return await sweep_overdue_results(
+        agent, settings, now, job_name=job_name, prompt_builder=prompt_builder
+    )
 
 
 FINALIZATION_PROMPT = f"""\
@@ -518,7 +489,7 @@ all their data-quality, maturity, verification, language, and publication safegu
 
 {LOCAL_CONFLUENCE_USER_DIRECTORY}
 
-Goal: finalise exactly one eligible UG monetisation experiment, or one CRM send unit (rule 10).
+Goal: finalise exactly one eligible UG monetisation experiment.
 
 {SELECTION_RULES}
 These rules describe selection BEFORE the reviewer claims a task. This preparation pass receives
@@ -564,13 +535,6 @@ Execution for the selected experiment:
       including its required finished-experiment Forecast/audience workflow and maturity checks.
       Insert it into the correct experiment iteration on the existing project page with Decision,
       Next steps, and Insights initially empty.
-      For a CRM unit (rule 10) the calculator produces the block on the CRM team's template on its
-      own (email campaign, landing funnel, After Click, After Split); the finished-experiment
-      Forecast/audience workflow and product metrics do not apply. Generate one block per send of
-      the unit, oldest first, each naming its send date and experiment id, and put them into the
-      page's `Results` section in place of its `TBU` template; keep the section's own heading.
-      Insights follow the CRM section of `experiment-insight-research` (concurrent sends to the same
-      recipients inside the 3-day window, link scanners, the landing funnel by device).
    b. Use `experiment-insight-research` to perform the full evidence-backed insight research.
       Insert the insight summary and supported question blocks into that same Results block.
    c. Only after insights are present, write concise Decision and Next steps grounded in them and
@@ -636,7 +600,7 @@ Final notification (reviewer only):
   only the concise operator-facing failure. Do not put any text before these formats.
 
 Use the current date/time in Asia/Nicosia for all relative-date and completion decisions.
-Never finalise more than one experiment (or one CRM send unit) in this run.
+Never finalise more than one experiment in this run.
 """
 
 FINAL_NOTIFICATION_POLICY = FINALIZATION_PROMPT.split("Final notification (reviewer only):", 1)[1]
@@ -747,6 +711,39 @@ Preparation result:
 {{prepared_result}}
 """
 
+SUCCESS_HEADING = "Results calculated and published."
+
+
+@dataclass(frozen=True)
+class FinalizerFlow:
+    """Prompts, run names and publication rules of one finalizer pass.
+
+    The start -> preparation -> review -> publish machinery is shared; a flow only swaps what
+    differs between passes. `review_prompt` holds exactly one `{prepared_result}` placeholder and
+    no other brace.
+    """
+
+    start_prompt: str
+    preparation_prompt: str
+    review_prompt: str
+    reviewer_job: str
+    preparer_job: str
+    success_heading: str
+    publish_no_op: bool
+    recover_missing_page: bool
+
+
+UGM_FLOW = FinalizerFlow(
+    START_PROMPT,
+    FINALIZATION_PROMPT,
+    REVIEW_PROMPT,
+    "experiment-finalizer-reviewer",
+    "experiment-finalizer-preparer",
+    SUCCESS_HEADING,
+    True,
+    True,
+)
+
 
 class AgentSubmitter(Protocol):
     async def execute_once(
@@ -808,8 +805,8 @@ def is_start_result(text: str) -> bool:
     )
 
 
-def is_reviewer_result(text: str) -> bool:
-    return is_start_result(text) or is_finalization_notification(text)
+def is_reviewer_result(text: str, success_heading: str = SUCCESS_HEADING) -> bool:
+    return is_start_result(text) or is_finalization_notification(text, success_heading)
 
 
 def is_preparation_result(text: str) -> bool:
@@ -899,7 +896,9 @@ async def execute_finalizer_turn(
     return run
 
 
-def normalize_finalization_notification(text: str) -> str:
+def normalize_finalization_notification(
+    text: str, success_heading: str = SUCCESS_HEADING
+) -> str:
     """Remove model preamble and enforce one of the production notification shapes."""
     stripped = text.strip()
     lines = stripped.splitlines()
@@ -909,7 +908,7 @@ def normalize_finalization_notification(text: str) -> str:
             candidate.startswith(("[", "<http"))
             and " — experiment " in candidate
             and "components/ab/experiment/view?id=" in candidate
-            and "Results calculated and published." in candidate
+            and success_heading in candidate
         ):
             return "\n".join(lines[index:]).strip()
     if stripped.startswith(NO_OP_PREFIX):
@@ -921,10 +920,10 @@ def normalize_finalization_notification(text: str) -> str:
     )
 
 
-def is_finalization_notification(text: str) -> bool:
+def is_finalization_notification(text: str, success_heading: str = SUCCESS_HEADING) -> bool:
     """Return whether a headless result is publishable rather than an interim update."""
     try:
-        normalize_finalization_notification(text)
+        normalize_finalization_notification(text, success_heading)
     except InvalidFinalizationNotification:
         return False
     return True
@@ -949,10 +948,10 @@ def next_run_at(
 MAX_START_ATTEMPTS = 5
 
 
-def start_prompt(skipped_failures: list[str]) -> str:
+def start_prompt(skipped_failures: list[str], flow: FinalizerFlow = UGM_FLOW) -> str:
     """The start prompt, excluding candidates that already failed during this run."""
     if not skipped_failures:
-        return START_PROMPT
+        return flow.start_prompt
     experiments = sorted(
         {
             match
@@ -964,7 +963,7 @@ def start_prompt(skipped_failures: list[str]) -> str:
     )
     tasks = sorted({key for text in skipped_failures for key in re.findall(r"UMN-\d+", text)})
     reasons = "\n".join(f"- {text}" for text in skipped_failures)
-    return f"""{START_PROMPT}
+    return f"""{flow.start_prompt}
 
 EXCLUDED IN THIS RUN
 Earlier start passes of this same scheduled run already failed on the candidates below and the
@@ -980,6 +979,7 @@ async def run_once(
     client: AsyncWebClient,
     agent: AgentSubmitter,
     settings: Settings,
+    flow: FinalizerFlow = UGM_FLOW,
 ) -> str:
     """Run headlessly, publish once, and attach the resumable session.
 
@@ -990,17 +990,21 @@ async def run_once(
     for _ in range(MAX_START_ATTEMPTS):
         start_run = await execute_finalizer_turn(
             agent,
-            start_prompt(skipped),
+            start_prompt(skipped, flow),
             settings.experiment_finalizer_timeout_seconds,
-            job_name="experiment-finalizer-reviewer",
+            job_name=flow.reviewer_job,
             accept_result=is_start_result,
         )
         _, forecasts = split_maturity_forecasts(start_run.text)
-        try:
-            recovered_start = await recover_missing_project_page(settings, agent, start_run)
-        except SelectionError as error:
-            failed_text = split_maturity_forecasts(start_run.text)[0]
-            recovered_start = replace(start_run, text=f"{failed_text} ({error})")
+        recovered_start: HeadlessAgentRun | None = None
+        if flow.recover_missing_page:
+            try:
+                recovered_start = await recover_missing_project_page(
+                    settings, agent, start_run, flow=flow
+                )
+            except SelectionError as error:
+                failed_text = split_maturity_forecasts(start_run.text)[0]
+                recovered_start = replace(start_run, text=f"{failed_text} ({error})")
         if recovered_start is not None:
             start_run = recovered_start
         terminal, recovered_forecasts = split_maturity_forecasts(start_run.text)
@@ -1013,12 +1017,17 @@ async def run_once(
             LOGGER.info("Finalizer candidate failed at start; looking for the next one")
             continue
         if start_run.text.strip().startswith(NO_OP_PREFIX):
+            if not flow.publish_no_op:
+                LOGGER.info("Finalizer flow %s: no eligible candidate", flow.reviewer_job)
+                return NO_OP_NOTIFICATION
             no_op_run = replace(start_run, text=NO_OP_NOTIFICATION)
-            return await publish_run(client, agent, settings, no_op_run)
+            return await publish_run(client, agent, settings, no_op_run, flow=flow)
         if STARTED_RE.fullmatch(start_run.text.strip()) is None:
             raise InvalidFinalizationNotification(start_run.text)
         try:
-            return await run_preparation_from_started_run(client, agent, settings, start_run)
+            return await run_preparation_from_started_run(
+                client, agent, settings, start_run, flow=flow
+            )
         except SelectionError as error:
             skipped.append(f"{start_run.text.strip()}: {error}")
             LOGGER.info("Finalizer start failed page validation; looking for the next candidate")
@@ -1032,6 +1041,7 @@ async def run_preparation_from_started_run(
     agent: AgentSubmitter,
     settings: Settings,
     start_run: HeadlessAgentRun,
+    flow: FinalizerFlow = UGM_FLOW,
 ) -> str:
     """Validate a reviewer start before handing it to the preparation agent."""
     try:
@@ -1043,13 +1053,18 @@ async def run_preparation_from_started_run(
             task_key=started.group(4) if started else None,
         )
         raise
-    return await run_preparation(client, agent, settings, start_run, project_page_id)
+    # The UGM call keeps its pre-flow shape so existing callers and spies see the same arguments.
+    flow_kwargs = {} if flow is UGM_FLOW else {"flow": flow}
+    return await run_preparation(
+        client, agent, settings, start_run, project_page_id, **flow_kwargs
+    )
 
 
 async def recover_missing_project_page(
     settings: Settings,
     agent: AgentSubmitter,
     failed_run: HeadlessAgentRun,
+    flow: FinalizerFlow = UGM_FLOW,
 ) -> HeadlessAgentRun | None:
     """Resume a reviewer when Jira's UI-only Confluence link was overlooked."""
     match = MISSING_PAGE_FAILURE_RE.search(failed_run.text)
@@ -1089,7 +1104,7 @@ failure, return exactly `Experiment finalisation failed: <reason>`.
         agent,
         recovery_prompt,
         settings.experiment_finalizer_timeout_seconds,
-        job_name="experiment-finalizer-reviewer",
+        job_name=flow.reviewer_job,
         accept_result=is_start_result,
         existing_session_id=failed_run.session_id,
     )
@@ -1120,14 +1135,15 @@ async def run_preparation(
     settings: Settings,
     started_run: HeadlessAgentRun,
     project_page_id: str,
+    flow: FinalizerFlow = UGM_FLOW,
 ) -> str:
     prepared_run = await execute_finalizer_turn(
         agent,
-        FINALIZATION_PROMPT + "\n\nAuthoritative project page ID: " + project_page_id
+        flow.preparation_prompt + "\n\nAuthoritative project page ID: " + project_page_id
         + "\n" + agent_instructions(project_page_id, started_run.text.strip().split(" | ")[-1])
         + "\nReviewer verified start:\n" + started_run.text,
         settings.experiment_finalizer_timeout_seconds,
-        job_name="experiment-finalizer-preparer",
+        job_name=flow.preparer_job,
         accept_result=is_preparation_result,
     )
     prepared_text = prepared_run.text.strip()
@@ -1152,6 +1168,7 @@ async def run_preparation(
         client, agent, settings, prepared_text,
         reviewer_session_id=started_run.session_id,
         start_context=f"Authoritative project page ID: {project_page_id}\n{started_run.text}",
+        flow=flow,
     )
 
 
@@ -1162,10 +1179,11 @@ async def run_review(
     prepared_text: str,
     reviewer_session_id: str | None = None,
     start_context: str = "",
+    flow: FinalizerFlow = UGM_FLOW,
 ) -> str:
     if PREPARED_RE.match(prepared_text.strip()) is None:
         raise InvalidFinalizationNotification("Invalid preparation result")
-    review_text = REVIEW_PROMPT.format(prepared_result=prepared_text + "\n" + start_context)
+    review_text = flow.review_prompt.format(prepared_result=prepared_text + "\n" + start_context)
     page_match = re.search(r"Authoritative project page ID: (\d+)", start_context)
     task_match = re.search(r"\| (UMN-\d+)$", start_context.strip())
     if page_match and task_match:
@@ -1174,14 +1192,15 @@ async def run_review(
         agent,
         review_text,
         settings.experiment_finalizer_timeout_seconds,
-        job_name="experiment-finalizer-reviewer",
-        accept_result=is_finalization_notification,
+        job_name=flow.reviewer_job,
+        accept_result=lambda text: is_finalization_notification(text, flow.success_heading),
         existing_session_id=reviewer_session_id,
     )
     return await publish_run(
         client, agent, settings, review_run,
         task_key=task_match.group(1) if task_match else None,
         project_page_id=page_match.group(1) if page_match else None,
+        flow=flow,
     )
 
 
@@ -1192,9 +1211,10 @@ async def publish_run(
     run: HeadlessAgentRun,
     task_key: str | None = None,
     project_page_id: str | None = None,
+    flow: FinalizerFlow = UGM_FLOW,
 ) -> str:
     """Publish and attach a completed or restart-recovered finalizer run."""
-    notification = normalize_finalization_notification(run.text)
+    notification = normalize_finalization_notification(run.text, flow.success_heading)
     if notification.startswith(FAILURE_PREFIXES):
         notification = await address_failure(client, settings, notification, task_key=task_key)
     elif notification != NO_OP_NOTIFICATION:
@@ -1211,6 +1231,7 @@ async def publish_run(
         client,
         channel,
         notification,
+        success_heading=flow.success_heading,
     )
     if existing_ts is not None:
         LOGGER.warning(
@@ -1257,6 +1278,7 @@ async def find_existing_publication(
     notification: str,
     *,
     max_pages: int = 5,
+    success_heading: str = SUCCESS_HEADING,
 ) -> str | None:
     """Find an already published success notification using its stable identity."""
     experiment = re.search(
@@ -1283,7 +1305,7 @@ async def find_existing_publication(
                 continue
             if (
                 f"components/ab/experiment/view?id={experiment_id}" in text
-                and f"Iteration {iteration}. Results calculated and published." in text
+                and f"Iteration {iteration}. {success_heading}" in text
             ):
                 timestamp = message.get("ts")
                 if isinstance(timestamp, str):

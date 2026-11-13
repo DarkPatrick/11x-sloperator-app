@@ -7,7 +7,17 @@ from dataclasses import dataclass
 
 from sloperator.automation_error_audit import AUDIT_PROMPT, HOUR, TIMEZONE
 from sloperator.config import Settings
-from sloperator.daily_activity_digest import DIGEST_PROMPT, FINALIZATION_FORECAST_PROMPT
+from sloperator.crm_finalizer import (
+    CRM_FIRST_READ_START_PROMPT,
+    CRM_POST_ANALYSIS_START_PROMPT,
+    CRM_RUN_JOB_NAMES,
+)
+from sloperator.daily_activity_digest import (
+    CRM_FINALIZATION_FORECAST_JOB_NAME,
+    CRM_FINALIZATION_FORECAST_PROMPT,
+    DIGEST_PROMPT,
+    FINALIZATION_FORECAST_PROMPT,
+)
 from sloperator.daily_activity_digest import HOUR as DIGEST_HOUR
 from sloperator.daily_activity_digest import TIMEZONE as DIGEST_TIMEZONE
 from sloperator.experiment_analytics_planner import PREPARATION_PROMPT as ANALYTICS_PROMPT
@@ -75,6 +85,27 @@ EMBEDDED_SCHEDULED_JOBS = (
         prompt=FINALIZATION_PROMPT,
     ),
     EmbeddedScheduledJob(
+        job_name="crm-finalizer",
+        run_job_names=CRM_RUN_JOB_NAMES,
+        display_name="crm-finalizer (sloperator.service)",
+        schedule=lambda settings: (
+            f"weekdays Mon-Fri {settings.crm_finalizer_hour:02d}:00 "
+            f"{settings.experiment_finalizer_timezone}"
+        ),
+        logger_name="sloperator.crm_finalizer",
+        scheduled_prefix="Next CRM finalizer run scheduled for ",
+        started_message="Starting scheduled CRM finalizer run",
+        completed_message="CRM finalizer run completed",
+        failed_message="Could not complete the CRM finalizer run",
+        prompt_source=(
+            "sloperator.crm_finalizer.CRM_FIRST_READ_START_PROMPT + CRM_POST_ANALYSIS_START_PROMPT"
+        ),
+        condition=(
+            "One CRM first read and one After Split post-analysis per weekday; silent when none"
+        ),
+        prompt=CRM_FIRST_READ_START_PROMPT + "\n\n" + CRM_POST_ANALYSIS_START_PROMPT,
+    ),
+    EmbeddedScheduledJob(
         job_name="experiment-design-planner",
         run_job_names=("experiment-design-preparer", "experiment-design-reviewer"),
         display_name="experiment-design-planner (sloperator.service)",
@@ -113,7 +144,11 @@ EMBEDDED_SCHEDULED_JOBS = (
     ),
     EmbeddedScheduledJob(
         job_name="daily-activity-digest",
-        run_job_names=("daily-activity-digest", "daily-activity-finalization-forecast"),
+        run_job_names=(
+            "daily-activity-digest",
+            "daily-activity-finalization-forecast",
+            CRM_FINALIZATION_FORECAST_JOB_NAME,
+        ),
         display_name="daily-activity-digest (sloperator.service)",
         schedule=lambda _settings: (
             f"weekdays Mon-Fri {DIGEST_HOUR:02d}:00 {DIGEST_TIMEZONE}"
@@ -125,12 +160,19 @@ EMBEDDED_SCHEDULED_JOBS = (
         failed_message="Could not complete the daily activity digest",
         prompt_source=(
             "sloperator.daily_activity_digest.DIGEST_PROMPT + FINALIZATION_FORECAST_PROMPT"
+            " + CRM_FINALIZATION_FORECAST_PROMPT"
         ),
         condition=(
             "Weekday message to #owl-ugmonetization; deterministic fallback when the agent "
             "cannot run"
         ),
-        prompt=DIGEST_PROMPT + "\n\n" + FINALIZATION_FORECAST_PROMPT,
+        prompt=(
+            DIGEST_PROMPT
+            + "\n\n"
+            + FINALIZATION_FORECAST_PROMPT
+            + "\n\n"
+            + CRM_FINALIZATION_FORECAST_PROMPT
+        ),
     ),
     EmbeddedScheduledJob(
         job_name="automation-error-audit",

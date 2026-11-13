@@ -64,6 +64,8 @@ class Settings:
     experiment_finalizer_hour: int = 12
     experiment_finalizer_timeout_seconds: int = 7_200
     experiment_finalizer_channel: str = "C07A9FDQ14P"
+    crm_finalizer_enabled: bool = True
+    crm_finalizer_hour: int = 14
     experiment_design_enabled: bool = True
     experiment_design_timezone: str = "Asia/Nicosia"
     experiment_design_hour: int = 15
@@ -179,6 +181,9 @@ class Settings:
         experiment_finalizer_channel = os.environ.get(
             "EXPERIMENT_FINALIZER_CHANNEL", "C07A9FDQ14P"
         ).strip()
+        crm_finalizer_enabled = os.environ.get(
+            "CRM_FINALIZER_ENABLED", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         experiment_design_enabled = os.environ.get(
             "EXPERIMENT_DESIGN_ENABLED", "true"
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -258,6 +263,7 @@ class Settings:
             experiment_finalizer_timeout_seconds = int(
                 os.environ.get("EXPERIMENT_FINALIZER_TIMEOUT_SECONDS", "7200")
             )
+            crm_finalizer_hour = int(os.environ.get("CRM_FINALIZER_HOUR", "14"))
             experiment_design_hour = int(os.environ.get("EXPERIMENT_DESIGN_HOUR", "15"))
             experiment_design_timeout_seconds = int(
                 os.environ.get("EXPERIMENT_DESIGN_TIMEOUT_SECONDS", "7200")
@@ -318,6 +324,8 @@ class Settings:
             raise ConfigurationError("SLOPERATOR_AGENT_MAX_CONCURRENCY must be between 1 and 8")
         if not 0 <= experiment_finalizer_hour <= 23:
             raise ConfigurationError("EXPERIMENT_FINALIZER_HOUR must be between 0 and 23")
+        if not 0 <= crm_finalizer_hour <= 23:
+            raise ConfigurationError("CRM_FINALIZER_HOUR must be between 0 and 23")
         if not 300 <= experiment_finalizer_timeout_seconds <= 86_400:
             raise ConfigurationError(
                 "EXPERIMENT_FINALIZER_TIMEOUT_SECONDS must be between 300 and 86400"
@@ -458,6 +466,8 @@ class Settings:
             experiment_finalizer_hour=experiment_finalizer_hour,
             experiment_finalizer_timeout_seconds=experiment_finalizer_timeout_seconds,
             experiment_finalizer_channel=experiment_finalizer_channel,
+            crm_finalizer_enabled=crm_finalizer_enabled,
+            crm_finalizer_hour=crm_finalizer_hour,
             experiment_design_enabled=experiment_design_enabled,
             experiment_design_timezone=experiment_design_timezone,
             experiment_design_hour=experiment_design_hour,

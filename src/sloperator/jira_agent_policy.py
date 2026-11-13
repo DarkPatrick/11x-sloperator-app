@@ -84,11 +84,11 @@ BOARD_SELECTION_JOBS = frozenset({
 
 WORKER_JOBS = frozenset({
     "jira-task-worker", "experiment-design-preparer", "experiment-analytics-preparer",
-    "experiment-finalizer-preparer",
+    "experiment-finalizer-preparer", "crm-finalizer-preparer", "crm-post-analysis-preparer",
 })
 REVIEWER_JOBS = frozenset({
     "jira-task-reviewer", "experiment-design-reviewer", "experiment-analytics-reviewer",
-    "experiment-finalizer-reviewer",
+    "experiment-finalizer-reviewer", "crm-finalizer-reviewer", "crm-post-analysis-reviewer",
 })
 
 

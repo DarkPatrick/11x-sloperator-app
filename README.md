@@ -268,7 +268,8 @@ they cannot modify the working tree concurrently.
 
 The embedded scheduler loops start right after Slack Socket Mode connects, before the startup
 recovery of interrupted agent runs. Each loop logs its usual `Next ... scheduled for ...` line
-when it starts. The loops are the experiment finalizer, the experiment design planner and the
+when it starts. The loops are the experiment finalizer (UGM, 12:00), the CRM finalizer (14:00),
+the experiment design planner and the
 experiment analytics planner. They also include the Jira task automation hourly launcher and
 ten-minute poll, the automation error audit, the daily activity digest, the skill docs sync and
 the MySQL docs sync. The `*_ENABLED` settings still decide whether a loop is created. The Slack
@@ -276,14 +277,14 @@ archive sync loop and the VPN monitor still start after the recovery and the ini
 sync, and `Sloperator started` is still logged last.
 
 Recovery gate. At startup the service notes, per job, which of the job's scheduled agent runs
-are unfinished. It uses the job's `run_job_names` from `scheduled_jobs.py`, and for the finalizer
-also `results-overdue-sweep`. While the recovery is still running, a job that is due waits until
+are unfinished. It uses the job's `run_job_names` from `scheduled_jobs.py`, and for the finalizers
+also their overdue sweeps: `results-overdue-sweep` (UGM) and `crm-results-overdue-sweep` (CRM). While the recovery is still running, a job that is due waits until
 those runs are finished. It re-checks about once a minute and logs `Scheduled <job> is waiting
 for the recovery of its interrupted run(s): ...` once. The gate opens for every job when the
 recovery finishes. Runs started after startup never hold it.
 
-Slots and catch-up. Seven jobs run on a daily or weekly schedule: the finalizer, the two
-planners, the audit, the digest and the two docs syncs. Each of their scheduled times (a slot)
+Slots and catch-up. Eight jobs run on a daily or weekly schedule: the two finalizers (UGM and
+CRM), the two planners, the audit, the digest and the two docs syncs. Each of their scheduled times (a slot)
 fires at most once. A slot missed while the service was down, still starting, or held by the
 gate fires once after startup, provided it is still inside the catch-up window. The window is at
 most 6 hours old and the same calendar day in the job's own timezone. Only the most recent
@@ -302,6 +303,22 @@ skips that slot, and waits for the next one. Inspect the records with:
 ```bash
 sqlite3 data/sloperator.sqlite3 "SELECT key, value FROM metadata WHERE key LIKE 'scheduler-slot:%'"
 ```
+
+## CRM finalizer
+
+CRM (Bloomreach) email experiments have their own finalizer, `crm_finalizer.py`, separate from the
+UGM finalizer, which skips CRM. It runs on weekdays at `CRM_FINALIZER_HOUR` (default `14`)
+Asia/Nicosia and is switched by `CRM_FINALIZER_ENABLED` (default `true`) and by its admin row
+`crm-finalizer`. Each run has up to three steps:
+
+- First read: a send whose 3-day attribution window has closed gets its results block without
+  After Split. There is no trial-maturity wait.
+- After Split post-analysis: from day 7, once pending trials on `UG_CRM` / `CRM purchases` pass
+  the gate, the post-analysis block is added after the send's Insights. At most one per run.
+- Overdue sweep of CRM `Experiment results` tasks.
+
+A run with nothing to publish posts nothing to Slack. The 19:00 daily digest carries a separate
+forecast line for the CRM queue (`daily-activity-crm-forecast`).
 
 ## Production
 

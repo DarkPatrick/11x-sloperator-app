@@ -1259,7 +1259,9 @@ class EventStore:
                 WHERE status = 'completed' AND external_session_id IS NOT NULL
                   AND job_name IN ('experiment-design-reviewer',
                                    'experiment-analytics-reviewer',
-                                   'experiment-finalizer-reviewer')
+                                   'experiment-finalizer-reviewer',
+                                   'crm-finalizer-reviewer',
+                                   'crm-post-analysis-reviewer')
                   AND NOT EXISTS (
                     SELECT 1 FROM metadata
                     WHERE key = 'planner-task-tracked:' || scheduled_agent_runs.run_id

@@ -25,6 +25,7 @@ from sloperator.automated_session_policy import (
 )
 from sloperator.claude_usage import ClaudeUsage, read_usage
 from sloperator.config import Settings
+from sloperator.crm_finalizer import CRM_RUN_TIME_TOKEN, CRM_SELECTION_RULES, render_crm_prompt
 from sloperator.experiment_analytics_planner import FAILURE_PREFIX as ANALYTICS_FAILURE_PREFIX
 from sloperator.experiment_analytics_planner import select_from_jira as select_analytics
 from sloperator.experiment_design_planner import FAILURE_PREFIX as DESIGN_FAILURE_PREFIX
@@ -52,6 +53,12 @@ HOUR = 19
 TIMEOUT_SECONDS = 180
 JOB_NAME = "daily-activity-digest"
 FINALIZATION_FORECAST_JOB_NAME = "daily-activity-finalization-forecast"
+CRM_FINALIZATION_FORECAST_JOB_NAME = "daily-activity-crm-forecast"
+FORECAST_JOB_NAMES = (FINALIZATION_FORECAST_JOB_NAME, CRM_FINALIZATION_FORECAST_JOB_NAME)
+FINALIZER_JOB_PREFIXES = ("experiment-finalizer-", "crm-finalizer-", "crm-post-analysis-")
+FINALIZER_SLACK_AGENTS = frozenset(
+    {"experiment-finalizer/slack", "crm-finalizer/slack", "crm-post-analysis/slack"}
+)
 CHANNEL_ID = "C018MJNU999"
 DIGEST_SESSION_USED_LIMIT = 80
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -153,6 +160,45 @@ FINALIZATION_FORECAST_PREFIX = "FINALIZATION_FORECAST: "
 FINALIZATION_FORECAST_NEXT_PREFIX = "FINALIZATION_FORECAST_NEXT: "
 FINALIZATION_FORECAST_NONE = "FINALIZATION_FORECAST_NONE"
 FINALIZATION_FORECAST_FAILED = "FINALIZATION_FORECAST_FAILED:"
+
+CRM_FINALIZATION_FORECAST_PROMPT = f"""\
+[claude:claude-opus-5-5]
+This is an authorised read-only automated forecast for the next scheduled CRM finalizer run, which
+runs on weekdays at {CRM_RUN_TIME_TOKEN}. Forecast only that run's first-read pass: which CRM send
+unit, if any, the production CRM selector below would take. Do not write to Jira: no comment, no
+transition, no field or date change. Do not edit Confluence, run or queue a calculation, publish
+results, or send Slack messages.
+
+{AUTOMATED_SESSION_REPOSITORY_POLICY}
+
+{AUTOMATED_ATLASSIAN_IDENTITY}
+
+{AUTOMATED_RESPONSE_STYLE}
+
+{CRM_SELECTION_RULES}
+
+Forecast rules:
+1. Evaluate the immutable time gates (the 72-hour attribution window of every send and the
+   calendar-month window of the latest send) at the supplied next scheduled run time, not merely
+   at the current time. Re-check all other sources live, read-only. The re-check before writes and
+   the `NO_OP_NOTIFICATION` answer of the selector do not apply here; this pass writes nothing and
+   answers only with the marker lines below.
+2. Build the complete pool of CRM units passing the identity rules with their Results task in
+   Backlog or To Do, and sort it exactly as the production selector does.
+3. If the oldest unit passes every rule at the supplied run time, return exactly one line made of
+   `{FINALIZATION_FORECAST_PREFIX}` and the JSON object
+   `{{"id":"<latest send id>","task":"UMN-<n>","title":"<Jira summary>"}}`.
+4. Otherwise, when a unit of that pool becomes eligible later (earliest eligibility = the latest
+   send's `date_end` plus 72 hours, taken by the first weekday run at {CRM_RUN_TIME_TOKEN} at or
+   after it, one unit per run, oldest first), return instead exactly one line made of
+   `{FINALIZATION_FORECAST_NEXT_PREFIX}` and the JSON object
+   `{{"id":"<id>","task":"UMN-<n>","title":"<Jira summary>","date":"YYYY-MM-DD"}}`
+   with the nearest such unit, its latest send id and its forecast run date.
+5. If no unit is likely, return exactly `{FINALIZATION_FORECAST_NONE}`.
+6. If authoritative selection cannot be completed, return exactly one line starting
+   `{FINALIZATION_FORECAST_FAILED}` followed by a concise reason.
+Return exactly one marker line and no audit or other text.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,7 +353,7 @@ def _run_task_keys(run: dict[str, Any]) -> tuple[str, ...]:
         patterns = (r"\bcalculation task `?(UMN-\d+)`?",)
     elif job.startswith("experiment-analytics-"):
         patterns = (r"\bAnalytics task `?(UMN-\d+)`?",)
-    elif job.startswith("experiment-finalizer-"):
+    elif job.startswith(FINALIZER_JOB_PREFIXES):
         patterns = (
             r"\bJira task `?(UMN-\d+)`?",
             r"FINALIZATION_STARTED:[^\n]+\|\s*(UMN-\d+)\b",
@@ -547,6 +593,99 @@ def _add_recovered_finalization_forecast(
     return _add_finalization_forecast_item(facts, item, now=now)
 
 
+CRM_FORECAST_NONE_NOTE = (
+    "По текущей оценке в следующий запуск нет CRM-рассылки для итогов, проходящей все фильтры."
+)
+CRM_FORECAST_FAILED_NOTE = (
+    "Очередь CRM-итогов не удалось надёжно проверить; повторю проверку по расписанию."
+)
+_UGM_FORECAST_NOTE_PREFIX = "итоги эксперимента "
+_CRM_FORECAST_NOTE_PREFIX = "итоги CRM-рассылки "
+
+
+def _parse_crm_finalization_forecast(text: str, settings: Settings) -> DigestItem | None:
+    """Parse a CRM forecast with the UGM marker grammar and name the CRM send in its note."""
+    item = _parse_finalization_forecast(text, settings)
+    if item is None:
+        return None
+    return replace(
+        item,
+        note=_CRM_FORECAST_NOTE_PREFIX + item.note.removeprefix(_UGM_FORECAST_NOTE_PREFIX),
+    )
+
+
+async def forecast_crm_finalization(
+    settings: Settings,
+    agent: AgentSubmitter,
+    *,
+    now: dt.datetime,
+) -> DigestItem | None:
+    """Forecast the CRM unit the next CRM finalizer run's first-read pass would take."""
+    target = next_finalization_run_at(
+        now,
+        settings.experiment_finalizer_timezone,
+        settings.crm_finalizer_hour,
+    )
+    run = await agent.execute_once(
+        render_crm_prompt(CRM_FINALIZATION_FORECAST_PROMPT, settings)
+        + "\n\nAuthoritative next scheduled run time: "
+        + target.isoformat(),
+        settings.experiment_finalizer_timeout_seconds,
+        job_name=CRM_FINALIZATION_FORECAST_JOB_NAME,
+        workspace=settings.agent_workspace,
+        accept_result=_is_finalization_forecast,
+        max_interim_results=0,
+    )
+    return _parse_crm_finalization_forecast(run.text, settings)
+
+
+def _add_crm_finalization_forecast_item(
+    facts: DigestFacts,
+    item: DigestItem | None,
+    *,
+    now: dt.datetime,
+) -> DigestFacts:
+    if item is None:
+        return replace(facts, queue_notes=(*facts.queue_notes, CRM_FORECAST_NONE_NOTE))
+    if item.note.endswith("завтра"):  # next run's candidate; a dated forecast keeps its date
+        item = replace(item, note=item.note.removesuffix("завтра") + _next_weekday_label(now))
+    if item.task_key in {entry.task_key for entry in (*facts.completed, *facts.pending)}:
+        return facts
+    return replace(facts, pending=(*facts.pending, item))
+
+
+async def _add_crm_finalization_forecast(
+    facts: DigestFacts,
+    settings: Settings,
+    agent: AgentSubmitter,
+    *,
+    now: dt.datetime,
+) -> DigestFacts:
+    """Add the CRM forecast as its own line, separate from the UGM forecast."""
+    try:
+        item = await forecast_crm_finalization(settings, agent, now=now)
+    except Exception:
+        LOGGER.exception("Daily digest could not forecast the next CRM finalization unit")
+        return replace(facts, queue_notes=(*facts.queue_notes, CRM_FORECAST_FAILED_NOTE))
+    return _add_crm_finalization_forecast_item(facts, item, now=now)
+
+
+def _add_recovered_crm_finalization_forecast(
+    facts: DigestFacts,
+    settings: Settings,
+    text: str,
+    *,
+    now: dt.datetime,
+) -> DigestFacts:
+    """Apply a recovered CRM forecast result without launching a replacement session."""
+    try:
+        item = _parse_crm_finalization_forecast(text, settings)
+    except Exception:
+        LOGGER.exception("Daily digest could not use the recovered CRM finalization forecast")
+        return replace(facts, queue_notes=(*facts.queue_notes, CRM_FORECAST_FAILED_NOTE))
+    return _add_crm_finalization_forecast_item(facts, item, now=now)
+
+
 def _slack_thread_url(channel_id: str, thread_ts: str) -> str:
     anchor = thread_ts.replace(".", "")
     return (
@@ -606,7 +745,7 @@ def _is_no_op_finalizer_thread(
     session: dict[str, Any], messages: list[dict[str, Any]]
 ) -> bool:
     """A finalizer thread that only says no experiment qualified is not work done."""
-    if session.get("agent_name") != "experiment-finalizer/slack":
+    if session.get("agent_name") not in FINALIZER_SLACK_AGENTS:
         return False
     texts = [str(message.get("text", "")).strip() for message in messages]
     texts = [text for text in texts if text]
@@ -640,7 +779,7 @@ def _slack_session_item(session: dict[str, Any]) -> tuple[str, DigestItem] | Non
     elif agent_name == "anomaly-alerts/slack":
         title = f"Разбор аномалий в #{channel_name}"
         completed_note = "выполнил разбор"
-    elif agent_name == "experiment-finalizer/slack":
+    elif agent_name in FINALIZER_SLACK_AGENTS:
         title = "Обновление страницы с итогами эксперимента"  # noqa: RUF001
         completed_note = "обновил страницу с итогами"  # noqa: RUF001
     elif agent_name == "experiment-config-check/slack":
@@ -708,8 +847,10 @@ def _valid_completed_run(run: dict[str, Any], task_status: str) -> bool:
     failure_markers = ("failed:", "не удалось", "no eligible", "task_waiting")
     if any(marker in lowered for marker in failure_markers):
         return False
-    if job == "experiment-finalizer-reviewer":
+    if job in {"experiment-finalizer-reviewer", "crm-finalizer-reviewer"}:
         return "results calculated and published" in lowered
+    if job == "crm-post-analysis-reviewer":
+        return "after split post-analysis published" in lowered
     if job in {"experiment-design-reviewer", "experiment-analytics-reviewer"}:
         return bool(result) and "started:" not in lowered
     if job == "jira-task-reviewer":
@@ -1135,6 +1276,7 @@ async def build_digest(
         )
         return render_fallback(facts), False
     facts = await _add_finalization_forecast(facts, settings, agent, now=current)
+    facts = await _add_crm_finalization_forecast(facts, settings, agent, now=current)
     draft = render_fallback(facts)
     message, used_agent, _run = await _format_draft(settings, agent, draft)
     return message, used_agent
@@ -1197,13 +1339,13 @@ async def run_once(
     *,
     now: dt.datetime | None = None,
     recovered_forecast: str | None = None,
+    recovered_crm_forecast: str | None = None,
 ) -> tuple[str, bool]:
     current = now or dt.datetime.now(dt.UTC)
     facts, usage = await collect_facts(settings, store, now=current)
     channel_id = CHANNEL_ID
-    if recovered_forecast is None and (
-        usage is None or not digest_quota_allows_launch(usage)
-    ):
+    recovered = recovered_forecast is not None or recovered_crm_forecast is not None
+    if not recovered and (usage is None or not digest_quota_allows_launch(usage)):
         placeholder = "Собираю информацию..."
         response = await client.chat_postMessage(channel=channel_id, text=placeholder)
         thread_ts = str(response["ts"])
@@ -1245,6 +1387,15 @@ async def run_once(
             recovered_forecast,
             now=current,
         )
+    if recovered_crm_forecast is None:
+        facts = await _add_crm_finalization_forecast(facts, settings, agent, now=current)
+    else:
+        facts = _add_recovered_crm_finalization_forecast(
+            facts,
+            settings,
+            recovered_crm_forecast,
+            now=current,
+        )
     message, used_agent, run = await _format_draft(settings, agent, render_fallback(facts))
     response = await client.chat_postMessage(
         channel=channel_id,
@@ -1275,7 +1426,7 @@ async def discard_stale_runs(store: DigestStore, *, now: dt.datetime | None = No
     timezone = ZoneInfo(TIMEZONE)
     rows = [
         row
-        for job_name in (JOB_NAME, FINALIZATION_FORECAST_JOB_NAME)
+        for job_name in (JOB_NAME, *FORECAST_JOB_NAMES)
         for row in await asyncio.to_thread(store.list_interrupted_scheduled_agent_runs, job_name)
     ]
     created = {str(row["run_id"]): _created_at(row.get("created_at")) for row in rows}
@@ -1371,68 +1522,112 @@ async def resume_interrupted(
         # A restart can interrupt the formatter after its recovered forecast handed off.
         # Close that upstream recovered run once the formatter has actually published.
         if published:
-            upstream_forecasts = await asyncio.to_thread(
-                store.list_interrupted_scheduled_agent_runs,
-                FINALIZATION_FORECAST_JOB_NAME,
-            )
-            for upstream in upstream_forecasts:
-                if upstream.get("status") != "recovered":
-                    continue
-                await asyncio.to_thread(
-                    store.finish_scheduled_agent_run,
-                    str(upstream["run_id"]),
-                    status="completed",
-                    external_session_id=(
-                        str(upstream["external_session_id"])
-                        if upstream.get("external_session_id") is not None
-                        else None
-                    ),
-                    result_text=(
-                        str(upstream["result_text"])
-                        if upstream.get("result_text") is not None
-                        else None
-                    ),
+            closed: set[str] = set()
+            for job_name in FORECAST_JOB_NAMES:
+                upstream_forecasts = await asyncio.to_thread(
+                    store.list_interrupted_scheduled_agent_runs,
+                    job_name,
                 )
+                for upstream in upstream_forecasts:
+                    run_id = str(upstream["run_id"])
+                    if upstream.get("status") != "recovered" or run_id in closed:
+                        continue
+                    closed.add(run_id)
+                    await asyncio.to_thread(
+                        store.finish_scheduled_agent_run,
+                        run_id,
+                        status="completed",
+                        external_session_id=(
+                            str(upstream["external_session_id"])
+                            if upstream.get("external_session_id") is not None
+                            else None
+                        ),
+                        result_text=(
+                            str(upstream["result_text"])
+                            if upstream.get("result_text") is not None
+                            else None
+                        ),
+                    )
         return published
 
-    recovered_forecasts = await agent.resume_interrupted_headless(
-        settings.experiment_finalizer_timeout_seconds,
-        job_name=FINALIZATION_FORECAST_JOB_NAME,
-        workspace=settings.agent_workspace,
-        accept_result=_is_finalization_forecast,
-        max_interim_results=0,
-    )
-    for run in recovered_forecasts:
+    recovered_by_job = {}
+    for job_name in FORECAST_JOB_NAMES:
+        recovered_by_job[job_name] = list(
+            await agent.resume_interrupted_headless(
+                settings.experiment_finalizer_timeout_seconds,
+                job_name=job_name,
+                workspace=settings.agent_workspace,
+                accept_result=_is_finalization_forecast,
+                max_interim_results=0,
+            )
+        )
+    ugm_runs = recovered_by_job[FINALIZATION_FORECAST_JOB_NAME]
+    crm_runs = recovered_by_job[CRM_FINALIZATION_FORECAST_JOB_NAME]
+    # One digest per interrupted forecast pair. A CRM forecast interrupted after the UGM forecast
+    # of the same digest finished reuses today's completed UGM forecast instead of running it again.
+    pairs = []
+    for index in range(max(len(ugm_runs), len(crm_runs))):
+        ugm_run = ugm_runs[index] if index < len(ugm_runs) else None
+        crm_run = crm_runs[index] if index < len(crm_runs) else None
+        pairs.append((ugm_run, crm_run))
+    for ugm_run, crm_run in pairs:
+        ugm_text = ugm_run.text if ugm_run is not None else None
+        if ugm_text is None and crm_run is not None:
+            ugm_text = await _todays_completed_ugm_forecast(store)
+        runs = [run for run in (ugm_run, crm_run) if run is not None]
         try:
             await run_once(
                 client,
                 agent,
                 settings,
                 store,
-                recovered_forecast=run.text,
+                recovered_forecast=ugm_text,
+                recovered_crm_forecast=crm_run.text if crm_run is not None else None,
             )
         except Exception as error:
             LOGGER.exception("Recovered daily activity forecast could not finish the digest")
+            for run in runs:
+                if run.run_id is not None:
+                    await asyncio.to_thread(
+                        store.finish_scheduled_agent_run,
+                        run.run_id,
+                        status="interrupted",
+                        external_session_id=run.session_id,
+                        result_text=run.text,
+                        last_error=repr(error),
+                    )
+            continue
+        for run in runs:
             if run.run_id is not None:
                 await asyncio.to_thread(
                     store.finish_scheduled_agent_run,
                     run.run_id,
-                    status="interrupted",
+                    status="completed",
                     external_session_id=run.session_id,
                     result_text=run.text,
-                    last_error=repr(error),
                 )
-            continue
-        if run.run_id is not None:
-            await asyncio.to_thread(
-                store.finish_scheduled_agent_run,
-                run.run_id,
-                status="completed",
-                external_session_id=run.session_id,
-                result_text=run.text,
-            )
         published += 1
     return published
+
+
+async def _todays_completed_ugm_forecast(
+    store: DigestStore, now: dt.datetime | None = None
+) -> str | None:
+    """The result of today's latest completed UGM finalization forecast run, if any."""
+    current = now or dt.datetime.now(dt.UTC)
+    timezone = ZoneInfo(TIMEZONE)
+    today = current.astimezone(timezone).date()
+    runs = await asyncio.to_thread(store.list_scheduled_agent_runs, 500)
+    for run in runs:
+        if run.get("channel_name") != FINALIZATION_FORECAST_JOB_NAME:
+            continue
+        if run.get("status") != "completed" or _run_day(run, timezone) != today:
+            continue
+        for message in reversed(run.get("messages") or []):
+            text = str(message.get("text") or "")
+            if message.get("message_ts") == "result" and _is_finalization_forecast(text):
+                return text
+    return None
 
 
 async def run_weekdays(

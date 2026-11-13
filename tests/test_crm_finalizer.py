@@ -141,6 +141,9 @@ def test_c1_first_read_selection_rules_and_start_prompt() -> None:
             "every send's attribution window has closed",
             "No pending-trials gate applies to the first read",
             "within the last calendar month", "oldest",
+            "the allowlist only finds the units; it does not limit their sends",
+            "whatever its start date",
+            "Rows with another `provider_id`",
         ):
             assert required in text, required
         for forbidden in (

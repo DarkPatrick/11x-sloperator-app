@@ -131,6 +131,12 @@ _CRM_IDENTITY_RULES = """\
       `jira_task` names the same epic (the main send, a last-chance resend) form one CRM send
       unit; the unit takes the place of "one experiment" everywhere in these rules, and its
       experiment id in every terminal line is the id of its latest send.
+   c. Unit membership: the allowlist only finds the units; it does not limit their sends, because
+      it holds only recently started sends and an older send of the same epic would silently drop
+      out. Once a unit's epic is known, read every admin row with `provider_id = 1` whose
+      `jira_task` names that epic (key or browse URL), whatever its start date, and treat those
+      rows as the unit's sends. Rows with another `provider_id` (an admin experiment a developer
+      created for the project) are never sends of the unit and are never calculated.
 """
 
 _CRM_RESULTS_TASK_RULE = """\
@@ -181,7 +187,7 @@ CRM_UPCOMING_QUEUE_FORECAST_POLICY = f"""\
 Upcoming-queue forecast for CRM units (a dated Jira annotation on the next Results task to take):
 - Purpose: when no Results task is started today, the nearest CRM unit a later scheduled CRM run
   will take still gets a dated forecast in Jira, so its author knows when to expect the first read.
-- Queue: every CRM unit that passes identity rules a, b and d (its `Experiment results` task is in
+- Queue: every CRM unit that passes identity rules a to d (its `Experiment results` task is in
   Backlog or To Do) and whose latest send either has not ended yet or ended within the last
   calendar month. This forecast never calculates.
 - Earliest eligibility of a unit is its latest send's `date_end` plus 72 hours (the attribution
@@ -534,10 +540,10 @@ Overdue CRM Results sweep (runs after the daily CRM finalizer run has finished):
   never one whose status is not Backlog or To Do.
 - For each task, read it with all comments (`comments <KEY> --as-bot --limit 1000 --json`, count
   equal to `total`; an incomplete response means no writes for that task) and map it to its CRM
-  send unit with identity rules a, b and d of the CRM selection rules (its parent `[UG][CRM]` epic,
-  the allowlisted sends whose admin `jira_task` names that epic, the epic's single `Experiment
-  results` task). A task that cannot be mapped unambiguously gets no writes; report it as
-  `skipped` with the reason.
+  send unit with identity rules a to d of the CRM selection rules (its parent `[UG][CRM]` epic,
+  every `provider_id = 1` send whose admin `jira_task` names that epic, the epic's single
+  `Experiment results` task). A task that cannot be mapped unambiguously gets no writes; report
+  it as `skipped` with the reason.
 - Classify the unit: `not-started` when no send of the epic exists yet, `running` when the latest
   send has no `date_end` yet, `ended` otherwise.
 - Not started or running — the task waits for the send:

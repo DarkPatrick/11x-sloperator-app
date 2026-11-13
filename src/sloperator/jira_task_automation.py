@@ -794,13 +794,22 @@ class ClarificationRequest:
     requested_from: str | None
 
 
+LAST_DAY_WEEKLY_RESERVE_PERCENT = 5
+
+
 def weekly_quota_allows_launch(usage: ClaudeUsage, *, now: dt.datetime) -> bool:
-    """Require >50% five-hour headroom and enough weekly headroom for remaining days."""
+    """Require >50% five-hour headroom and enough weekly headroom for remaining days.
+
+    Less than a day before the weekly reset only a small reserve is kept: whatever is
+    left is about to expire anyway.
+    """
     if usage.session_remaining_percent <= 50:
         return False
     if usage.week_remaining_percent > 90:
         return True
     reset = _parse_reset_day(usage.week_reset_text, now)
+    if reset - now < dt.timedelta(days=1):
+        return usage.week_remaining_percent > LAST_DAY_WEEKLY_RESERVE_PERCENT
     remaining_days = max(1, (reset.date() - now.date()).days)
     return usage.week_remaining_percent > 14 * remaining_days
 

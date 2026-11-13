@@ -29,6 +29,24 @@ def test_quota_requires_daily_weekly_headroom() -> None:
     assert weekly_quota_allows_launch(usage(10, 71), now=now)
 
 
+def test_quota_keeps_only_small_reserve_in_last_day_before_reset() -> None:
+    now = dt.datetime(2026, 9, 9, 9, 0, tzinfo=dt.UTC)  # reset Sep 9, 1pm: 4 hours left
+    assert weekly_quota_allows_launch(usage(0, 87), now=now)
+    assert weekly_quota_allows_launch(usage(0, 94), now=now)
+    assert not weekly_quota_allows_launch(usage(0, 95), now=now)
+    assert not weekly_quota_allows_launch(usage(60, 50), now=now)
+
+
+def test_quota_last_day_rule_needs_less_than_24_hours() -> None:
+    reset_tomorrow = usage(0, 87, "Sep 10, 1pm (UTC)")
+    # 23 hours before the reset: last-day reserve.
+    now = dt.datetime(2026, 9, 9, 14, tzinfo=dt.UTC)
+    assert weekly_quota_allows_launch(reset_tomorrow, now=now)
+    # 25 hours before the reset: the daily reserve (14% per day) still applies.
+    now = dt.datetime(2026, 9, 9, 12, tzinfo=dt.UTC)
+    assert not weekly_quota_allows_launch(reset_tomorrow, now=now)
+
+
 def test_quota_allows_large_weekly_reserve() -> None:
     assert weekly_quota_allows_launch(
         usage(10, 9), now=dt.datetime(2026, 9, 7, tzinfo=dt.UTC)

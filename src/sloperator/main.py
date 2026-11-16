@@ -171,6 +171,7 @@ async def serve(settings: Settings) -> None:
     validate_agent_runtime(settings)
     store = EventStore(settings.database_path)
     await asyncio.to_thread(store.initialize)
+    await asyncio.to_thread(store.begin_recovery_epoch)
     configure_operations(settings.database_path)
     recovered = await asyncio.to_thread(store.recover_interrupted_agent_work)
     if recovered:

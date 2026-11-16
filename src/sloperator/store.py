@@ -348,6 +348,20 @@ class EventStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()
+        # Set once by the service at startup (`begin_recovery_epoch`). Unset, interrupted-run
+        # listings are unfiltered (one-shot CLIs, tests).
+        self._recovery_epoch: str | None = None
+
+    def begin_recovery_epoch(self) -> None:
+        """Mark the start of this process: runs created later are live, not interrupted.
+
+        Startup recovery can take tens of minutes while the schedulers already run. Without this
+        boundary a run a scheduler started meanwhile still has status `running` and would be
+        "recovered" a second time (2026-11-16: one design review posted twice). The timestamp is
+        read from SQLite so it has the same clock and format as `created_at`.
+        """
+        with self._connect() as connection:
+            self._recovery_epoch = str(connection.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0])
 
     def artifact_was_delivered(self, channel_id: str, thread_ts: str, fingerprint: str) -> bool:
         with self._connect() as connection:
@@ -2060,7 +2074,12 @@ class EventStore:
     def list_interrupted_scheduled_agent_runs(
         self, job_name: str | None = None
     ) -> list[dict[str, object]]:
-        """Return headless cron turns interrupted before producing a result."""
+        """Return headless cron turns interrupted before producing a result.
+
+        After `begin_recovery_epoch`, only runs created by an earlier process count: a run this
+        process started is live, whatever its status.
+        """
+        epoch = self._recovery_epoch
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -2069,9 +2088,10 @@ class EventStore:
                 FROM scheduled_agent_runs
                 WHERE status IN ('running', 'interrupted', 'recovered')
                   AND (? IS NULL OR job_name = ?)
+                  AND (? IS NULL OR datetime(created_at) <= datetime(?))
                 ORDER BY created_at
                 """,
-                (job_name, job_name),
+                (job_name, job_name, epoch, epoch),
             ).fetchall()
         return [
             {

@@ -459,6 +459,43 @@ def test_stale_unfinished_scheduled_runs_are_abandoned(tmp_path) -> None:
     assert remaining == {"fresh-running"}
 
 
+def test_interrupted_runs_exclude_runs_started_by_the_current_process(tmp_path: Path) -> None:
+    # 2026-11-16: startup recovery took ~35 minutes; a scheduled design run started meanwhile
+    # was listed as "interrupted", resumed in parallel, and its review was posted twice.
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.create_scheduled_agent_run("before-restart", "design", "claude", "opus", None, "p")
+    with sqlite3.connect(tmp_path / "events.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scheduled_agent_runs SET created_at=datetime('now','-1 hour') "
+            "WHERE run_id = 'before-restart'"
+        )
+
+    store.begin_recovery_epoch()
+    store.create_scheduled_agent_run("live-after-restart", "design", "claude", "opus", None, "p")
+    with sqlite3.connect(tmp_path / "events.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scheduled_agent_runs SET created_at=datetime('now','+1 minute') "
+            "WHERE run_id = 'live-after-restart'"
+        )
+
+    assert [row["run_id"] for row in store.list_interrupted_scheduled_agent_runs()] == [
+        "before-restart"
+    ]
+    assert [row["run_id"] for row in store.list_interrupted_scheduled_agent_runs("design")] == [
+        "before-restart"
+    ]
+
+
+def test_interrupted_runs_are_unfiltered_without_a_recovery_epoch(tmp_path: Path) -> None:
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.initialize()
+    store.create_scheduled_agent_run("a", "design", "claude", "opus", None, "p")
+    store.create_scheduled_agent_run("b", "design", "claude", "opus", None, "p")
+
+    assert {row["run_id"] for row in store.list_interrupted_scheduled_agent_runs()} == {"a", "b"}
+
+
 def test_store_closes_agent_sessions_by_external_ids(tmp_path: Path) -> None:
     store = EventStore(tmp_path / "archive.sqlite3")
     store.initialize()

@@ -21,6 +21,7 @@ from sloperator.automated_session_policy import (
     AUTOMATED_SESSION_REPOSITORY_POLICY,
     LOCAL_CONFLUENCE_USER_DIRECTORY,
 )
+from sloperator.automation_controls import AutomationControls
 from sloperator.automation_failure import address_failure
 from sloperator.config import Settings
 from sloperator.experiment_agent_tools import agent_instructions
@@ -54,6 +55,33 @@ MATURITY_FORECAST_RESULT_PREFIX = "MATURITY_FORECAST:"
 QUEUE_FORECAST_RESULT_PREFIX = "QUEUE_FORECAST:"
 MATURITY_UNKNOWN_COMMENT_PREFIX = "Итоги пока не взяты в работу:"
 MATURITY_UNKNOWN_REPEAT_DAYS = 7
+# While the aix lifecycle poller is paused from the admin (aix-side DB incident, 2026-11-19), aix
+# is treated as unavailable: the calculator's bandit path calls the aix API, so bandit
+# experiments are skipped. Re-enabling the poller in the admin lifts this too.
+AIX_PAUSE_KEY = "aix-lifecycle-poller"
+BANDIT_SKIP_RULE = """\
+TEMPORARY AIX PAUSE: BANDIT EXPERIMENTS ARE SKIPPED
+aix (the AI Experimentor bandit service) is paused by an operator because of a database problem
+on its side. Until the pause is lifted, treat every bandit experiment as ineligible and do not
+touch it: an experiment whose id is an aix slug rather than a number
+(`ug_experiment_calculator.is_bandit_experiment_id(id)` is true), whose calculator exp_info has a
+truthy `is_bandit`, or whose clients include a ` BANDIT` client. Apply this before any calculator
+call, calculation-row read, aix API/MCP call, Confluence or Jira write, or maturity forecast for it;
+skip it silently and continue with the next candidate or task exactly as for any other ineligible
+one. Do not mention the skipped bandit experiments in the result.
+"""
+
+
+def aix_paused(settings: Settings) -> bool:
+    """Whether aix is paused from the admin (the aix lifecycle poller cron is disabled)."""
+    controls = AutomationControls(settings.database_path.parent / "automation-controls.json")
+    return controls.disabled("crons", AIX_PAUSE_KEY)
+
+
+def with_bandit_skip(prompt: str, skip_bandits: bool) -> str:
+    return f"{prompt}\n\n{BANDIT_SKIP_RULE}" if skip_bandits else prompt
+
+
 CALC_API_COMMAND = ".venv/bin/python .claude/skills/ug-experiment-calculator/scripts/calc_api.py"
 # Above the API default (100) and cron (0): the finalizer's calculation goes first in the queue.
 FINALIZER_CALC_PRIORITY = 500
@@ -426,7 +454,7 @@ async def sweep_overdue_results(
         ZoneInfo(settings.experiment_finalizer_timezone)
     ).date()
     run = await agent.execute_once(
-        prompt_builder(today),
+        with_bandit_skip(prompt_builder(today), aix_paused(settings)),
         settings.experiment_finalizer_timeout_seconds,
         job_name=job_name,
         accept_result=is_sweep_result,
@@ -953,10 +981,16 @@ def next_run_at(
 MAX_START_ATTEMPTS = 5
 
 
-def start_prompt(skipped_failures: list[str], flow: FinalizerFlow = UGM_FLOW) -> str:
+def start_prompt(
+    skipped_failures: list[str],
+    flow: FinalizerFlow = UGM_FLOW,
+    *,
+    skip_bandits: bool = False,
+) -> str:
     """The start prompt, excluding candidates that already failed during this run."""
+    base = with_bandit_skip(flow.start_prompt, skip_bandits)
     if not skipped_failures:
-        return flow.start_prompt
+        return base
     experiments = sorted(
         {
             match
@@ -968,7 +1002,7 @@ def start_prompt(skipped_failures: list[str], flow: FinalizerFlow = UGM_FLOW) ->
     )
     tasks = sorted({key for text in skipped_failures for key in re.findall(r"UMN-\d+", text)})
     reasons = "\n".join(f"- {text}" for text in skipped_failures)
-    return f"""{flow.start_prompt}
+    return f"""{base}
 
 EXCLUDED IN THIS RUN
 Earlier start passes of this same scheduled run already failed on the candidates below and the
@@ -995,7 +1029,7 @@ async def run_once(
     for _ in range(MAX_START_ATTEMPTS):
         start_run = await execute_finalizer_turn(
             agent,
-            start_prompt(skipped, flow),
+            start_prompt(skipped, flow, skip_bandits=aix_paused(settings)),
             settings.experiment_finalizer_timeout_seconds,
             job_name=flow.reviewer_job,
             accept_result=is_start_result,

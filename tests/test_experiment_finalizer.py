@@ -1253,3 +1253,43 @@ async def test_e10_missing_page_recovery_turn_runs_under_the_flow_reviewer_job(
     await recover_missing_project_page(settings, agent, failed, flow=flow)
 
     assert agent.execute_once.await_args.kwargs["job_name"] == "crm-post-analysis-reviewer"
+
+
+def test_aix_pause_follows_the_poller_admin_switch(tmp_path, monkeypatch) -> None:
+    monkeypatch.undo()  # the autouse conftest stub; this test checks the real switch
+    from sloperator.automation_controls import AutomationControls
+    from sloperator.experiment_finalizer import AIX_PAUSE_KEY, aix_paused
+
+    settings = Settings(
+        slack_user_id="UOWNER", bot_token="test", app_token="test",
+        database_path=tmp_path / "sloperator.sqlite3",
+    )
+    assert not aix_paused(settings)
+    controls = AutomationControls(tmp_path / "automation-controls.json")
+    controls.set_enabled("crons", AIX_PAUSE_KEY, False)
+    assert aix_paused(settings)
+    controls.set_enabled("crons", AIX_PAUSE_KEY, True)
+    assert not aix_paused(settings)
+
+
+def test_aix_pause_skips_bandits_in_start_and_retry_prompts() -> None:
+    from sloperator.experiment_finalizer import BANDIT_SKIP_RULE, start_prompt
+
+    assert BANDIT_SKIP_RULE not in start_prompt([])
+    assert start_prompt([], skip_bandits=True) == f"{START_PROMPT}\n\n{BANDIT_SKIP_RULE}"
+    failure = "Experiment finalisation failed: exp 8180 has no page"
+    retry = start_prompt([failure], skip_bandits=True)
+    assert BANDIT_SKIP_RULE in retry and "EXCLUDED IN THIS RUN" in retry
+
+
+async def test_aix_pause_skips_bandits_in_the_overdue_sweep(monkeypatch) -> None:
+    from sloperator import experiment_finalizer
+    from sloperator.experiment_finalizer import BANDIT_SKIP_RULE, sweep_overdue_results
+
+    monkeypatch.setattr(experiment_finalizer, "aix_paused", lambda settings: True)
+    agent = SimpleNamespace(execute_once=AsyncMock(
+        return_value=SimpleNamespace(text="RESULTS_SWEEP_DONE: 0")
+    ))
+    settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
+    await sweep_overdue_results(agent, settings, prompt_builder=lambda today: "SWEEP")
+    assert agent.execute_once.await_args.args[0] == f"SWEEP\n\n{BANDIT_SKIP_RULE}"

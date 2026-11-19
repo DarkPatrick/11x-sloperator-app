@@ -1,4 +1,4 @@
-"""Daily autonomous finalisation of one recent monetisation experiment."""
+"""Daily autonomous finalisation of one recent UG Monetization or UG UX experiment."""
 
 from __future__ import annotations
 
@@ -79,14 +79,19 @@ return the exact terminal format required by the original turn.
 
 SELECTION_RULES = f"""\
 Selection rules:
-1. Start exclusively from `ug_experiment_calculator.get_ugm_exps_list(config=cfg)`. Treat the
-   returned ids as the authoritative allowlist: never inspect, calculate, select, or publish an
-   experiment whose id is absent from that list. Do not use the general experiment list and then
-   infer the domain from metrics, clients, segments, a project page, or other metadata. If the UGM
-   allowlist lookup fails or cannot be verified, fail closed with no eligible experiment.
-   As an independent sanity check, require the experiment title (case-insensitively) to contain
-   `UG Monetization`, `UG Monetisation`, or the Russian stem `монетизац`. Absence of all
-   three markers makes the experiment ineligible even when its id appears in the UGM allowlist.
+1. Start exclusively from the union of `ug_experiment_calculator.get_ugm_exps_list(config=cfg)`
+   (UG Monetization) and `ug_experiment_calculator.repository.get_exps_list("UG UX", config=cfg)`
+   (UG UX). Treat the returned ids as the authoritative allowlist:
+   never inspect, calculate, select, or publish an experiment whose id is absent from both lists. Do not use the general
+   experiment list and then infer the domain from metrics, clients, segments, a project page, or
+   other metadata. If either allowlist lookup fails or cannot be verified, fail closed with no
+   eligible experiment.
+   As an independent sanity check, require the experiment title (case-insensitively) to start
+   with the bracketed prefix of the list it came from: `[UG Monetization]` (also accept
+   `UG Monetisation` or the Russian stem `монетизац` anywhere in the title) for the UG
+   Monetization list, `[UG UX]` for the UG UX list. A title without its list's marker makes the
+   experiment ineligible even when its id appears in an allowlist. Both domains are processed
+   by exactly the same rules below.
    Apply both checks before inspecting project pages and before invoking the calculator.
 2. Use the UG experiment admin/source of truth to find experiments whose actual experiment end
    timestamp is in the closed interval [now minus one calendar month, now]. Include only
@@ -158,8 +163,8 @@ Selection rules:
    every candidate in the pool has
    been checked and excluded may you return exactly `{NO_OP_NOTIFICATION}` and nothing else. Do not
    treat this expected no-op as an error.
-9. Immediately before any finalisation or publication write, re-fetch the UGM allowlist and
-   experiment title and re-check both monetisation gates from rule 1, the actual end
+9. Immediately before any finalisation or publication write, re-fetch the rule-1 allowlists and
+   experiment title and re-check both domain gates from rule 1, the actual end
    timestamp/client classification and age gate, the admin/page conditions, and the strict
    pending-trials gate against the same fresh calculation. If the experiment is no longer
    eligible, make no finalisation or publication writes and return exactly `{NO_OP_NOTIFICATION}`
@@ -489,12 +494,12 @@ all their data-quality, maturity, verification, language, and publication safegu
 
 {LOCAL_CONFLUENCE_USER_DIRECTORY}
 
-Goal: finalise exactly one eligible UG monetisation experiment.
+Goal: finalise exactly one eligible UG Monetization or UG UX experiment.
 
 {SELECTION_RULES}
 These rules describe selection BEFORE the reviewer claims a task. This preparation pass receives
 an already selected and started task: In Progress on that exact task is expected and does not make
-it ineligible. Do not walk the pool or select another experiment. Revalidate its monetisation,
+it ineligible. Do not walk the pool or select another experiment. Revalidate its domain (rule 1),
 age, segment, iteration, and fresh maturity evidence; fail if any gate changed. Reuse this run's
 verified fresh calculation; recalculate only if freshness cannot be established.
 Fetch only the authoritative project page ID supplied below. Do not search, enumerate, fetch, or

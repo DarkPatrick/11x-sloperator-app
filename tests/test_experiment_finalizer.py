@@ -136,7 +136,9 @@ def test_prompt_has_selection_pipeline_and_production_routing() -> None:
     assert "UG Monetisation" in FINALIZATION_PROMPT
     assert "монетизац" in FINALIZATION_PROMPT
     assert "Apply both checks before" in FINALIZATION_PROMPT
-    assert "re-fetch the UGM allowlist" in FINALIZATION_PROMPT
+    assert "re-fetch the rule-1 allowlists" in FINALIZATION_PROMPT
+    assert 'get_exps_list("UG UX", config=cfg)' in FINALIZATION_PROMPT
+    assert "`[UG UX]` for the UG UX list" in FINALIZATION_PROMPT
     assert "preliminary candidate pool" in FINALIZATION_PROMPT
     assert (
         "Walk the ordered preliminary candidate pool from oldest to newest"
@@ -889,8 +891,11 @@ def test_c1_ugm_texts_carry_no_crm_rule() -> None:
         assert marker not in finalizer.SELECTION_RULES
 
 
-def test_c2_goal_and_closing_lines_name_one_monetisation_experiment() -> None:
-    assert "Goal: finalise exactly one eligible UG monetisation experiment." in FINALIZATION_PROMPT
+def test_c2_goal_and_closing_lines_name_one_experiment() -> None:
+    assert (
+        "Goal: finalise exactly one eligible UG Monetization or UG UX experiment."
+        in FINALIZATION_PROMPT
+    )
     assert "Never finalise more than one experiment in this run." in FINALIZATION_PROMPT
     for prompt in (FINALIZATION_PROMPT, START_PROMPT, REVIEW_PROMPT):
         assert "CRM send unit" not in prompt

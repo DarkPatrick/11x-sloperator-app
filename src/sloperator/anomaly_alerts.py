@@ -693,6 +693,11 @@ def confirmed_monetisation_anomalies(
     ]
 
 
+# The confirmed-anomaly analysis runs on Sonnet (UMN-14203): a cheap, narrow run on the
+# product-health profile; Slack follow-ups in the thread continue on the same model.
+ANOMALY_ANALYSIS_MODEL = "claude-sonnet-5-5"
+
+
 def build_monetisation_agent_prompt(
     batch: AlertBatch,
     anomalies: list[tuple[Alert, dict[str, Any]]],
@@ -710,7 +715,7 @@ def build_monetisation_agent_prompt(
             f"peak_wow={_percent(result.get('peak_wow'))}"
         )
     metrics = "\n".join(metric_lines)
-    return f"""\
+    return f"""[claude:{ANOMALY_ANALYSIS_MODEL}]
 Use the `time-series-research` skill to investigate the confirmed UG monetisation anomalies
 below. Work from the current `/home/egor/projects/ug-ai-analyst` repository, follow its
 CLAUDE.md, and use its analytics context and data tools.

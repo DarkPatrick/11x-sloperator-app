@@ -258,3 +258,21 @@ def test_post_reply_falls_back_to_text_when_slack_rejects_blocks() -> None:
 
     assert "blocks" not in client.calls[-1]
     assert "rejected by Slack" in client.calls[-1]["text"]
+
+
+def test_monetisation_agent_prompt_runs_on_sonnet() -> None:
+    from types import SimpleNamespace
+
+    from sloperator.agents import parse_agent_request
+    from sloperator.anomaly_alerts import ANOMALY_ANALYSIS_MODEL
+
+    batch = AlertBatch("2026-07-25 10:00:00", "100.1")
+    anomaly = Alert("Landing Purchase", "web", "events", "-20", 80, 100, "0.001")
+    prompt = build_monetisation_agent_prompt(
+        batch, [(anomaly, {"status": "ok", "verdict": "ANOMALY", "value": 80, "last_week": 100})]
+    )
+    settings = SimpleNamespace(default_agent="claude", claude_model="claude-opus-5-5", codex_model="gpt")
+    parsed = parse_agent_request(prompt, settings)
+    assert (parsed.provider, parsed.model) == ("claude", ANOMALY_ANALYSIS_MODEL)
+    assert ANOMALY_ANALYSIS_MODEL == "claude-sonnet-5-5"
+    assert parsed.prompt.startswith("Use the `time-series-research` skill")

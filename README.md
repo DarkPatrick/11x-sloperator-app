@@ -373,6 +373,27 @@ Nested session state (session id, process, result) is stored in `CODE_TASK_STATE
 orchestrator calls `python -m sloperator.workspace_session send|wait --task KEY` itself.
 People do not need to run it.
 
+Local deep review. Before it opens a PR, and again after every pushed correction, the
+orchestrator runs the backend team's `/deep-review-local` on each task worktree whose repository
+has `.claude/commands/deep-review-local.md` (today only backend-ultimate-guitar):
+
+- `python -m sloperator.workspace_session review --task KEY --dir <worktree> [--focus TEXT]`
+  starts one headless, read-only Claude run of that command in the worktree, in the background,
+  as a fresh session each time. `--dir` must be inside `CODE_TASK_WORKSPACE` or
+  `CODE_TASK_WORKTREE_BASE` (after resolving symlinks) and contain the command file.
+  `wait --task KEY --kind review` returns the Russian report as `result`. The review state is
+  `<KEY>.review.json`; the nested session's `<KEY>.json` is never changed by it. A task never
+  runs a review and a nested turn at the same time.
+- The orchestrator has the real findings in our own change fixed (at most 3 review rounds per
+  pass) and lists the rest with a reason. Remaining critical findings do not block the draft PR.
+- The nested session posts a separate English PR comment for each pass
+  (`Local deep review (/deep-review-local)` with What was run, Results, Fixed, Left as is,
+  Checks after fixes) under the configured identity. Earlier comments are not edited, and the PR
+  description gets no review status. The Jira report gets one line with the final verdict and
+  the comment link, or `/deep-review-local is not available for <repo>`.
+- The nested session works only in worktrees made by the workspace's `make task-start` or
+  `make wt-init`, and leaves the main clones on their default branch.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `CODE_TASK_ENABLED` | `false` | starts both loops |
@@ -381,6 +402,8 @@ People do not need to run it.
 | `CODE_TASK_ORCHESTRATOR_TIMEOUT_SECONDS` | `7200` | one orchestrator turn; 300..86400 |
 | `CODE_TASK_NESTED_TIMEOUT_SECONDS` | `3600` | one nested turn; 300..86400 |
 | `CODE_TASK_MODEL` | `claude-opus-5-5` | nested session model |
+| `CODE_TASK_REVIEW_MODEL` | `CODE_TASK_MODEL`, then `claude-opus-5-5` | model of `review` runs |
+| `CODE_TASK_WORKTREE_BASE` | `projects/code-task-worktrees` under `$HOME` | second allowed root for `review --dir`; must match the workspace's `WT_BASE` |
 | `CODE_TASK_CLAUDE_CLI` | see `config.py` | Claude CLI of nested sessions; set it to the server's CLI path |
 | `CODE_TASK_STATE_DIR` | `data/code-tasks` | nested session state files |
 | `CODE_TASK_GH_CONFIG_DIR` | unset | `GH_CONFIG_DIR` of the nested session |
@@ -390,7 +413,9 @@ People do not need to run it.
 | `CODE_TASK_ALLOWED_REPORTERS` | empty | extra trusted Jira account ids, comma-separated |
 
 A bad timeout or an empty label stops service start with a `ConfigurationError`. The
-`workspace_session` tool itself accepts any positive nested timeout. The `CODE_TASK_` prefix is
+`workspace_session` tool itself accepts any positive nested timeout; review runs use the same
+timeout. `CODE_TASK_REVIEW_MODEL` and `CODE_TASK_WORKTREE_BASE` are read only by that tool and
+are not validated at service start. The `CODE_TASK_` prefix is
 deliberate: agent child processes inherit it, while `SLOPERATOR_*` variables are stripped.
 
 GitHub identity. With all identity variables unset, nested sessions use the service user's own
@@ -415,6 +440,11 @@ Server deployment (manual, not in `deploy/`):
   docker images for `make be-unit` available.
 - Branch protection on muse-tech default branches is the real guard against pushes there. Check
   it for every repository the agent may touch.
+- `CODE_TASK_WORKTREE_BASE` must equal the workspace's `WT_BASE` (leave it unset when `WT_BASE`
+  is the default `projects/code-task-worktrees` under the home directory), and the unit's
+  `ReadWritePaths` must include that directory.
+- Put the main backend clone under the workspace back on its default branch so the daily
+  fast-forward update works. Move any task work there into a worktree first.
 - Restart and confirm the service as described in `AGENTS.md`.
 
 Known limits (v1):

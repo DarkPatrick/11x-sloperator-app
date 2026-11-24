@@ -50,3 +50,12 @@ def test_prompts_carry_the_service_interpreter_and_comment_id() -> None:
     assert reply.startswith("[claude]")
     assert "--reply-to-comment-id 4242" in reply
     assert "-m sloperator.workspace_session wait --task UMN-1" in tasks.continue_prompt("UMN-1")
+
+
+def test_review_rules_render_without_leftover_placeholders() -> None:
+    for prompt in (tasks.continue_prompt("UMN-1"), tasks.reply_prompt("UMN-1", "7"),
+                   tasks.ORCHESTRATOR_PROMPT):
+        assert "{" not in prompt.replace("${", "") and "}" not in prompt
+        assert f"at most {tasks.MAX_REVIEW_ROUNDS} review" in prompt
+    reply = " ".join(tasks.reply_prompt("UMN-1", "7").split())
+    assert reply.index("deep review loop again") < reply.index("--reply-to-comment-id 7")

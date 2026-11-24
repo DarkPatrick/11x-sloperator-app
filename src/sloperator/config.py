@@ -25,6 +25,10 @@ DEFAULT_CODE_TASK_CLAUDE_CLI = "/home/egor/.local/bin/claude"
 DEFAULT_CODE_TASK_STATE_DIR = PROJECT_ROOT / "data" / "code-tasks"
 DEFAULT_CODE_TASK_ORCHESTRATOR_TIMEOUT_SECONDS = 7_200
 DEFAULT_CODE_TASK_NESTED_TIMEOUT_SECONDS = 3_600
+# Second allowed root of ``workspace_session review --dir`` (``CODE_TASK_WORKTREE_BASE``, read
+# only by that tool, not by ``Settings``); it must match the workspace's ``WT_BASE``. ``~`` is
+# expanded from ``$HOME``.
+DEFAULT_CODE_TASK_WORKTREE_BASE = "~/projects/code-task-worktrees"
 
 
 def _required(name: str) -> str:

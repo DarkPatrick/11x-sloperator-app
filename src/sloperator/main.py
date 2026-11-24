@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from pathlib import Path
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from typing import Any
@@ -139,6 +140,8 @@ from sloperator.jira_task_automation import (
 )
 from sloperator.operations_store import configure_operations
 from sloperator.payment_layer import PaymentLayerResponder, is_payment_layer_trigger
+from sloperator.scratch_space import configure_disk_tmp
+from sloperator.scratch_space import run_periodic_sweep as run_scratch_sweep
 from sloperator.scheduled_jobs import (
     EMBEDDED_SCHEDULED_JOBS,
     EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME,
@@ -169,6 +172,10 @@ def configure_logging(level: str) -> None:
 async def serve(settings: Settings) -> None:
     """Run Socket Mode and the health endpoint until termination."""
     validate_agent_runtime(settings)
+    disk_tmp = configure_disk_tmp(settings.database_path.parent / "tmp")
+    scratch_sweep_task = asyncio.create_task(
+        run_scratch_sweep([disk_tmp, Path("/tmp")]), name="scratch-sweep"
+    )
     store = EventStore(settings.database_path)
     await asyncio.to_thread(store.initialize)
     await asyncio.to_thread(store.begin_recovery_epoch)
@@ -758,6 +765,9 @@ async def serve(settings: Settings) -> None:
         await stop_event.wait()
     finally:
         LOGGER.info("Sloperator is shutting down")
+        scratch_sweep_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await scratch_sweep_task
         if archive_task is not None:
             archive_task.cancel()
             with suppress(asyncio.CancelledError):

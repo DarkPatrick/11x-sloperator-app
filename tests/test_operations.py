@@ -345,3 +345,26 @@ async def test_bolt_per_request_clients_are_observed():
     assert context.client.token == "test-token"
     assert context.client.timeout == 17
     assert original is not context.client
+
+
+def test_systemd_unit_name_containing_error_is_not_a_failure():
+    from sloperator.operations_log import systemd_message_failed
+
+    unit = "ug-ai-analyst-job-payment-error-signature.service"
+    routine = [
+        f"Starting {unit} - ug-ai-analyst scheduled job: payment-error-signature...",
+        f"Finished {unit} - ug-ai-analyst scheduled job: payment-error-signature.",
+        f"{unit}: Deactivated successfully.",
+        f"{unit}: Consumed 1.689s CPU time over 1min 30.580s wall clock time, 64.8M memory peak.",
+    ]
+    for message in routine:
+        assert not systemd_message_failed({"MESSAGE": message}, unit), message
+    assert systemd_message_failed(
+        {"MESSAGE": f"{unit}: Main process exited, code=exited, status=1/FAILURE"}, unit
+    )
+    assert systemd_message_failed(
+        {"MESSAGE": f"{unit}: Failed with result 'exit-code'.", "UNIT_RESULT": "exit-code"}, unit
+    )
+    assert systemd_message_failed(
+        {"MESSAGE": f"Failed to start {unit}.", "JOB_RESULT": "failed"}, unit
+    )

@@ -29,6 +29,30 @@ from sloperator.operations_store import OperationsStore, outcome, redact
 LOGGER = logging.getLogger(__name__)
 
 
+def systemd_message_failed(item: dict[str, Any], unit: str) -> bool:
+    """Classify a systemd manager record about ``unit`` as a failure.
+
+    Unit names and descriptions are identifiers, not outcomes: a job called
+    ``payment-error-signature`` must not turn "Starting ..." or "Deactivated
+    successfully" into failures.  Prefer systemd's structured result fields and
+    search only the remaining free text for failure words.
+    """
+    job_result = item.get("JOB_RESULT")
+    if job_result and job_result != "done":
+        return True
+    unit_result = item.get("UNIT_RESULT")
+    if unit_result and unit_result != "success":
+        return True
+    stem = unit.rsplit(".", 1)[0]
+    text = str(item.get("MESSAGE", "")).replace(unit, " ")
+    text = re.sub(
+        r"[\w@]+(?:[-.][\w@]+)+",
+        lambda match: " " if match.group(0) in stem else match.group(0),
+        text,
+    )
+    return bool(re.search(r"error|fail|traceback", text, re.I))
+
+
 def concise(text: str, limit: int = 230) -> str:
     text = redact(text)
     lines = [
@@ -283,9 +307,7 @@ class OperationsCollector:
                         key="journal:" + str(position),
                     )
                 elif target_unit and item.get("SYSLOG_IDENTIFIER") == "systemd":
-                    status = (
-                        "failed" if re.search(r"error|fail|traceback", message, re.I) else "info"
-                    )
+                    status = "failed" if systemd_message_failed(item, unit) else "info"
                     self.store.emit(
                         unit,
                         status,

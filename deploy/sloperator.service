@@ -16,7 +16,10 @@ RestartSec=5
 TimeoutStopSec=20
 UMask=0077
 NoNewPrivileges=true
-PrivateTmp=disk
+# The host /tmp is tmpfs and would count against MemoryMax; keep /tmp on disk.
+PrivateTmp=no
+BindPaths=/home/egor/projects/11x-sloperator-app/data/private-tmp:/tmp
+BindPaths=/home/egor/projects/11x-sloperator-app/data/private-tmp:/var/tmp
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only

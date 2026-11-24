@@ -320,6 +320,121 @@ Asia/Nicosia and is switched by `CRM_FINALIZER_ENABLED` (default `true`) and by 
 A run with nothing to publish posts nothing to Slack. The 19:00 daily digest carries a separate
 forecast line for the CRM queue (`daily-activity-crm-forecast`).
 
+## Jira code tasks (`claude-pr`)
+
+Sloperator can turn a Jira issue into a draft GitHub PR in a muse-tech repository. An
+orchestrator Claude session in ug-ai-analyst (job `jira-code-orchestrator`) drives a nested
+session in the claude-workspace-ug umbrella repo. It reviews the nested result against the
+issue, sends rework (at most 3 rounds per turn), has a draft PR opened, and reports in Jira.
+The feature is off by default (`CODE_TASK_ENABLED=false`).
+
+Creating a task:
+
+- Any Jira project. Assign the issue to the ug-ai-analyst service account, add the label
+  `claude-pr` (`CODE_TASK_LABEL`) and leave it in a status of the "To Do" category.
+- The reporter must be trusted. The trusted set is the people in
+  `SLACK_ALLOWED_CONVERSATION_USERS` plus the owner `SLACK_USER_ID`, mapped to Jira by a unique,
+  exact (case-insensitive) match of their Slack real name to an active Jira display name, plus
+  the Jira account ids in `CODE_TASK_ALLOWED_REPORTERS`. Unmatched or ambiguous people are left
+  out with a warning. The set is cached for an hour. If resolution fails and there is no cache,
+  only `CODE_TASK_ALLOWED_REPORTERS` is trusted. Issues from untrusted reporters are skipped
+  without a Jira write.
+- Write the request in the description. Name the repository and the acceptance criteria. If the
+  request is unclear, the agent asks one question in Jira and waits.
+
+What happens:
+
+- Launcher, every 10 minutes: takes the oldest eligible issue (one per cycle, none while another
+  code task is in work). It runs the abuse pre-check on summary, description and comments, then
+  starts the orchestrator. The issue moves to In Progress with a start comment. Once the draft PR
+  is open, the agent posts the PR link, a summary, and the checks it ran and skipped, then moves
+  the issue to In Review. Only headless checks such as `make be-unit` run. There are no
+  stand, browser or VPN checks.
+- Poll, every 10 minutes: resumes a task left unfinished by a timeout, failure or restart. A
+  new comment by a trusted person on a waiting or in-review task goes through the reply
+  decision. A comment that asks for a change is forwarded to the same nested session, the fix is
+  pushed to the same PR branch, and the agent replies in the comment thread. Comments by the
+  service account or untrusted people never wake the agent. A status change without a comment
+  does nothing.
+- An issue moved to Done, reassigned away or unlabelled stops being tracked. Its record is
+  deleted a day later.
+- Three turns in a row without a result verdict park the task and post one Jira comment asking
+  a person to look. Suspected abuse posts one Jira comment, alerts the owner in Slack and turns
+  the feature off in the admin (`jira-code-tasks (sloperator.service)`).
+- The agent never merges a PR, marks it ready, pushes to a default branch or force-pushes a
+  branch it did not create. No token budget applies. Cost is bounded by the Claude quota gate,
+  one task in work, the timeouts and the parking rule. An orchestrator turn holds the
+  ug-ai-analyst workspace lock for its whole length, so Slack and other agent turns in that
+  workspace wait.
+
+Progress is stored in the SQLite table `jira_code_task_links`, separate from the analytics
+Jira automation. That automation ignores issues with the label even when this feature is off.
+Nested session state (session id, process, result) is stored in `CODE_TASK_STATE_DIR`. The
+orchestrator calls `python -m sloperator.workspace_session send|wait --task KEY` itself.
+People do not need to run it.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CODE_TASK_ENABLED` | `false` | starts both loops |
+| `CODE_TASK_LABEL` | `claude-pr` | trigger label; must not be empty |
+| `CODE_TASK_WORKSPACE` | see `config.py` | claude-workspace-ug checkout for nested sessions |
+| `CODE_TASK_ORCHESTRATOR_TIMEOUT_SECONDS` | `7200` | one orchestrator turn; 300..86400 |
+| `CODE_TASK_NESTED_TIMEOUT_SECONDS` | `3600` | one nested turn; 300..86400 |
+| `CODE_TASK_MODEL` | `claude-opus-5-5` | nested session model |
+| `CODE_TASK_CLAUDE_CLI` | see `config.py` | Claude CLI of nested sessions; set it to the server's CLI path |
+| `CODE_TASK_STATE_DIR` | `data/code-tasks` | nested session state files |
+| `CODE_TASK_GH_CONFIG_DIR` | unset | `GH_CONFIG_DIR` of the nested session |
+| `CODE_TASK_GIT_SSH_COMMAND` | unset | `GIT_SSH_COMMAND` of the nested session |
+| `CODE_TASK_GIT_NAME` | unset | git author and committer name |
+| `CODE_TASK_GIT_EMAIL` | unset | git author and committer email |
+| `CODE_TASK_ALLOWED_REPORTERS` | empty | extra trusted Jira account ids, comma-separated |
+
+A bad timeout or an empty label stops service start with a `ConfigurationError`. The
+`workspace_session` tool itself accepts any positive nested timeout. The `CODE_TASK_` prefix is
+deliberate: agent child processes inherit it, while `SLOPERATOR_*` variables are stripped.
+
+GitHub identity. With all identity variables unset, nested sessions use the service user's own
+`gh` login and ssh key. To switch to a bot account, change configuration only. Point
+`CODE_TASK_GH_CONFIG_DIR` at a `gh` config directory logged in as the bot. Set
+`CODE_TASK_GIT_SSH_COMMAND` to an ssh command with the bot's key, for example
+`ssh -i <bot key> -o IdentitiesOnly=yes`. Set `CODE_TASK_GIT_NAME` and `CODE_TASK_GIT_EMAIL` to
+the bot's values. Then restart the service. A raw `GH_TOKEN` is not supported: every agent the
+service starts would inherit it.
+
+Server deployment (manual, not in `deploy/`):
+
+- systemd unit: add `ReadWritePaths` for the claude-workspace-ug checkout and the product
+  worktree base (`~/orca/worktrees`, or set `WT_BASE` for the service). Raise `MemoryMax`
+  (suggested 4096M) and `TasksMax` (suggested 512), because two Claude processes, git and docker
+  clients run at once. Set `GH_NO_UPDATE_NOTIFIER=1`, because `gh` cannot write its state file
+  under `ProtectHome=read-only`. `~/.config/gh` and `~/.ssh` stay readable. `known_hosts` must
+  already contain github.com.
+- `.env`: `CODE_TASK_ENABLED=true` and `CODE_TASK_CLAUDE_CLI` set to the server's Claude CLI.
+  Add the identity variables only when switching to a bot.
+- Keep the server's claude-workspace-ug checkout on its default branch and up to date, with the
+  docker images for `make be-unit` available.
+- Branch protection on muse-tech default branches is the real guard against pushes there. Check
+  it for every repository the agent may touch.
+- Restart and confirm the service as described in `AGENTS.md`.
+
+Known limits (v1):
+
+- PR review comments on GitHub are ignored. Corrections come only from Jira comments.
+- The nested session's `--disallowedTools` entries match command prefixes, so other spellings
+  (`git push origin +branch`, `git -C dir push -f`, `gh api` merge or ready calls) are not
+  blocked. The orchestrator session has no deny-list and relies on its prompt. Branch protection
+  covers default branches only.
+- The abuse pre-check skips the model call when every comment is by the service account. A
+  requeued issue with only bot comments therefore starts without its description being checked.
+- Untrusted comments never wake the agent, but the orchestrator still reads their text when it
+  re-reads the issue.
+- When several trusted comments arrive in one poll window, only the newest is the reply target.
+  The others reach the agent only through its re-read of the issue.
+- If a nested runner dies and its process id is reused, `wait` reports `running` instead of
+  `interrupted` until the turn times out.
+- The daily activity digest's queue section excludes the default label `claude-pr`, not a
+  custom `CODE_TASK_LABEL`.
+
 ## Production
 
 The included `deploy/sloperator.service` applies restart and resource-limit policies.

@@ -526,6 +526,10 @@ def test_systemd_scheduler_jobs_include_every_registered_schedule_and_runtime_st
             "name": "mysql-docs-sync (sloperator.service)",
             "schedule": "weekly Sun 03:00 UTC",
             "command": "embedded asyncio scheduler · active · PID 123",
+        },        {
+            "name": "jira-code-tasks (sloperator.service)",
+            "schedule": "every 10 minutes; quota-gated 'claude-pr' Jira code tasks",
+            "command": "embedded asyncio scheduler · active · PID 123",
         },
     ]
 

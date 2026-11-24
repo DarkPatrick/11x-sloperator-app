@@ -14,6 +14,19 @@ class ConfigurationError(ValueError):
     """Raised when required application configuration is invalid."""
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Jira code tasks (``claude-pr``). The ``CODE_TASK_`` prefix is deliberate: agent child processes
+# inherit it (``SLOPERATOR_*`` is stripped), so ``python -m sloperator.workspace_session`` started
+# by the orchestrator reads the same values without building ``Settings``.
+DEFAULT_CODE_TASK_LABEL = "claude-pr"
+DEFAULT_CODE_TASK_WORKSPACE = "/home/egor/projects/claude-workspace-ug"
+DEFAULT_CODE_TASK_MODEL = "claude-opus-5-5"
+DEFAULT_CODE_TASK_CLAUDE_CLI = "/home/egor/.local/bin/claude"
+DEFAULT_CODE_TASK_STATE_DIR = PROJECT_ROOT / "data" / "code-tasks"
+DEFAULT_CODE_TASK_ORCHESTRATOR_TIMEOUT_SECONDS = 7_200
+DEFAULT_CODE_TASK_NESTED_TIMEOUT_SECONDS = 3_600
+
+
 def _required(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -30,6 +43,20 @@ def _user_id_set(value: str, default: str) -> frozenset[str]:
         item.strip().strip("'\"") for item in normalized.split(",") if item.strip().strip("'\"")
     )
     return users or frozenset({default})
+
+
+def _code_task_timeout(name: str, default: int) -> int:
+    """A code-task timeout in seconds: an integer between 300 and 86400."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ConfigurationError(f"{name} must be an integer number of seconds") from error
+    if not 300 <= value <= 86_400:
+        raise ConfigurationError(f"{name} must be between 300 and 86400")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +140,19 @@ class Settings:
     clickhouse_port: int = 8443
     clickhouse_username: str | None = None
     clickhouse_password: str = ""
+    code_task_enabled: bool = False
+    code_task_label: str = DEFAULT_CODE_TASK_LABEL
+    code_task_workspace: Path = Path(DEFAULT_CODE_TASK_WORKSPACE)
+    code_task_orchestrator_timeout_seconds: int = DEFAULT_CODE_TASK_ORCHESTRATOR_TIMEOUT_SECONDS
+    code_task_nested_timeout_seconds: int = DEFAULT_CODE_TASK_NESTED_TIMEOUT_SECONDS
+    code_task_model: str = DEFAULT_CODE_TASK_MODEL
+    code_task_claude_cli: Path = Path(DEFAULT_CODE_TASK_CLAUDE_CLI)
+    code_task_state_dir: Path = DEFAULT_CODE_TASK_STATE_DIR
+    code_task_gh_config_dir: Path | None = None
+    code_task_git_ssh_command: str | None = None
+    code_task_git_name: str | None = None
+    code_task_git_email: str | None = None
+    code_task_allowed_reporters: frozenset[str] = frozenset()
 
     @property
     def conversation_user_ids(self) -> frozenset[str]:
@@ -252,6 +292,43 @@ class Settings:
         clickhouse_host = os.environ.get("CLICKHOUSE_HOST", "").strip() or None
         clickhouse_username = os.environ.get("CLICKHOUSE_USERNAME", "").strip() or None
         clickhouse_password = os.environ.get("CLICKHOUSE_PASSWORD", "")
+        code_task_enabled = os.environ.get(
+            "CODE_TASK_ENABLED", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        code_task_label = os.environ.get("CODE_TASK_LABEL", DEFAULT_CODE_TASK_LABEL).strip()
+        code_task_workspace = Path(
+            os.environ.get("CODE_TASK_WORKSPACE", "").strip() or DEFAULT_CODE_TASK_WORKSPACE
+        ).expanduser()
+        code_task_model = (
+            os.environ.get("CODE_TASK_MODEL", "").strip() or DEFAULT_CODE_TASK_MODEL
+        )
+        code_task_claude_cli = Path(
+            os.environ.get("CODE_TASK_CLAUDE_CLI", "").strip() or DEFAULT_CODE_TASK_CLAUDE_CLI
+        ).expanduser()
+        code_task_state_dir = Path(
+            os.environ.get("CODE_TASK_STATE_DIR", "").strip() or DEFAULT_CODE_TASK_STATE_DIR
+        ).expanduser()
+        gh_config_dir_text = os.environ.get("CODE_TASK_GH_CONFIG_DIR", "").strip()
+        code_task_gh_config_dir = (
+            Path(gh_config_dir_text).expanduser() if gh_config_dir_text else None
+        )
+        code_task_git_ssh_command = os.environ.get("CODE_TASK_GIT_SSH_COMMAND", "").strip() or None
+        code_task_git_name = os.environ.get("CODE_TASK_GIT_NAME", "").strip() or None
+        code_task_git_email = os.environ.get("CODE_TASK_GIT_EMAIL", "").strip() or None
+        code_task_allowed_reporters = frozenset(
+            item.strip()
+            for item in os.environ.get("CODE_TASK_ALLOWED_REPORTERS", "").split(",")
+            if item.strip()
+        )
+        code_task_orchestrator_timeout_seconds = _code_task_timeout(
+            "CODE_TASK_ORCHESTRATOR_TIMEOUT_SECONDS",
+            DEFAULT_CODE_TASK_ORCHESTRATOR_TIMEOUT_SECONDS,
+        )
+        code_task_nested_timeout_seconds = _code_task_timeout(
+            "CODE_TASK_NESTED_TIMEOUT_SECONDS", DEFAULT_CODE_TASK_NESTED_TIMEOUT_SECONDS
+        )
+        if not code_task_label:
+            raise ConfigurationError("CODE_TASK_LABEL must not be empty")
 
         try:
             port = int(os.environ.get("SLOPERATOR_PORT", "8080"))
@@ -513,4 +590,17 @@ class Settings:
             clickhouse_port=clickhouse_port,
             clickhouse_username=clickhouse_username,
             clickhouse_password=clickhouse_password,
+            code_task_enabled=code_task_enabled,
+            code_task_label=code_task_label,
+            code_task_workspace=code_task_workspace,
+            code_task_orchestrator_timeout_seconds=code_task_orchestrator_timeout_seconds,
+            code_task_nested_timeout_seconds=code_task_nested_timeout_seconds,
+            code_task_model=code_task_model,
+            code_task_claude_cli=code_task_claude_cli,
+            code_task_state_dir=code_task_state_dir,
+            code_task_gh_config_dir=code_task_gh_config_dir,
+            code_task_git_ssh_command=code_task_git_ssh_command,
+            code_task_git_name=code_task_git_name,
+            code_task_git_email=code_task_git_email,
+            code_task_allowed_reporters=code_task_allowed_reporters,
         )

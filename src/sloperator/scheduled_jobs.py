@@ -23,6 +23,13 @@ from sloperator.daily_activity_digest import TIMEZONE as DIGEST_TIMEZONE
 from sloperator.experiment_analytics_planner import PREPARATION_PROMPT as ANALYTICS_PROMPT
 from sloperator.experiment_design_planner import PREPARATION_PROMPT
 from sloperator.experiment_finalizer import START_PROMPT as FINALIZATION_PROMPT
+from sloperator.jira_code_tasks import (
+    COMPLETED_MESSAGE as CODE_TASK_COMPLETED_MESSAGE,
+)
+from sloperator.jira_code_tasks import FAILED_MESSAGE as CODE_TASK_FAILED_MESSAGE
+from sloperator.jira_code_tasks import ORCHESTRATOR_JOB_NAME as CODE_TASK_ORCHESTRATOR_JOB_NAME
+from sloperator.jira_code_tasks import ORCHESTRATOR_PROMPT as CODE_TASK_ORCHESTRATOR_PROMPT
+from sloperator.jira_code_tasks import STARTED_MESSAGE as CODE_TASK_STARTED_MESSAGE
 from sloperator.jira_task_automation import WORKER_PROMPT
 from sloperator.mysql_docs_sync import HOUR as MYSQL_DOCS_HOUR
 from sloperator.mysql_docs_sync import PROMPT as MYSQL_DOCS_PROMPT
@@ -221,6 +228,25 @@ EMBEDDED_SCHEDULED_JOBS = (
             "Weekly check of the Confluence MySQL table docs; Claude only for tables with drift"
         ),
         prompt=MYSQL_DOCS_PROMPT,
+    ),
+    EmbeddedScheduledJob(
+        job_name="jira-code-tasks",
+        run_job_names=(CODE_TASK_ORCHESTRATOR_JOB_NAME,),
+        display_name="jira-code-tasks (sloperator.service)",
+        schedule=lambda settings: (
+            f"every 10 minutes; quota-gated '{settings.code_task_label}' Jira code tasks"
+        ),
+        logger_name="sloperator.jira_code_tasks",
+        scheduled_prefix="Next Jira code task cycle scheduled for ",
+        started_message=CODE_TASK_STARTED_MESSAGE,
+        completed_message=CODE_TASK_COMPLETED_MESSAGE,
+        failed_message=CODE_TASK_FAILED_MESSAGE,
+        prompt_source="sloperator.jira_code_tasks.FIRST_TURN_PROMPT + ORCHESTRATOR_RULES",
+        condition=(
+            "Labelled issues of any project assigned to ug-ai-analyst and reported by trusted "
+            "people, when Claude quota permits; one task in work at a time (CODE_TASK_ENABLED)"
+        ),
+        prompt=CODE_TASK_ORCHESTRATOR_PROMPT,
     ),
 )
 

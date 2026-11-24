@@ -16,7 +16,7 @@ from aiohttp import BasicAuth, ClientSession, ClientTimeout
 
 from sloperator.automated_session_policy import AUTOMATED_RESPONSE_STYLE
 from sloperator.claude_usage import ClaudeUsage, ClaudeUsageError, read_usage
-from sloperator.config import Settings
+from sloperator.config import DEFAULT_CODE_TASK_LABEL, Settings
 from sloperator.jira_agent_policy import REVIEWER_OWNERSHIP_POLICY, WORKER_JIRA_POLICY
 
 LOGGER = logging.getLogger(__name__)
@@ -507,7 +507,10 @@ async def run_hourly(settings: Settings, agent: Any, enabled: Any = lambda: True
             if not weekly_quota_allows_launch(usage, now=dt.datetime.now(dt.UTC)):
                 LOGGER.info("Jira task agents held: Claude quota gate is closed")
                 continue
-            candidates = await JiraTaskReader(settings.jira_url, settings.jira_username, settings.jira_api_token).queued_tasks()
+            candidates = await JiraTaskReader(
+                settings.jira_url, settings.jira_username, settings.jira_api_token,
+                exclude_label=settings.code_task_label,
+            ).queued_tasks()
             candidates = [
                 candidate for candidate in candidates
                 if not is_reserved_experiment_task(candidate.summary) and (agent.store.jira_task_agent_link(candidate.key) is None or agent.store.jira_task_agent_link(candidate.key).get("terminal_at") is not None)
@@ -828,21 +831,36 @@ def _parse_reset_day(value: str, now: dt.datetime) -> dt.datetime:
     raise ValueError(f"unparseable Claude reset time: {value}")
 
 
+def jql_string(value: str) -> str:
+    """Quote a value as a JQL string literal."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 class JiraTaskReader:
-    def __init__(self, base_url: str, username: str, api_token: str) -> None:
+    def __init__(
+        self, base_url: str, username: str, api_token: str,
+        *, exclude_label: str = DEFAULT_CODE_TASK_LABEL,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.auth = BasicAuth(username, api_token)
         self.timeout = ClientTimeout(total=30, connect=10)
+        # Issues with the code-task label belong to sloperator.jira_code_tasks, never here.
+        self.exclude_label = exclude_label
 
     async def queued_tasks(self) -> list[JiraTaskCandidate]:
         jql = (
             f'project = UMN AND assignee = "{SERVICE_ACCOUNT_ID}" '
-            'AND status in (Backlog, "To Do") ORDER BY updated ASC, key ASC'
+            'AND status in (Backlog, "To Do") '
+            f"AND (labels IS EMPTY OR labels NOT IN ({jql_string(self.exclude_label)})) "
+            "ORDER BY updated ASC, key ASC"
         )
         async with ClientSession(auth=self.auth, timeout=self.timeout) as session:
             async with session.get(
                 f"{self.base_url}/rest/api/3/search/jql",
-                params={"jql": jql, "maxResults": 100, "fields": "summary,status,updated,description"},
+                params={
+                    "jql": jql, "maxResults": 100,
+                    "fields": "summary,status,updated,description,labels",
+                },
             ) as response:
                 if response.status >= 400:
                     raise RuntimeError(f"Jira task search failed with HTTP {response.status}")
@@ -852,6 +870,8 @@ class JiraTaskReader:
             fields = issue.get("fields", {})
             status = fields.get("status", {}).get("name")
             if status not in QUEUED_STATUSES or is_reserved_experiment_task(str(fields.get("summary", ""))):
+                continue
+            if self.exclude_label in (fields.get("labels") or []):
                 continue
             result.append(
                 JiraTaskCandidate(

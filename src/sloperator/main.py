@@ -128,6 +128,10 @@ from sloperator.experiment_finalizer import (
     run_review as run_finalization_review,
 )
 from sloperator.health import create_health_app
+from sloperator.jira_code_tasks import ORCHESTRATOR_JOB_NAME as CODE_TASK_ORCHESTRATOR_JOB_NAME
+from sloperator.jira_code_tasks import TrustedReporters
+from sloperator.jira_code_tasks import run_launcher as run_code_task_launcher
+from sloperator.jira_code_tasks import run_poll as run_code_task_poll
 from sloperator.jira_task_automation import (
     ClaudeUsageAlert,
     JiraTaskCandidate,
@@ -203,6 +207,7 @@ async def serve(settings: Settings) -> None:
     activity_digest_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["daily-activity-digest"]
     skill_docs_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["skill-docs-sync"]
     mysql_docs_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["mysql-docs-sync"]
+    code_task_job = EMBEDDED_SCHEDULED_JOBS_BY_JOB_NAME["jira-code-tasks"]
     subscription_flow_responder = SubscriptionFlowResponder(settings, store, orchestrator)
     payment_layer_responder = PaymentLayerResponder(settings, store, orchestrator)
     experiment_config_responder = ExperimentConfigResponder(settings, orchestrator)
@@ -254,6 +259,17 @@ async def serve(settings: Settings) -> None:
     def pause_jira_automation() -> None:
         automation_controls.set_enabled("crons", "jira-task-automation (sloperator.service)", False)
 
+    async def handle_code_task_abuse(task: Any, comments: list[dict[str, Any]]) -> None:
+        await app.client.chat_postMessage(
+            channel=settings.slack_user_id,
+            text=(f"Инцидент в задаче Jira {task.key} (claude-pr): предпроверка обнаружила "
+                  "возможную prompt-инъекцию или абьюз. Jira code tasks приостановлены; "
+                  "задача требует ручной проверки."),
+        )
+
+    def pause_code_tasks() -> None:
+        automation_controls.set_enabled("crons", code_task_job.display_name, False)
+
     slack_handler = AsyncSocketModeHandler(app, settings.app_token)
     http_app = create_health_app()
     create_admin_routes(http_app, store, orchestrator, app.client, automation_controls)
@@ -292,6 +308,8 @@ async def serve(settings: Settings) -> None:
     experiment_analytics_task: asyncio.Task[None] | None = None
     jira_task_automation_task: asyncio.Task[None] | None = None
     jira_task_poll_task: asyncio.Task[None] | None = None
+    code_task_launcher_task: asyncio.Task[None] | None = None
+    code_task_poll_task: asyncio.Task[None] | None = None
     automation_error_audit_task: asyncio.Task[None] | None = None
     daily_activity_digest_task: asyncio.Task[None] | None = None
     skill_docs_sync_task: asyncio.Task[None] | None = None
@@ -406,6 +424,36 @@ async def serve(settings: Settings) -> None:
             )
         else:
             LOGGER.warning("Jira task automation is disabled by JIRA_TASK_AUTOMATION_ENABLED")
+        if settings.code_task_enabled:
+            code_task_usage_alert = ClaudeUsageAlert(app.client, settings)
+            trusted_reporters = TrustedReporters(settings, app.client)
+
+            def code_tasks_enabled() -> bool:
+                return not automation_controls.disabled("crons", code_task_job.display_name)
+
+            async def wait_for_code_task_recovery() -> None:
+                await recovery_gate.wait("jira-code-tasks")
+
+            code_task_launcher_task = asyncio.create_task(
+                run_code_task_launcher(
+                    settings, orchestrator, trusted=trusted_reporters,
+                    enabled=code_tasks_enabled, on_abuse=handle_code_task_abuse,
+                    pause=pause_code_tasks, on_usage_error=code_task_usage_alert,
+                    wait_ready=wait_for_code_task_recovery,
+                ),
+                name="ten-minute-code-task-launcher",
+            )
+            code_task_poll_task = asyncio.create_task(
+                run_code_task_poll(
+                    settings, orchestrator, trusted=trusted_reporters,
+                    enabled=code_tasks_enabled, on_abuse=handle_code_task_abuse,
+                    pause=pause_code_tasks, on_usage_error=code_task_usage_alert,
+                    wait_ready=wait_for_code_task_recovery,
+                ),
+                name="ten-minute-code-task-poll",
+            )
+        else:
+            LOGGER.info("Jira code tasks are disabled by CODE_TASK_ENABLED")
         automation_error_audit_task = asyncio.create_task(
             run_daily_automation_error_audit(
                 app.client,
@@ -548,6 +596,18 @@ async def serve(settings: Settings) -> None:
                     external_session_id=run.session_id, result_text=run.text,
                     last_error=last_error,
                 )
+        # Code-task orchestrator turns are not replayed: the ten-minute poll continues each task
+        # from its stored phase, so an unfinished run of the previous process is only closed.
+        for code_task_run in await asyncio.to_thread(
+            store.list_interrupted_scheduled_agent_runs, CODE_TASK_ORCHESTRATOR_JOB_NAME
+        ):
+            await asyncio.to_thread(
+                store.finish_scheduled_agent_run, str(code_task_run["run_id"]),
+                status="abandoned",
+                last_error="interrupted by a service restart; the code-task poll continues it",
+            )
+            LOGGER.info("Closed interrupted %s run %s", CODE_TASK_ORCHESTRATOR_JOB_NAME,
+                        code_task_run["run_id"])
         await rerun_interrupted_overdue_sweep(orchestrator, store, settings)
         await recover_interrupted_crm_runs(app.client, orchestrator, store, settings)
         for task_job in ("jira-task-worker", "jira-task-reviewer"):
@@ -780,6 +840,8 @@ async def serve(settings: Settings) -> None:
         await cancel_task(crm_finalizer_task)
         await cancel_task(jira_task_automation_task)
         await cancel_task(jira_task_poll_task)
+        await cancel_task(code_task_launcher_task)
+        await cancel_task(code_task_poll_task)
         await cancel_experiment_design(experiment_design_task)
         await cancel_experiment_analytics(experiment_analytics_task)
         await cancel_automation_error_audit(automation_error_audit_task)

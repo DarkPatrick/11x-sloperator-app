@@ -189,6 +189,21 @@ CREATE TABLE IF NOT EXISTS jira_task_agent_links (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
 
+-- Jira code tasks (label claude-pr). Kept apart from jira_task_agent_links: every row there is
+-- processed by the analytics Jira automation.
+CREATE TABLE IF NOT EXISTS jira_code_task_links (
+    task_key TEXT PRIMARY KEY,
+    orchestrator_session_id TEXT,
+    phase TEXT NOT NULL DEFAULT 'working'
+        CHECK(phase IN ('working', 'waiting', 'review', 'done', 'reassigned', 'unlabelled')),
+    jira_cursor TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    pr_urls TEXT NOT NULL DEFAULT '',
+    terminal_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS admin_codex_sessions (
     session_id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -293,6 +308,9 @@ JIRA_TASK_PROGRESS_COLUMN_TYPES = (
     ("review_attempts", "INTEGER NOT NULL DEFAULT 0"),
 )
 JIRA_TASK_PROGRESS_COLUMNS = frozenset(column for column, _ in JIRA_TASK_PROGRESS_COLUMN_TYPES)
+JIRA_CODE_TASK_COLUMNS = frozenset({
+    "orchestrator_session_id", "phase", "jira_cursor", "attempts", "pr_urls", "terminal_at",
+})
 
 AGENT_USAGE_ACTIVITY_COLUMNS = (
     ("tool_calls", "INTEGER"),
@@ -1317,6 +1335,68 @@ class EventStore:
         with self._connect() as connection:
             cursor = connection.execute(
                 "DELETE FROM jira_task_agent_links WHERE terminal_at IS NOT NULL "
+                "AND datetime(terminal_at) <= datetime('now', '-1 day')"
+            )
+            return cursor.rowcount
+
+    def start_jira_code_task_link(self, task_key: str, *, jira_cursor: str | None) -> None:
+        """Create (or restart after a terminal end) the code-task link of a Jira issue."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO jira_code_task_links(task_key, phase, jira_cursor)
+                VALUES (?, 'working', ?)
+                ON CONFLICT(task_key) DO UPDATE SET
+                    orchestrator_session_id = NULL,
+                    phase = 'working',
+                    jira_cursor = excluded.jira_cursor,
+                    attempts = 0,
+                    pr_urls = '',
+                    terminal_at = NULL,
+                    created_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (task_key, jira_cursor),
+            )
+
+    def update_jira_code_task_link(self, task_key: str, **values: Any) -> None:
+        """Overwrite the given columns of an existing code-task link, NULLs included."""
+        unknown = set(values) - JIRA_CODE_TASK_COLUMNS
+        if unknown:
+            raise ValueError(f"Unknown Jira code task columns: {sorted(unknown)}")
+        if not values:
+            return
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE jira_code_task_links SET {assignments}, "  # columns are allow-listed
+                "updated_at = CURRENT_TIMESTAMP WHERE task_key = ?",
+                (*values.values(), task_key),
+            )
+
+    def jira_code_task_link(self, task_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM jira_code_task_links WHERE task_key = ?", (task_key,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def active_jira_code_task_links(self) -> list[dict[str, Any]]:
+        """Code-task links that are not terminal, oldest first."""
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM jira_code_task_links WHERE terminal_at IS NULL "
+                "ORDER BY datetime(created_at), task_key"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def cleanup_jira_code_task_links(self) -> int:
+        """Drop terminal code-task links one day after they became terminal."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM jira_code_task_links WHERE terminal_at IS NOT NULL "
                 "AND datetime(terminal_at) <= datetime('now', '-1 day')"
             )
             return cursor.rowcount

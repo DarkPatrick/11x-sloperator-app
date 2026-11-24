@@ -299,7 +299,7 @@ async def test_hourly_starts_reviewer_before_worker_and_resumes_owner(monkeypatc
         updated_at=dt.datetime(2026, 10, 5, 12, 0, tzinfo=dt.UTC),
     )
     reader = SimpleNamespace(queued_tasks=AsyncMock(return_value=[task]), recent_comments=AsyncMock(return_value=[]))
-    monkeypatch.setattr(automation, "JiraTaskReader", lambda *args: reader)
+    monkeypatch.setattr(automation, "JiraTaskReader", lambda *args, **kwargs: reader)
     monkeypatch.setattr(automation, "read_usage_or_alert", AsyncMock(return_value=object()))
     monkeypatch.setattr(automation, "weekly_quota_allows_launch", lambda *args, **kwargs: True)
     monkeypatch.setattr(automation, "abuse_precheck", AsyncMock(return_value=False))
@@ -313,7 +313,8 @@ async def test_hourly_starts_reviewer_before_worker_and_resumes_owner(monkeypatc
         SimpleNamespace(text="Private result", session_id="worker"),
         SimpleNamespace(text="Published", session_id="owner"),
     ]))
-    settings = SimpleNamespace(jira_username="bot", jira_api_token="test", jira_url="https://jira.invalid")
+    settings = SimpleNamespace(jira_username="bot", jira_api_token="test", jira_url="https://jira.invalid",
+                               code_task_label="claude-pr")
     with pytest.raises(asyncio.CancelledError):
         await automation.run_hourly(settings, agent)
     calls = agent.execute_once.call_args_list

@@ -59,3 +59,15 @@ def test_review_rules_render_without_leftover_placeholders() -> None:
         assert f"at most {tasks.MAX_REVIEW_ROUNDS} review" in prompt
     reply = " ".join(tasks.reply_prompt("UMN-1", "7").split())
     assert reply.index("deep review loop again") < reply.index("--reply-to-comment-id 7")
+
+
+def test_orchestrator_rules_set_jira_start_and_due_dates() -> None:
+    from sloperator import jira_code_tasks as jct
+
+    for prompt in (
+        jct.continue_prompt("UMN-1"),
+        jct.reply_prompt("UMN-1", "42"),
+    ):
+        assert "set-start-date UMN-1 --date" in prompt
+        assert "set-due-date UMN-1 --date" in prompt
+        assert "never pass --replace" in prompt

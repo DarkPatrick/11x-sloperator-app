@@ -1293,3 +1293,13 @@ async def test_aix_pause_skips_bandits_in_the_overdue_sweep(monkeypatch) -> None
     settings = Settings(slack_user_id="UOWNER", bot_token="test", app_token="test")
     await sweep_overdue_results(agent, settings, prompt_builder=lambda today: "SWEEP")
     assert agent.execute_once.await_args.args[0] == f"SWEEP\n\n{BANDIT_SKIP_RULE}"
+
+
+def test_finalization_prompt_follows_results_standard() -> None:
+    assert "context/project-page/results.md" in FINALIZATION_PROMPT
+    assert "context/project-page/handoff.md" in FINALIZATION_PROMPT
+    for stage in ("block", "product", "insights", "decision"):
+        assert f"--stage {stage}" in FINALIZATION_PROMPT
+    assert "Expected vs actual" in FINALIZATION_PROMPT
+    assert "Decision (proposed by AI)" in FINALIZATION_PROMPT
+    assert "insight summary and supported question blocks" not in FINALIZATION_PROMPT

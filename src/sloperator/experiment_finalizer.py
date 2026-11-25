@@ -563,15 +563,27 @@ Execution for the selected experiment:
    in every expected result/stat/funnel and raw users table before continuing. Do not silently use
    stale results. If the calculation fails, is lost, runs past the limit, or the API or the bridge
    is unreachable, stop without publishing partial итогов and report the exact failure.
-3. Run the complete Results → Insights → Decision / Next steps pipeline in this exact order:
-   a. Generate the full publishable Results/Итоги block through `ug-experiment-calculator`,
-      including its required finished-experiment Forecast/audience workflow and maturity checks.
-      Insert it into the correct experiment iteration on the existing project page with Decision,
-      Next steps, and Insights initially empty.
-   b. Use `experiment-insight-research` to perform the full evidence-backed insight research.
-      Insert the insight summary and supported question blocks into that same Results block.
-   c. Only after insights are present, write concise Decision and Next steps grounded in them and
-      insert them into the same block.
+3. Run the complete Results → Insights → Decision / Next steps pipeline in this exact order. The
+   layout of the block is the project page standard in the ug-ai-analyst repository:
+   `context/project-page/results.md` (what each part holds) and `context/project-page/handoff.md`
+   (where to write: the write zone, `write_zone.py`). Follow them and the skills; they override any
+   older layout you see on the page. After each stage re-fetch the page and run
+   `.venv/bin/python .claude/project-page/validate_results.py <fresh storage> --exp-id <id> --stage <stage>`;
+   a FAIL stops the pipeline (report it, do not publish the next stage).
+   a. Generate the full publishable Results block through `ug-experiment-calculator`, including its
+      required finished-experiment Forecast/audience workflow and maturity checks, and write it into
+      this experiment's iteration zone with Decision, Insights and Next steps still empty
+      (`--stage block`). On an older page the zone is the one handoff.md names for it; never rename,
+      open, collapse or move another iteration's block.
+   b. When the page's Experiment design holds a design table, add the Product metrics expand with
+      `ug-experiments-product-results` (`--stage product`).
+   c. Use `experiment-insight-research` for the full evidence-backed research and write Insights in
+      the standard's format: main conclusions, the collapsed `Validity check` and `Concurrent
+      experiments check`, then at most 5 question blocks, the first always `Expected vs actual`,
+      each exactly Question → Answer → one piece of evidence (`--stage insights`).
+   d. Only after Insights are present, write Decision (its Summary opens with
+      `Decision (proposed by AI): …`) and Next steps as its own section after Insights, every bullet
+      resting on a finding published in Insights or its Validity check (`--stage decision`).
    Do not create a separate Confluence child page. Preserve unrelated page content and other
    iterations. Confluence content must be English.
    Save the fetched pre-edit storage body as the publication baseline and run the repository
@@ -584,8 +596,8 @@ Execution for the selected experiment:
    `UG_PUBLISH_GATE_DISABLED`. This narrow exception never permits a defect in this run's block,
    changed surrounding content, invalid XML, a missing baseline, or removal of unrelated content.
 4. Fetch the project page again after the write. Verify that the correct experiment id/iteration
-   contains non-empty Results, Insights, Decision, and Next steps, that storage XML is valid, and
-   that no unrelated block disappeared. If verification fails, report failure and do not announce
+   contains non-empty Results, Insights, Decision, and Next steps, that `validate_results.py
+   --stage decision` passes, that storage XML is valid, and that no unrelated block disappeared. If verification fails, report failure and do not announce
    success.
    Never put local/server paths or links to logs, SQL, scripts, CSVs, ZIPs, or other run artifacts
    into the project-page body. Package useful reader-safe analysis artifacts into one bundle and

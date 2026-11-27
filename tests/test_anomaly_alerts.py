@@ -276,3 +276,15 @@ def test_monetisation_agent_prompt_runs_on_sonnet() -> None:
     assert (parsed.provider, parsed.model) == ("claude", ANOMALY_ANALYSIS_MODEL)
     assert ANOMALY_ANALYSIS_MODEL == "claude-sonnet-5-5"
     assert parsed.prompt.startswith("Use the `time-series-research` skill")
+
+
+def test_monetisation_agent_prompt_carries_monitor_definitions() -> None:
+    batch = AlertBatch("2026-07-25 10:00:00", "100.1")
+    anomaly = Alert("Banner View:from App", "ios", "events", "37", 31923, 23259, "0.001")
+    prompt = build_monetisation_agent_prompt(
+        batch, [(anomaly, {"status": "ok", "verdict": "ANOMALY", "value": 31923, "last_week": 17615})]
+    )
+    assert "`Banner Tour View` + `Banner Upgrade View` + `Splash View`" in prompt
+    assert "`Sale Banner View` is NOT counted" in prompt
+    assert "`Landing Purchase` = `PURCHASE_SUCCESS`" in prompt
+    assert "monitoring_ug_%" in prompt

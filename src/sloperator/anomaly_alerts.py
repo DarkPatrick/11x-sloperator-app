@@ -698,6 +698,34 @@ def confirmed_monetisation_anomalies(
 ANOMALY_ANALYSIS_MODEL = "claude-sonnet-5-5"
 
 
+# How the monitor builds the metrics that launch the analysis (ClickHouse materialized views
+# mview.monitoring_ug_*, read 2026-11-27). The agent got "Banner View:from App" wrong without it.
+MONITOR_METRIC_DEFINITIONS = """\
+How the monitor counts these metrics (hourly; `events` = row count, `uniques` = distinct
+`unified_id`, for All Subscription Events distinct `payment_account_id`). Reproduce a number
+from this definition before explaining it; if it still does not reproduce, read the live view
+with `select create_table_query from system.tables where database = 'mview' and name like
+'monitoring_ug_%'` — the view may have changed.
+- App (`ug_rt_events_app`, source UGT_IOS / UGT_ANDROID; platform from the source):
+  - `Banner View:<from>` = `Banner Tour View` + `Banner Upgrade View` + `Splash View`
+    (sale and offer splashes are `Splash View`; `Sale Banner View` is NOT counted).
+  - `Banner Purchase Click:<from>` = `Banner Purchase Click`.
+  - `Purchase:<from>` = `Purchase Process Finish` (client event, not the subscription).
+  - `:from Tour` when lower(`lc_value`) is `tour install` or the event is
+    `Banner Tour View`; every other row is `:from App`.
+- Web (`ug_rt_events_web`, platform web, bots excluded by `browser`):
+  - `Landing Upgrade Open`, `Tour Start`, `Landing Plans View`, `Landing Checkout View`: the
+    event of that name.
+  - `Landing Purchase` = `PURCHASE_SUCCESS`.
+  - `Landing Sign Up Success` = `Landing Sign Up Success` plus `Account Sign Up Success` with
+    `item` in landing white / landing black / songbooks / courses / print (print added
+    2026-11-19, so earlier weeks count less).
+- `Splash View` on platform `ipad`: web event `Splash View` with platform = 3 and os = ios.
+- `All Subscription Events`: every row of `ug_subscriptions_events` (all event types), platform
+  ios / android / web from the subscription platform.
+"""
+
+
 def build_monetisation_agent_prompt(
     batch: AlertBatch,
     anomalies: list[tuple[Alert, dict[str, Any]]],
@@ -729,6 +757,8 @@ CLAUDE.md, and use its analytics context and data tools.
 Alert timestamp: {batch.alert_dt or "unknown"} UTC
 Confirmed monetisation anomalies:
 {metrics}
+
+{MONITOR_METRIC_DEFINITIONS}
 
 Determine the most likely cause using relevant time-series cuts and supporting evidence.
 Distinguish a persistent/product or technical issue from a one-off fluctuation. Reply in this

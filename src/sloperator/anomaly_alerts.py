@@ -47,7 +47,7 @@ TYPE_MAP = {
 }
 ALERT_DT_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 ALERT_WINDOW_HOURS = 3
-REDASH_QUERY_URL = "https://redash.ultimate-guitar.com/queries/27828/source"
+REDASH_QUERY_URL = "https://redash.mu.se/queries/27828/source"
 REDASH_FRAGMENT = "#56607"
 TABLE_COLUMNS = [
     "metric",
